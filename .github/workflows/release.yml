@@ -1,0 +1,145 @@
+name: Release (Windows installer)
+
+# Builds the torch-free Windows bundle (scripts/build-windows.ps1) and packs the
+# NSIS installer (packaging/windows/syrinx.nsi -> dist/SyrinxSetup-x64.exe), then
+# smoke-tests the installer. The authoritative step list lives in
+# packaging/WINDOWS.md ("A future CI release job would run").
+on:
+  workflow_dispatch:
+  push:
+    tags: ['v*']
+
+# A release build is expensive and produces a versioned artifact — never cancel
+# an in-progress run when another tag lands (unlike ci.yml, which cancels stale
+# branch/PR runs). Serialize per-ref instead.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+# Only reads the repo + uploads build artifacts. Attaching the installer to a
+# GitHub Release (a later enhancement) would need `contents: write` here.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  windows-installer:
+    name: Windows bundle + NSIS installer
+    runs-on: windows-latest
+    # Release Slint builds are slow (winit + femtovg + full LTO codegen), the
+    # embedded-python bundle pulls wheels, and the smoke install unpacks it all —
+    # be generous.
+    timeout-minutes: 90
+    defaults:
+      run:
+        # build-windows.ps1 has `#Requires -Version 7`; pin every step to
+        # PowerShell 7 (pwsh) so the inline steps match what the bundle script needs.
+        shell: pwsh
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml pins stable; keep the install explicit + pre-warmed,
+      # same as ci.yml.
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      # CRITICAL: app only. `--workspace` FAILS on Windows because syrinx-dictate
+      # links gtk4 + gtk4-layer-shell, which are Linux-only. build-windows.ps1
+      # runs the same command, but doing it here lets rust-cache wrap the compile
+      # (and we hand it the finished exe via -SkipCargo below).
+      - name: Build release app binary
+        run: cargo build --release -p syrinx-app
+
+      # build-windows.ps1 bundles sox by globbing the winget package cache
+      # (%LOCALAPPDATA%\Microsoft\WinGet\Packages\ChrisBagwell.SoX*). SoX is a
+      # winget *archive* package, so this extracts sox.exe + DLLs to exactly the
+      # path the script expects. The agreement flags are mandatory for a
+      # non-interactive first winget invocation on the runner.
+      - name: Install SoX (winget archive package the bundle script harvests)
+        run: |
+          winget install --id ChrisBagwell.SoX --exact --source winget `
+            --accept-package-agreements --accept-source-agreements `
+            --disable-interactivity
+          if ($LASTEXITCODE -ne 0) { throw "winget install ChrisBagwell.SoX failed ($LASTEXITCODE)" }
+
+      # Everything else the script needs is self-contained: it downloads the
+      # python.org 3.12 *embeddable* zip and get-pip.py itself (no python on PATH
+      # required), bootstraps pip into that embedded runtime, installs the
+      # torch-free base deps + the engine wheel, and proves `import syrinx_engine`.
+      # -SkipCargo reuses target/release/syrinx-app.exe from the cached build above.
+      - name: Build Windows bundle (dist/syrinx-windows-x64)
+        run: pwsh scripts/build-windows.ps1 -SkipCargo
+
+      # The winget NSIS package needs elevation and fails headless (proven), so
+      # fetch the PINNED portable NSIS zip from SourceForge and run its makensis
+      # directly. The zip carries its own Include/Stubs/Plugins, so MUI2.nsh
+      # resolves relative to makensis.exe. HEAD-verified: the direct-download URL
+      # 302s to a mirror and serves nsis-3.11.zip (2361546 bytes).
+      - name: Pack NSIS installer (portable NSIS)
+        env:
+          NSIS_VERSION: '3.11'
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP "nsis-$env:NSIS_VERSION.zip"
+          $dst = Join-Path $env:RUNNER_TEMP 'nsis'
+          $url = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$env:NSIS_VERSION/nsis-$env:NSIS_VERSION.zip"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dst -Force
+          $makensis = Join-Path $dst "nsis-$env:NSIS_VERSION\makensis.exe"
+          if (-not (Test-Path $makensis)) { throw "makensis.exe not found at $makensis" }
+          # makensis CDs into the script's directory (packaging/windows) before
+          # resolving relative paths, so the .nsi's default BUNDLE/OUTFILE
+          # (..\..\dist\...) land in the repo's dist/ — nothing to override.
+          & $makensis packaging\windows\syrinx.nsi
+          if ($LASTEXITCODE -ne 0) { throw "makensis failed ($LASTEXITCODE)" }
+          if (-not (Test-Path 'dist\SyrinxSetup-x64.exe')) { throw 'installer not produced' }
+
+      # --- code signing would slot HERE (signtool on dist\SyrinxSetup-x64.exe,
+      # and on syrinx-app.exe inside the bundle before makensis) once a cert
+      # exists — mirroring packaging/WINDOWS.md. No cert yet, so the exe/installer
+      # ship unsigned and SmartScreen will warn on first launch.
+
+      # Silent install to a scratch dir, then prove the *installed* embedded
+      # python imports the engine torch-free — the same proof build-windows.ps1
+      # runs at bundle time, but against the NSIS-laid-down tree. NSIS wants /D
+      # last and unquoted; RUNNER_TEMP has no spaces.
+      - name: Smoke — silent install + engine import proof
+        run: |
+          $scratch = Join-Path $env:RUNNER_TEMP 'syrinx-verify'
+          Start-Process -FilePath 'dist\SyrinxSetup-x64.exe' `
+            -ArgumentList '/S', "/D=$scratch" -Wait
+          $py = Join-Path $scratch 'engine\.venv\python.exe'
+          if (-not (Test-Path $py)) { throw "installed interpreter missing at $py" }
+          & $py -c "import syrinx_engine; print('installed engine imports OK (torch-free)')"
+          if ($LASTEXITCODE -ne 0) { throw 'installed engine import proof failed' }
+
+      # OPTIONAL — exercise the CPU first-run (torch + full ML stack: kokoro,
+      # faster-whisper, pedalboard, qwen, transformers, numba). Left commented
+      # out: it downloads well over the "~200 MB" torch alone (the ML stack adds
+      # ~1-2 GB) and ends in a heavy import proof, which the torch-free smoke above
+      # does not need. Enable it (and bump timeout-minutes) to validate first-run
+      # end to end:
+      # - name: Smoke — CPU first-run (torch + ML stack)
+      #   timeout-minutes: 45
+      #   run: |
+      #     $scratch = Join-Path $env:RUNNER_TEMP 'syrinx-verify'
+      #     pwsh (Join-Path $scratch 'syrinx-firstrun.ps1') -Cpu
+      #     if ($LASTEXITCODE -ne 0) { throw 'CPU first-run failed' }
+
+      - name: Upload installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: SyrinxSetup-x64
+          path: dist/SyrinxSetup-x64.exe
+          if-no-files-found: error
+
+      # The unpacked bundle, for debugging a bad installer without re-running the
+      # build. upload-artifact zips the directory on its own.
+      - name: Upload unpacked bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: syrinx-windows-x64-bundle
+          path: dist/syrinx-windows-x64
+          if-no-files-found: error
