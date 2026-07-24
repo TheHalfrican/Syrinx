@@ -55,8 +55,8 @@ effectively met.
 | ⚙ engine knobs (engine-settings.json, GetSettings/SetSetting) | plain JSON file | ✅ | paths seam covers it |
 | Audio playback (sounddevice/PortAudio) | ✅ | ✅ | none |
 | Mic + VC-source recording | app shells out to `parecord`; ⚙ device pickers list PipeWire sources/monitors | Linux-native | **Keep on Linux** (monitor taps are a feature). Win/mac: engine-side sounddevice recording + device enumeration behind the same capture/picker interface |
-| System-audio capture (create-voice, ⇄ song capture) | `parecord --device=<sink>.monitor` | Linux-native | Win: WASAPI loopback · mac: loopback driver (BlackHole) · phase 3. Until then ♫ music mode is import-file-only on Win/mac |
-| Dictation (dictate/) | pw-record + wtype + wlr-layer-shell + compositor keybind | Wayland-native **by design** | **Untouched, permanently.** Win/mac get separate implementations in phase 3; v1 ports ship without dictation |
+| System-audio capture (create-voice, ⇄ song capture) | `parecord --device=<sink>.monitor` | Linux-native | Win: WASAPI loopback ✅ (2026-07-24, app-side `capture_win.rs` — the native twin of parecord; ◉/⚙/♫ affordances unhidden via `system-capture-supported`) · mac: loopback driver (BlackHole), still phase-3-future; ♫ music mode stays import-file-only on mac |
+| Dictation (dictate/) | pw-record + wtype + wlr-layer-shell + compositor keybind | Wayland-native **by design** | **Untouched, permanently.** Win ✅ (2026-07-24, in-app `dictation_win.rs`: Ctrl+Alt+D + SendInput, no pill) · mac still phase-3-future |
 | Paths | XDG (`~/.local/share/syrinx`, XDG_RUNTIME_DIR) | XDG | `platformdirs` (py) + `dirs` (rs) — these ARE OS detection and return the exact current XDG paths on Linux; zero Linux change |
 | Process lifecycle | `setsid nohup` by hand | dev workflow | Linux: keep (optionally graduate to a systemd user unit / D-Bus activation — native polish). Win/mac: app spawns/supervises the engine |
 | Packaging | cargo build + venv by hand | source-first | Per-OS installers, phase 2; Linux stays source-first |
@@ -469,3 +469,44 @@ New gotchas earned:
    the LongPaths/disk-space caveat from phase-2 applies. (Enabling
    Developer Mode or running the download step elevated would restore
    symlink dedup, but that is a packaging/first-run decision.)
+
+**2026-07-24 — Phase 3 on Windows COMPLETE: system capture + dictation.**
+Two Opus agents on disjoint ownership, orchestrator integration on top.
+- **WASAPI loopback system capture** (`app/src/capture_win.rs`, ~430 lines):
+  app-side, the native twin of Linux's parecord — IMMDevice render endpoint
+  (default or the ⚙ System-tap pick) → IAudioClient SHARED+LOOPBACK →
+  drain thread → mono PCM16 WAV (hand-rolled streaming writer, no new dep).
+  Dry loopback reads are zero-padded to wall clock so the wav duration
+  matches how long ◉ was held (WASAPI delivers nothing while the system is
+  silent). `Capture` is now a Windows enum { Engine(mic rec_id) |
+  Loopback }; mic capture still goes through the engine unchanged; the
+  RPC surface is untouched. UI gates flipped from `is-linux` to a new
+  `system-capture-supported` property (Linux+Win true): ◉ Record-system
+  (TR + VC/♫), create-voice System chip, ⚙ System-tap picker (now listing
+  render endpoints). macOS behavior byte-identical to before.
+- **Dictation v1** (`app/src/dictation_win.rs`, ~530 lines): in-app, the
+  second RPC client §1 anticipated (dictate/ is gtk4+zbus and stays
+  Linux-only). Dedicated RegisterHotKey thread (Ctrl+Alt+D, MOD_NOREPEAT;
+  pump does zero engine I/O) → engine mic recording (§14) → Transcribe →
+  optional RefineTranscript (drains its own LlmResult notification stream
+  by req_id, 180s timeout, falls back to raw) → SendInput KEYEVENTF_UNICODE
+  (surrogate pairs handled) with CF_UNICODETEXT clipboard fallback. No pill
+  (cosmetic, per plan). Every failure logs and resets to idle.
+- **Verified**: clippy -D warnings clean; 52 unit/integration tests + 2
+  live smokes green under orchestrator re-run (loopback: 3.01s captured
+  from a real render stream, 98.7% nonzero, rms 0.073; injection: exact
+  readback incl. é + 😀 surrogate pair); live app-level e2e — real app,
+  real supervised engine, real chord: armed → ● recording → whisper on
+  silence → "(no speech detected)" → idle, no crash, engine died with the
+  app on exit.
+- Gotchas earned: windows-crate WAVEFORMATEX is repr(packed) — read fields
+  via addr_of!().read_unaligned() (E0793 otherwise); COM init needs an
+  RAII guard that skips CoUninitialize on RPC_E_CHANGED_MODE; windows 0.62
+  relocations (GlobalFree→Foundation, Error::from_win32→from_thread,
+  BOOL→windows::core, CF_UNICODETEXT is CLIPBOARD_FORMAT — pass .0 as u32);
+  Win11 packaged Notepad has no WM_GETTEXT-able child (test injection
+  against a classic EDIT control — which seeds its buffer from the window
+  caption, pass an empty title); clippy zombie_processes wants wait()
+  after kill() even in tests.
+- Remaining for a mac phase 3: BlackHole detection + Carbon/NSEvent
+  hotkey + CGEventPost — nothing on Windows blocks it.

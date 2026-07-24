@@ -19,6 +19,17 @@ slint::include_modules!();
 #[cfg(not(target_os = "linux"))]
 mod engine_proc;
 
+// Windows system-audio capture is app-side WASAPI loopback (the native twin of
+// Linux's `parecord <sink>.monitor`); the engine still only does mic capture.
+#[cfg(target_os = "windows")]
+mod capture_win;
+
+// Windows global dictation: a hotkey-driven second RPC client (RPC-PROTOCOL.md
+// §1). Linux uses the standalone gtk4/zbus `dictate/` crate instead, so this
+// never compiles there.
+#[cfg(target_os = "windows")]
+mod dictation_win;
+
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
@@ -298,6 +309,10 @@ fn main() -> anyhow::Result<()> {
         // The ENGINE / stop-on-quit card is systemd-specific; hide it on Win/mac
         // where a spawned engine always dies with the app (RPC-PROTOCOL.md §13).
         ui.set_is_linux(cfg!(target_os = "linux"));
+        // System-audio capture exists on Linux (parecord monitor) and Windows
+        // (WASAPI loopback); macOS waits for phase 3. Gates the ◉ Record-system
+        // buttons, the create-voice System chip, and the ⚙ tap picker.
+        ui.set_system_capture_supported(cfg!(any(target_os = "linux", target_os = "windows")));
         // Decorative titlebar chrome, per OS. Linux keeps the authored
         // "hyprland · workspace 3" (the slint default); Win/mac get an
         // equivalently subtle, lowercase string.
@@ -979,6 +994,11 @@ fn main() -> anyhow::Result<()> {
         }
     });
 
+    // Arm Windows global dictation on its own hotkey thread (its own RPC client).
+    // Non-fatal and off the main loop — never blocks startup or the UI.
+    #[cfg(target_os = "windows")]
+    dictation_win::spawn();
+
     ui.run()?;
 
     // Window closed gracefully: hand the GPU back. Re-read config rather than
@@ -1400,36 +1420,64 @@ async fn stop_pw_record(child: &mut tokio::process::Child) {
 // --- capture seam (1.3) --------------------------------------------------
 //
 // The app-side interface the record buttons drive. On Linux it wraps the native
-// `parecord` child writing to an app-chosen wav (byte-identical to before);
-// elsewhere the engine owns the capture (sounddevice) and the wav path comes
-// back on stop. System-audio capture is Linux-only until phase 3 — the "◉
-// Record system" buttons + ⚙ monitor picker are hidden off-Linux, so
-// `capture_start` there is only ever asked for the mic.
+// `parecord` child writing to an app-chosen wav (byte-identical to before); on
+// Windows a `system` capture wraps a native WASAPI loopback thread (the twin of
+// parecord) while the mic still goes through the engine (sounddevice); on macOS
+// the engine owns every capture and system audio is hidden until phase 3.
 
-/// A live capture. Linux owns the `parecord` child; elsewhere it holds the
-/// engine's recording id (the engine owns the wav, path returned on stop).
+/// A live capture. Linux owns the `parecord` child; on Windows it is either the
+/// engine's mic recording id or a WASAPI loopback for system audio; on macOS it
+/// holds the engine's recording id (the engine owns the wav, path on stop).
 #[cfg(target_os = "linux")]
 struct Capture(tokio::process::Child);
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+enum Capture {
+    Engine(String),                 // mic via the engine (rec_id)
+    Loopback(capture_win::Loopback), // system audio via WASAPI loopback
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 struct Capture {
     rec_id: String,
 }
 
 /// Start a capture. `device` is a source name (`.monitor` for system on Linux,
-/// a mic name elsewhere); `None`/`""` = the platform default input.
+/// a render-endpoint id for system on Windows, a mic name otherwise);
+/// `None`/`""` = the platform default. `system` routes Windows to WASAPI
+/// loopback instead of the engine's mic path; Linux/macOS already encode the
+/// choice in `device`.
 #[cfg(target_os = "linux")]
 async fn capture_start(
     _proxy: &EngineClient,
     wav: &str,
     device: Option<&str>,
+    _system: bool,
 ) -> std::io::Result<Capture> {
     start_pw_record(wav, device).await.map(Capture)
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+async fn capture_start(
+    proxy: &EngineClient,
+    wav: &str,
+    device: Option<&str>,
+    system: bool,
+) -> std::io::Result<Capture> {
+    if system {
+        // WASAPI loopback runs entirely app-side; setup is a fast, blocking
+        // handshake (the same shape as spawning parecord on Linux).
+        return capture_win::Loopback::start(device, wav).map(Capture::Loopback);
+    }
+    match proxy.start_recording(device.unwrap_or("")).await {
+        Ok(id) if !id.is_empty() => Ok(Capture::Engine(id)),
+        Ok(_) => Err(std::io::Error::other("device missing or busy")),
+        Err(e) => Err(std::io::Error::other(e.to_string())),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 async fn capture_start(
     proxy: &EngineClient,
     _wav: &str,
     device: Option<&str>,
+    _system: bool,
 ) -> std::io::Result<Capture> {
     match proxy.start_recording(device.unwrap_or("")).await {
         Ok(id) if !id.is_empty() => Ok(Capture { rec_id: id }),
@@ -1446,39 +1494,63 @@ async fn capture_stop(mut cap: Capture, _proxy: &EngineClient, wav: &str) -> Str
     stop_pw_record(&mut cap.0).await;
     wav.to_string()
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+async fn capture_stop(cap: Capture, proxy: &EngineClient, _wav: &str) -> String {
+    match cap {
+        Capture::Engine(id) => proxy.stop_recording(&id).await.unwrap_or_default(),
+        Capture::Loopback(h) => h.stop(),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 async fn capture_stop(cap: Capture, proxy: &EngineClient, _wav: &str) -> String {
     proxy.stop_recording(&cap.rec_id).await.unwrap_or_default()
 }
 
 /// Discard a capture without keeping the file (modal cancel). Linux reaps the
 /// child (the scratch wav is overwritten by the next take); elsewhere the
-/// engine deletes its scratch recording.
+/// engine deletes its scratch recording (or the loopback drops its wav).
 #[cfg(target_os = "linux")]
 async fn capture_discard(mut cap: Capture, _proxy: &EngineClient) {
     stop_pw_record(&mut cap.0).await;
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+async fn capture_discard(cap: Capture, proxy: &EngineClient) {
+    match cap {
+        Capture::Engine(id) => {
+            let _ = proxy.cancel_recording(&id).await;
+        }
+        Capture::Loopback(h) => h.discard(),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 async fn capture_discard(cap: Capture, proxy: &EngineClient) {
     let _ = proxy.cancel_recording(&cap.rec_id).await;
 }
 
 /// Did the capture terminate on its own? Linux polls the `parecord` child;
-/// elsewhere the engine supervises the stream, so death instead surfaces as a
-/// `StopRecording` returning `""`.
+/// Windows loopback polls its drain thread's error flag; the engine mic path
+/// instead surfaces death as a `StopRecording` returning `""`.
 #[cfg(target_os = "linux")]
 fn capture_died(cap: &mut Capture) -> bool {
     matches!(cap.0.try_wait(), Ok(Some(_)))
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+fn capture_died(cap: &mut Capture) -> bool {
+    match cap {
+        Capture::Engine(_) => false,
+        Capture::Loopback(h) => h.died(),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 fn capture_died(_cap: &mut Capture) -> bool {
     false
 }
 
 /// Resolve the capture device for a record request. `system` taps the output
-/// (Linux only); mic uses the ⚙ mic choice (`""` = default). Returns
-/// `(device, ok)` — `ok == false` means "system was requested but no monitor
-/// exists", which only happens on Linux.
+/// (Linux monitor / Windows render endpoint); mic uses the ⚙ mic choice
+/// (`""` = default). Returns `(device, ok)` — `ok == false` means "system was
+/// requested but no monitor exists" (Linux only; Windows always has a default
+/// render endpoint, and the loopback surfaces its own errors).
 #[cfg(target_os = "linux")]
 async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String>, bool) {
     if system {
@@ -1495,9 +1567,21 @@ async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String
         (Some(cfg.mic_device.clone()), true)
     }
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "windows")]
+async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String>, bool) {
+    if system {
+        // The ⚙ "System tap" choice is a render-endpoint id; "" = default.
+        let d = (!cfg.monitor_device.is_empty()).then(|| cfg.monitor_device.clone());
+        (d, true)
+    } else if cfg.mic_device.is_empty() {
+        (None, true)
+    } else {
+        (Some(cfg.mic_device.clone()), true)
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
 async fn resolve_capture_device(cfg: &AppConfig, _system: bool) -> (Option<String>, bool) {
-    // System capture is hidden off-Linux; always the mic.
+    // System capture is hidden on macOS; always the mic.
     if cfg.mic_device.is_empty() {
         (None, true)
     } else {
@@ -2040,7 +2124,7 @@ async fn list_audio_devices(_proxy: &EngineClient) -> (Vec<(String, String)>, Ve
 #[cfg(not(target_os = "linux"))]
 async fn list_audio_devices(proxy: &EngineClient) -> (Vec<(String, String)>, Vec<(String, String)>) {
     // sounddevice ids are name-based (stable across hotplug); the description
-    // is the same name — good enough for the dropdown. No monitors (phase 3).
+    // is the same name — good enough for the dropdown.
     let mut mics = Vec::new();
     if let Ok(json) = proxy.list_recording_devices().await {
         if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
@@ -2053,7 +2137,16 @@ async fn list_audio_devices(proxy: &EngineClient) -> (Vec<(String, String)>, Vec
             }
         }
     }
-    (mics, Vec::new())
+    // Windows lists WASAPI render endpoints as the "monitors" for the ⚙ tap
+    // picker; macOS has none until phase 3. Enumeration is blocking COM, so it
+    // runs on a blocking pool thread.
+    #[cfg(target_os = "windows")]
+    let monitors = tokio::task::spawn_blocking(capture_win::enumerate_render_devices)
+        .await
+        .unwrap_or_default();
+    #[cfg(not(target_os = "windows"))]
+    let monitors = Vec::new();
+    (mics, monitors)
 }
 
 /// Push the ⚙ tab's state to the UI (devices, config, engine knobs).
@@ -3147,10 +3240,10 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::CvStartRecord { system }) => {
-                    // System audio = passive tap of the default sink's monitor
-                    // (Linux only; the ⚙ mic choice wins for mic, "" = default).
+                    // System audio taps the output (Linux monitor / Windows
+                    // loopback); mic uses the ⚙ mic choice ("" = default).
                     let (target, _ok) = resolve_capture_device(&cfg, system).await;
-                    match capture_start(&proxy, &cv_wav, target.as_deref()).await {
+                    match capture_start(&proxy, &cv_wav, target.as_deref(), system).await {
                         Ok(cap) => {
                             cv_rec = Some(cap);
                             rec_elapsed = 0;
@@ -3734,7 +3827,7 @@ async fn run_session(
                                 ui.set_tr_status("no default sink monitor found".into());
                             }).ok();
                         } else {
-                            match capture_start(&proxy, &tr_wav, device.as_deref()).await {
+                            match capture_start(&proxy, &tr_wav, device.as_deref(), system).await {
                                 Ok(cap) => {
                                     tr_rec = Some(cap);
                                     tr_elapsed = 0;
@@ -3903,7 +3996,7 @@ async fn run_session(
                                 ui.set_vc_status("no default sink monitor found".into());
                             }).ok();
                         } else {
-                            match capture_start(&proxy, &vc_wav, device.as_deref()).await {
+                            match capture_start(&proxy, &vc_wav, device.as_deref(), system).await {
                                 Ok(cap) => {
                                     vc_rec = Some(cap);
                                     vc_elapsed = 0;

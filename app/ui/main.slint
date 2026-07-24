@@ -973,6 +973,11 @@ export component AppWindow inherits Window {
     // Win/mac, where a spawned engine always dies with the app (RPC §13). Rust
     // sets this from cfg!(target_os = "linux").
     in property <bool> is-linux: true;
+    // System-audio capture support — Linux (parecord monitor) + Windows (WASAPI
+    // loopback), not macOS yet. SET FROM RUST. Gates the ◉ Record-system
+    // buttons, the create-voice System chip, and the ⚙ tap picker (but NOT the
+    // is-linux ENGINE card or the Hyprland dictation hint).
+    in property <bool> system-capture-supported: true;
     // decorative titlebar chrome — SET FROM RUST per OS (Linux keeps the exact
     // "hyprland · workspace N"; Win/mac get an equivalently subtle string).
     in property <string> desktop-chrome: "hyprland · workspace 3";
@@ -1672,8 +1677,8 @@ export component AppWindow inherits Window {
                                     generate: tr-recording && tr-rec-mode == "mic";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("mic"); } }
                                 }
-                                // system-audio capture is Linux-only until phase 3
-                                if root.is-linux : TBtn {
+                                // system-audio capture: Linux monitor / Windows loopback
+                                if root.system-capture-supported : TBtn {
                                     label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
                                     generate: tr-recording && tr-rec-mode == "system";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("system"); } }
@@ -1907,8 +1912,8 @@ export component AppWindow inherits Window {
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("mic"); } }
                                 }
                                 // system-audio capture (incl. ♫ music from the
-                                // browser) is Linux-only until phase 3
-                                if root.is-linux : TBtn {
+                                // browser): Linux monitor / Windows loopback
+                                if root.system-capture-supported : TBtn {
                                     label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
                                     generate: vc-recording && vc-rec-mode == "system";
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("system"); } }
@@ -2440,8 +2445,8 @@ export component AppWindow inherits Window {
                                             selected(i) => { root.st-pick-mic(i); }
                                         }
                                     }
-                                    // system-audio tap is Linux-only until phase 3
-                                    if root.is-linux : HorizontalLayout {
+                                    // system-audio tap: Linux monitor / Windows render endpoint
+                                    if root.system-capture-supported : HorizontalLayout {
                                         spacing: 12px;
                                         Text { text: "System tap"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 130px; }
                                         ThemedDropdown {
@@ -2926,8 +2931,8 @@ export component AppWindow inherits Window {
                         Text { text: "REFERENCE AUDIO"; font-size: 11px; font-weight: 700; color: Theme.dim; }
                         HorizontalLayout {
                             spacing: 6px;
-                            // "System" audio source is Linux-only until phase 3
-                            for t[i] in (root.is-linux
+                            // "System" audio source: Linux monitor / Windows loopback
+                            for t[i] in (root.system-capture-supported
                                 ? [ { k: "record", l: "Record" }, { k: "upload", l: "Upload" }, { k: "system", l: "System" } ]
                                 : [ { k: "record", l: "Record" }, { k: "upload", l: "Upload" } ]) : Rectangle {
                                 horizontal-stretch: 1; height: 30px; border-radius: Theme.rad;
@@ -2967,7 +2972,7 @@ export component AppWindow inherits Window {
                                 Text {
                                     text: cv-sample-label != "" ? cv-sample-label
                                         : (cv-mode == "upload" ? "Pick a .wav / .mp3 / .flac clip"
-                                        : cv-mode == "system" ? "System audio — use speaker/HDMI output (Bluetooth can't be tapped)"
+                                        : cv-mode == "system" ? "System audio — captures whatever your current output device is playing"
                                         : cv-edit-id != "" ? "Optional — a new clip replaces the current sample"
                                         : "Record 5–30s of clear speech");
                                     font-size: 11px; font-family: Theme.mono; color: Theme.dim;
