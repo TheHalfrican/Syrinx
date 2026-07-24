@@ -464,11 +464,13 @@ New gotchas earned:
    privilege is not held by the client` → download "error". Run downloads
    **sequentially** and they consistently pick copy-mode and succeed
    (whisper-turbo + cv-0.6B both errored concurrently, both succeeded
-   solo). Copy-mode roughly doubles the on-disk cache footprint vs. the
-   network download (e.g. Qwen 0.6B-Base 1.2 GB down → ~2.4 GB on disk) —
-   the LongPaths/disk-space caveat from phase-2 applies. (Enabling
-   Developer Mode or running the download step elevated would restore
-   symlink dedup, but that is a packaging/first-run decision.)
+   solo). CORRECTION (later 2026-07-24, measured across the whole cache):
+   copy-mode does NOT double the footprint — modern huggingface_hub's
+   fallback stores each file once, directly in snapshots/ with blobs/ left
+   empty; the "1.2 GB down → 2.4 GB" comparison was against the catalog's
+   size_mb *estimate*, and the repo is simply ~2.5 GB. Only one repo
+   (Kokoro, older layout) carried a real 0.33 GB blob+snapshot duplicate,
+   deduped to a symlink once Developer Mode was enabled.
 
 **2026-07-24 — Phase 3 on Windows COMPLETE: system capture + dictation.**
 Two Opus agents on disjoint ownership, orchestrator integration on top.

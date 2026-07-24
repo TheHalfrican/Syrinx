@@ -153,9 +153,11 @@ visible in a PowerShell window. It is re-runnable and:
   `snapshot_download`s race that probe and one dies with `WinError 1314` ("A
   required privilege is not held by the client"). The engine therefore runs
   fetches one at a time behind an asyncio lock (`ModelManager._fetch_lock`) —
-  queued models still show as downloading immediately. Copy-mode (the
-  non-symlink fallback) roughly doubles the cache's disk footprint; enabling
-  Developer Mode restores symlink dedup.
+  queued models still show as downloading immediately. The non-symlink
+  fallback stores each file once, directly in `snapshots/` (blobs stay
+  empty) — it does NOT double the cache (2026-07-24 correction of an earlier
+  note; the "doubling" was a catalog size-estimate artifact). Developer Mode
+  gets the native symlink layout, whose real win is dedup across revisions.
 
 ## A future CI release job would run
 
