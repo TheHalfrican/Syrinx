@@ -279,11 +279,22 @@ def _repo_bytes(repo: str, base: "Path | None" = None) -> int:
     return sum(f.stat().st_size for f in blobs.glob("*") if f.is_file())
 
 
+def _amphion_dir() -> "Path":
+    """Mirror vevo_worker.py's resolution: env override, else the data dir."""
+    override = os.environ.get("SYRINX_VEVO_AMPHION")
+    return Path(override) if override else _data_dir() / "vevo" / "Amphion"
+
+
 def _vc_setup_warning(m: "ModelSpec") -> str:
     """Conversion engines that live in isolated venvs need a one-time setup."""
     if m.engine == "seed_vc" and not (_ENGINE_DIR / ".venv-seedvc").exists():
         return "run engine/setup-seedvc.sh first"
-    if m.engine == "vevo_timbre" and not (_ENGINE_DIR / ".venv-vevo").exists():
+    if m.engine == "vevo_timbre" and (
+        # the worker needs BOTH the venv and the Amphion clone (a restored
+        # data dir can have one without the other — 2026-07-24 field report)
+        not (_ENGINE_DIR / ".venv-vevo").exists()
+        or not _amphion_dir().exists()
+    ):
         return "run engine/setup-vevo.sh first"
     return ""
 

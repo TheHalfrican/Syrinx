@@ -143,8 +143,20 @@ def test_vc_setup_warning_clears_once_the_venvs_exist(monkeypatch, tmp_path):
     monkeypatch.setattr(models, "_ENGINE_DIR", tmp_path)
     (tmp_path / ".venv-seedvc").mkdir()
     (tmp_path / ".venv-vevo").mkdir()
+    amphion = tmp_path / "Amphion"
+    amphion.mkdir()
+    monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(amphion))
     assert models._vc_setup_warning(models.spec("seed-vc")) == ""
     assert models._vc_setup_warning(models.spec("vevo-timbre")) == ""
+
+
+def test_vevo_warning_when_the_amphion_clone_is_missing(monkeypatch, tmp_path):
+    """The worker needs the clone, not just the venv — a restored data dir
+    can have one without the other."""
+    monkeypatch.setattr(models, "_ENGINE_DIR", tmp_path)
+    (tmp_path / ".venv-vevo").mkdir()
+    monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(tmp_path / "nope"))
+    assert models._vc_setup_warning(models.spec("vevo-timbre")) == "run engine/setup-vevo.sh first"
 
 
 def test_setup_warning_wins_over_the_hardware_warning(monkeypatch, tmp_path):
