@@ -6,6 +6,12 @@
 
 slint::include_modules!();
 
+// Win/mac own the engine as a supervised child process (RPC-PROTOCOL.md §13);
+// on Linux the engine belongs to systemd + D-Bus activation, so this never
+// compiles there.
+#[cfg(not(target_os = "linux"))]
+mod engine_proc;
+
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -194,6 +200,9 @@ fn main() -> anyhow::Result<()> {
         // the ⚙ toggle reflects config from the start, not just after the tab
         // is first opened (SettingsLoad)
         ui.set_st_stop_engine(cfg.stop_engine_on_quit);
+        // The ENGINE / stop-on-quit card is systemd-specific; hide it on Win/mac
+        // where a spawned engine always dies with the app (RPC-PROTOCOL.md §13).
+        ui.set_is_linux(cfg!(target_os = "linux"));
     }
 
     let history = Rc::new(VecModel::<HistItem>::default());
@@ -877,6 +886,13 @@ fn main() -> anyhow::Result<()> {
     // syrinx_engine`) owns the same bus name but no unit, so `stop` is a
     // harmless no-op failure there and the dev process survives app restarts.
     // Only the graceful path runs this — SIGTERM/pkill skip it by design.
+    //
+    // Linux only: on Win/mac there is no systemd unit and the ⚙ toggle does not
+    // apply. A spawned engine dies with the app because the OS closes the
+    // child's held stdin pipe on our exit, which the SYRINX_SUPERVISED watchdog
+    // (RPC-PROTOCOL.md §13.1) turns into an immediate engine exit; an adopted
+    // engine's stdin was never ours, so it keeps running.
+    #[cfg(target_os = "linux")]
     if load_config().stop_engine_on_quit {
         let _ = std::process::Command::new("systemctl")
             .args(["--user", "stop", "syrinx-engine.service"])
@@ -2049,34 +2065,29 @@ fn fxe_sync(
     .ok();
 }
 
-/// Bring up the engine transport. Linux: the session-bus D-Bus proxy, exactly
-/// as before (the connect attempt is what wakes the engine via D-Bus
-/// activation). Win/mac: the JSON-RPC client, retried with backoff while the
-/// cold-launch splash keeps cycling — the engine is started manually for now
-/// (auto-spawn is a later seam), so "not ready yet" is the normal early state.
-#[cfg(unix)]
-async fn connect_engine(_ui: &slint::Weak<AppWindow>) -> anyhow::Result<EngineClient> {
-    Ok(EngineClient::connect_dbus().await?)
+/// Why a [`run_session`] returned: the UI quit for good, or the engine
+/// transport dropped mid-session (Win/mac then respawn/reconnect).
+enum SessionEnd {
+    /// The command channel closed — the window is gone. Quit.
+    UiQuit,
+    /// The event stream closed — the transport died. Win/mac respawn/reconnect;
+    /// the single-pass Linux worker discards this and exits (a bus drop only,
+    /// never normal operation).
+    TransportLost,
 }
 
-#[cfg(not(unix))]
-async fn connect_engine(_ui: &slint::Weak<AppWindow>) -> anyhow::Result<EngineClient> {
-    loop {
-        match EngineClient::connect_rpc().await {
-            Ok(c) => return Ok(c),
-            Err(e) => {
-                tracing::debug!("engine not ready yet: {e}");
-                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-            }
-        }
-    }
-}
-
-async fn worker(
-    ui: slint::Weak<AppWindow>,
-    mut rx: mpsc::UnboundedReceiver<Cmd>,
-) -> anyhow::Result<()> {
-    let proxy = connect_engine(&ui).await?;
+/// One engine session: connect is already done (the caller owns adopt/spawn),
+/// so consume events, run the initial data loads, and drive the `select!` loop
+/// until the UI quits or the transport drops. The body is byte-identical to the
+/// old inline worker; only the caller decides whether a drop means reconnect.
+async fn run_session(
+    ui: &slint::Weak<AppWindow>,
+    rx: &mut mpsc::UnboundedReceiver<Cmd>,
+    proxy: EngineClient,
+) -> SessionEnd {
+    // Own the weak handle locally so every `&ui` / `ui.…` call site below is
+    // unchanged from when this was `worker(ui, rx)`.
+    let ui = ui.clone();
     let mut events = proxy.events();
 
     let backend = proxy.backend().await.unwrap_or_else(|_| "cpu".into());
@@ -2198,11 +2209,14 @@ async fn worker(
     let mut rec_elapsed: u32 = 0;
     const REC_MAX: u32 = 30;
 
-    loop {
-        tokio::select! {
-            // One unified event stream feeds every arm the nine D-Bus signal
-            // streams used to; the transport (D-Bus or RPC) is invisible here.
-            Some(ev) = events.recv() => match ev {
+    // The one unified event stream feeds every arm the nine D-Bus signal
+    // streams used to; the transport (D-Bus or RPC) is invisible here. The
+    // handling body lives in a local macro so the events arm below stays
+    // readable next to a `None`-means-transport-lost check (a closed channel
+    // ends the session; Win/mac then reconnect, Linux exits — see the two
+    // `worker` fns). It captures the surrounding worker locals by name.
+    macro_rules! handle_event {
+        ($ev:ident) => { match $ev {
                 EngineEvent::AudioLevel { rms, .. } => {
                     let rms = rms as f32;
                     ui.upgrade_in_event_loop(move |ui| ui.set_level(rms)).ok();
@@ -2431,7 +2445,23 @@ async fn worker(
                 // SpeakStarted / PropertiesChanged: the app consumes neither
                 // (the D-Bus path never subscribed to them either).
                 _ => {}
+        } };
+    }
+
+    let end: SessionEnd = loop {
+        tokio::select! {
+            // A closed event stream means the transport dropped. On Win/mac the
+            // supervisor respawns/reconnects (SessionEnd::TransportLost); on
+            // Linux the session bus stays up for the app's life, so this only
+            // ever trips on an abnormal bus drop — ending the session, which the
+            // single-pass Linux worker treats as a plain exit. (tokio's select!
+            // can't `#[cfg]` a branch, so the arm is shared; the behavior split
+            // lives in the two `worker` functions, not here.)
+            ev = events.recv() => match ev {
+                Some(ev) => { handle_event!(ev) }
+                None => break SessionEnd::TransportLost,
             },
+
             _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() || vc_rec.is_some() => {
                 // recorder died on its own (e.g. a suspended monitor source
                 // erroring at first open) — surface it instead of a phantom
@@ -4241,11 +4271,62 @@ async fn worker(
                         }
                     }
                 }
-                None => break,
+                None => break SessionEnd::UiQuit,
             },
-            else => break,
+            else => break SessionEnd::UiQuit,
+        }
+    };
+    end
+}
+
+/// Linux worker: one D-Bus session for the app's life, byte-identical to
+/// before (the connect attempt is what wakes the engine via D-Bus activation).
+/// The engine's lifecycle belongs to systemd, so there is nothing to supervise
+/// and the session-end reason is discarded.
+#[cfg(target_os = "linux")]
+async fn worker(
+    ui: slint::Weak<AppWindow>,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+) -> anyhow::Result<()> {
+    let proxy = EngineClient::connect_dbus().await?;
+    let _ = run_session(&ui, &mut rx, proxy).await;
+    Ok(())
+}
+
+/// Windows/macOS worker: the app owns the engine (RPC-PROTOCOL.md §13). Adopt
+/// or spawn it, run the session, and on a mid-session transport loss tear down
+/// and respawn/reconnect with backoff — re-running the initial data loads each
+/// time. The cold-launch splash is re-shown while a restart is in flight (the
+/// same mechanism that covers the first round-trip); on the initial pass the
+/// splash is already up from launch.
+#[cfg(not(target_os = "linux"))]
+async fn worker(
+    ui: slint::Weak<AppWindow>,
+    mut rx: mpsc::UnboundedReceiver<Cmd>,
+) -> anyhow::Result<()> {
+    let mut sup = engine_proc::EngineSupervisor::new();
+    // None = first pass (adopt-or-spawn); Some(uptime) = reconnect after a drop.
+    let mut reconnect_after: Option<std::time::Duration> = None;
+    loop {
+        let proxy = match reconnect_after.take() {
+            None => sup.adopt_or_spawn().await,
+            Some(uptime) => sup.reconnect(uptime).await,
+        };
+        let started = std::time::Instant::now();
+        match run_session(&ui, &mut rx, proxy).await {
+            SessionEnd::UiQuit => break,
+            SessionEnd::TransportLost => {
+                // Re-show the cold-launch splash while the engine comes back.
+                ui.upgrade_in_event_loop(|ui| ui.set_booting(true)).ok();
+                reconnect_after = Some(started.elapsed());
+            }
         }
     }
+    // Quit: a spawned engine dies with the app (stdin close → watchdog exit);
+    // an adopted one is left running (§13.2/§13.3). This active close+grace+kill
+    // runs when the session ends in-loop; the guaranteed backstop is the OS
+    // closing the child's held stdin on app-process exit (§13.1 watchdog).
+    sup.shutdown().await;
     Ok(())
 }
 

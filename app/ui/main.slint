@@ -969,6 +969,10 @@ export component AppWindow inherits Window {
     in-out property <int> st-mon-index: 0;
     in property <bool> st-refine: false;
     in property <bool> st-stop-engine: true;   // default-on; Rust overwrites from config
+    // The ENGINE / "stop engine on quit" card is systemd-specific — hidden on
+    // Win/mac, where a spawned engine always dies with the app (RPC §13). Rust
+    // sets this from cfg!(target_os = "linux").
+    in property <bool> is-linux: true;
     in property <string> st-export-dir: "";
     in property <string> st-data-dir: "";
     in property <[string]> st-cap-names: ["3:00"];
@@ -2513,8 +2517,8 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "ENGINE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
-                            Rectangle {
+            if root.is-linux : Text { text: "ENGINE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            if root.is-linux : Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
                                 border-radius: Theme.rad; background: Theme.card-bg;

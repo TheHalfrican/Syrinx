@@ -14,7 +14,9 @@ tokio-tungstenite.workspace = true
 dirs.workspace = true
 
 # D-Bus is the Linux-only transport; the crate must still compile on Win/mac.
-[target.'cfg(unix)'.dependencies]
+# Keyed on `target_os = "linux"`, not `unix`: macOS is a unix but rides the
+# RPC transport (MULTIPLATPLAN §1.2), so it must not pull in zbus either.
+[target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
 
 [dev-dependencies]

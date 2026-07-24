@@ -257,8 +257,10 @@ pub(crate) fn notification_to_event(v: &Value) -> Option<EngineEvent> {
 }
 
 /// Resolve the discovery file path: the `SYRINX_RPC_ENDPOINT` override wins,
-/// else the pinned per-OS data/runtime dir + `rpc.json` (spec §2.2).
-fn discovery_path() -> Result<PathBuf, EngineError> {
+/// else the pinned per-OS data/runtime dir + `rpc.json` (spec §2.2). Public so
+/// the Win/mac supervisor can locate both the discovery file (which the spawned
+/// engine rewrites) and, alongside it, the engine log.
+pub fn discovery_path() -> Result<PathBuf, EngineError> {
     if let Ok(p) = std::env::var("SYRINX_RPC_ENDPOINT") {
         if !p.is_empty() {
             return Ok(PathBuf::from(p));

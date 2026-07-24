@@ -274,3 +274,23 @@ client ↔ real app window, on Windows, torch-free venv. First Windows
 portability fixes: `HistoryStore` relative paths now stored `as_posix()`
 (Linux-identical), one test's `os.sysconf` monkeypatch. Next: 1.2 lifecycle
 (app spawns engine on Win), 1.3 recording, 1.4 paths.
+
+**2026-07-24 — Phase 1.2 (lifecycle seam) landed.** Contract in
+RPC-PROTOCOL.md §13. Engine: `SYRINX_SUPERVISED=1` arms a stdin watchdog —
+pipe closes ⇒ remove discovery file, `os._exit(0)`; unset ⇒ byte-identical.
+**Gotcha earned:** a blocking stdin read deadlocks numpy's (and torch's)
+C-extension DLL load on Windows — any thread with a pending read on fd 0
+hangs the load. Watchdog polls `PeekNamedPipe` @200ms on win32, blocking
+read on POSIX. App: `app/src/engine_proc.rs` — adopt-or-spawn (manual
+engines adopted, never killed — dev engines survive quits, same as Linux),
+exe resolution `SYRINX_ENGINE_CMD` → cwd venv → exe-ancestor venv → PATH,
+spawn with piped-held stdin + CREATE_NO_WINDOW, stdout/err → data-dir
+`engine.log`, crash ⇒ respawn 1s→30s backoff + reconnect + re-loads behind
+the splash; quit teardown = the held stdin closing (covers hard kills).
+Transport-selection cfgs narrowed `unix` → `target_os = "linux"` so a
+future mac build lands on RPC+spawn (dictate stays unix/zbus). ⚙
+stop-engine-on-quit card hidden off-Linux (`is-linux` slint property).
+E2E-verified on Windows: cold-spawn over a stale rpc.json / mid-session
+kill → auto-respawn / app kill → engine exits + file cleaned / manual
+engine adopted and survives. 292 pytest @ 95.77%, 44+5 cargo, clippy zero.
+Next: 1.3 recording (sounddevice), 1.4 paths (platformdirs/dirs).

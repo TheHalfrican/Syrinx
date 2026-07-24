@@ -15,8 +15,15 @@ import asyncio
 import logging
 import os
 import sys
+import threading
+import time
 
 log = logging.getLogger("syrinx.engine")
+
+_UNSET = object()
+
+# How often the Windows watchdog peeks the parent pipe (see _start_stdin_watchdog).
+_WATCHDOG_POLL_SECONDS = 0.2
 
 
 def _transport() -> str:
@@ -24,6 +31,104 @@ def _transport() -> str:
     if override:
         return override.lower()
     return "dbus" if sys.platform == "linux" else "rpc"
+
+
+# --- supervised lifecycle (spec §13.1) ------------------------------------
+
+
+def _supervised() -> bool:
+    """True when the app spawned us as a supervised child (Win/mac, seam 1.2).
+    Linux/systemd never sets this, so the D-Bus path is untouched."""
+    return os.environ.get("SYRINX_SUPERVISED") == "1"
+
+
+def _start_stdin_watchdog(on_parent_gone, *, stdin=_UNSET, _exit=os._exit) -> bool:
+    """Under ``SYRINX_SUPERVISED=1`` the parent keeps our stdin an open pipe it
+    never writes to; when the pipe closes (parent quit or crash) we know the
+    parent is gone. A daemon thread watches that pipe and, when it closes, runs
+    ``on_parent_gone`` (explicit cleanup — e.g. removing the discovery file) and
+    then ``os._exit(0)``. The explicit cleanup is required because ``_exit``
+    skips ``finally``/``atexit``.
+
+    Detection is OS-specific by necessity:
+
+    * **Windows** — we must *not* leave a blocking read pending on the stdin
+      handle. Native-extension DLL loads (numpy at boot, torch during warmup)
+      touch fd 0 during their init, and a pending ``ReadFile`` on that handle
+      deadlocks the load (verified). So we *poll* the pipe with
+      ``PeekNamedPipe`` and ``time.sleep`` between peeks — the handle is only
+      touched instantaneously, never held. A non-pipe stdin (a dev console)
+      fails the peek and is treated as "cannot watch".
+    * **POSIX** (macOS; Linux never supervises) — ``dlopen`` doesn't touch
+      fd 0, so a plain blocking ``os.read`` is safe and simplest.
+
+    ``stdin``/``_exit`` are test seams. Returns ``True`` if the watchdog was
+    armed. If stdin is unusable (``None``, no file descriptor, or — on Windows —
+    not a pipe: a frozen/windowed/console context), we cannot watch the parent:
+    log a warning and return ``False`` **without exiting** (conservative — a
+    missing watch must not itself take the engine down)."""
+    stream = sys.stdin if stdin is _UNSET else stdin
+    if stream is None:
+        log.warning("SYRINX_SUPERVISED=1 but sys.stdin is None; "
+                    "cannot watch parent — continuing unsupervised")
+        return False
+    try:
+        fd = stream.fileno()
+    except (OSError, ValueError, AttributeError):
+        log.warning("SYRINX_SUPERVISED=1 but sys.stdin has no file descriptor; "
+                    "cannot watch parent — continuing unsupervised")
+        return False
+
+    if os.name == "nt":
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+
+        try:
+            handle = msvcrt.get_osfhandle(fd)
+        except OSError:
+            log.warning("SYRINX_SUPERVISED=1 but stdin has no OS handle; "
+                        "cannot watch parent — continuing unsupervised")
+            return False
+
+        def _pipe_open() -> bool:
+            # PeekNamedPipe succeeds (nonzero) while the write end is open — even
+            # with bytes buffered; it fails once the pipe is broken/closed, or if
+            # the fd is not a pipe at all.
+            avail = wintypes.DWORD(0)
+            return bool(kernel32.PeekNamedPipe(
+                wintypes.HANDLE(handle), None, 0, None, ctypes.byref(avail), None))
+
+        if not _pipe_open():
+            log.warning("SYRINX_SUPERVISED=1 but stdin is not a readable pipe; "
+                        "cannot watch parent — continuing unsupervised")
+            return False
+
+        def _wait_for_parent() -> None:
+            while _pipe_open():
+                time.sleep(_WATCHDOG_POLL_SECONDS)
+    else:
+        def _wait_for_parent() -> None:
+            # b"" == EOF (parent gone); a byte on the pipe (contract says none is
+            # ever written) just loops and keeps waiting.
+            try:
+                while os.read(fd, 1):
+                    pass
+            except OSError:  # read error == parent gone
+                pass
+
+    def _watch() -> None:
+        _wait_for_parent()
+        try:
+            on_parent_gone()
+        except Exception:  # noqa: BLE001 — cleanup is best-effort; still exit
+            log.exception("stdin watchdog cleanup failed")
+        _exit(0)
+
+    threading.Thread(target=_watch, name="syrinx-stdin-watchdog", daemon=True).start()
+    return True
 
 
 async def _run_dbus() -> None:
@@ -48,6 +153,13 @@ async def _run_dbus() -> None:
 
 async def _run_rpc() -> None:
     from . import rpc
+
+    if _supervised():
+        # Arm before serving so a parent that dies mid-boot still triggers
+        # cleanup. The path resolves identically to the one start_server writes
+        # (both go through discovery_path(), honoring SYRINX_RPC_ENDPOINT).
+        path = rpc.discovery_path()
+        _start_stdin_watchdog(lambda: rpc.remove_discovery(path))
 
     await rpc.run()
 

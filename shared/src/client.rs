@@ -16,7 +16,9 @@ use serde_json::json;
 use tokio::sync::mpsc;
 
 enum Transport {
-    #[cfg(unix)]
+    // D-Bus is Linux-only; macOS (a unix) uses RPC, so gate on the OS, not
+    // `unix` (MULTIPLATPLAN §1.2).
+    #[cfg(target_os = "linux")]
     Dbus(crate::dbus_client::DbusClient),
     Rpc(crate::rpc_client::RpcClient),
 }
@@ -31,7 +33,7 @@ pub struct EngineClient {
 
 impl EngineClient {
     /// Connect over the session bus and wrap the zbus proxy (Linux).
-    #[cfg(unix)]
+    #[cfg(target_os = "linux")]
     pub async fn connect_dbus() -> Result<Self, EngineError> {
         let (client, rx) = crate::dbus_client::DbusClient::connect().await?;
         Ok(Self {
@@ -71,7 +73,7 @@ macro_rules! engine_methods {
             $(
                 pub async fn $name(&self, $($arg: $ty),*) -> Result<$ret, EngineError> {
                     match &self.transport {
-                        #[cfg(unix)]
+                        #[cfg(target_os = "linux")]
                         Transport::Dbus(c) => c.proxy.$name($($arg),*).await.map_err(EngineError::from),
                         Transport::Rpc(c) => c.call($rpc, vec![$(json!($arg)),*]).await,
                     }

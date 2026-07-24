@@ -5309,6 +5309,7 @@ name = "syrinx-app"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "futures-util",
  "image",
  "rfd",
  "serde",
@@ -5317,6 +5318,7 @@ dependencies = [
  "slint-build",
  "syrinx-shared",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]

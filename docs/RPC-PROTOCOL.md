@@ -590,3 +590,56 @@ contract, not accident:
 Client-side notes: the Rust client rebuilds the URL from the discovery `port`
 (ignoring `url` and `pid`), reserves request id 0 for `Authenticate`, and
 starts app requests at 1.
+
+---
+
+## 13. Supervised lifecycle (seam 1.2 — Win/mac engine spawning)
+
+On Linux the engine's lifecycle belongs to systemd + D-Bus activation and
+none of this section applies. On Windows/macOS the app owns the engine as a
+supervised child process (MULTIPLATPLAN §1.2).
+
+### 13.1 Supervised mode (engine side)
+
+- The parent sets `SYRINX_SUPERVISED=1` in the child's environment and keeps
+  the child's **stdin an open pipe it never writes to**.
+- Under `SYRINX_SUPERVISED=1` the engine runs a stdin watchdog (daemon
+  thread blocking on a read): stdin EOF/error means the parent is gone —
+  the engine **removes the discovery file explicitly, then exits
+  immediately** (`os._exit(0)`; the explicit cleanup is required because
+  `_exit` skips `finally`). This covers app crashes as well as graceful
+  quits — the pipe closes either way.
+- Without the env var, behavior is exactly as before (manual/dev engines are
+  never tied to any app).
+
+### 13.2 Adopt-or-spawn (app side)
+
+1. Try the discovery file + connect + `Authenticate` first. Success ⇒ an
+   engine is already running (dev flow): **adopt it — do not supervise it,
+   do not kill it on quit** (the Windows analog of Linux's "manual dev
+   engines survive app quits").
+2. Any failure (no file, stale file from a hard kill, refused connect, bad
+   token) ⇒ treat as absent and **spawn**, resolving the engine executable
+   in this order:
+   1. `SYRINX_ENGINE_CMD` — absolute path to the engine executable, used
+      verbatim (dev/CI override);
+   2. `engine/.venv/Scripts/syrinx-engine.exe` (Windows) /
+      `engine/.venv/bin/syrinx-engine` (mac) relative to the current
+      working directory;
+   3. the same, relative to each ancestor of the app executable's directory
+      (covers `target/debug/syrinx-app.exe` in a checkout);
+   4. `syrinx-engine` on `PATH`.
+3. After spawning: poll connect-with-handshake with backoff; the first
+   successful `Authenticate` + `GetBackend` round-trip is readiness (§7.3).
+   The pre-existing stale discovery file, if any, is irrelevant — the child
+   rewrites it on boot.
+
+### 13.3 Supervision (app side)
+
+- Spawned child exits unexpectedly ⇒ respawn with exponential backoff
+  (1 s doubling to a 30 s cap, reset after 60 s of stable uptime), then
+  reconnect and re-run the initial data loads. No tight crash loops.
+- App quits ⇒ close the child's stdin (the watchdog exits the engine); if
+  the process is still alive after a short grace (~3 s), kill it.
+- An **adopted** (externally started) engine whose socket drops is treated
+  like case 2 above: fall through to spawn.

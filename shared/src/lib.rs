@@ -14,12 +14,18 @@ mod client;
 mod error;
 mod event;
 mod rpc_client;
-#[cfg(unix)]
+// D-Bus is Linux-only; macOS (a unix) rides the RPC transport, so gate on
+// `target_os = "linux"`, not `unix` (MULTIPLATPLAN §1.2).
+#[cfg(target_os = "linux")]
 mod dbus_client;
 
 pub use client::EngineClient;
 pub use error::EngineError;
 pub use event::EngineEvent;
+/// The engine discovery-file path (RPC-PROTOCOL.md §2.2). Exposed so the
+/// Win/mac supervisor can place the engine log alongside it and honor the same
+/// `SYRINX_RPC_ENDPOINT` override.
+pub use rpc_client::discovery_path;
 
 /// A voice the engine can speak with (built-in or a cloned profile).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -41,7 +47,7 @@ pub enum Backend {
 /// `zbus` generates the method/signal/property plumbing from this trait. Linux
 /// only — the D-Bus transport is unix-native; `syrinx-dictate` uses this proxy
 /// directly, and the `EngineClient` seam wraps it (see `dbus_client`).
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[zbus::proxy(
     interface = "sh.syrinx.Engine1",
     default_service = "sh.syrinx.Engine",

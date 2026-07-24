@@ -23,8 +23,8 @@ pub enum EngineError {
     Transport(String),
 
     /// The raw D-Bus error, wrapped so `Display` is byte-identical to
-    /// `zbus::Error::to_string()` (Linux only).
-    #[cfg(unix)]
+    /// `zbus::Error::to_string()` (Linux only — macOS rides the RPC transport).
+    #[cfg(target_os = "linux")]
     Dbus(zbus::Error),
 }
 
@@ -32,7 +32,7 @@ impl fmt::Display for EngineError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             EngineError::Engine(m) | EngineError::Transport(m) => f.write_str(m),
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             EngineError::Dbus(e) => write!(f, "{e}"),
         }
     }
@@ -41,14 +41,14 @@ impl fmt::Display for EngineError {
 impl std::error::Error for EngineError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            #[cfg(unix)]
+            #[cfg(target_os = "linux")]
             EngineError::Dbus(e) => Some(e),
             _ => None,
         }
     }
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 impl From<zbus::Error> for EngineError {
     fn from(e: zbus::Error) -> Self {
         EngineError::Dbus(e)

@@ -20,3 +20,10 @@ rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "a
 
 [build-dependencies]
 slint-build = "1.8"
+
+# The engine-supervisor tests (Win/mac only) drive the real connect path
+# against an in-process fake WS engine and spawn stub children.
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "sync", "time", "process"] }
+tokio-tungstenite.workspace = true
+futures-util.workspace = true
