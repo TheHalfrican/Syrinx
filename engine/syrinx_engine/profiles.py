@@ -105,6 +105,51 @@ class ProfileStore:
         c.execute("PRAGMA foreign_keys=ON")
         return c
 
+    # --- avatar path portability (mirrors HistoryStore._rel/_abs, phase 1.4) --
+    #
+    # Avatars are stored RELATIVE to the data dir (as_posix) so a data snapshot
+    # moved between machines/OSes still resolves. Legacy rows hold an absolute
+    # path from the machine that created them; on read we resolve it, and if it
+    # no longer exists we re-root its ``profiles/<id>/<file>`` tail under the
+    # current data dir — a one-time lazy migration for restored snapshots.
+
+    def _rel(self, p: str | Path) -> str:
+        # forward slashes so the stored path stays portable across OSes
+        # (Linux: as_posix() == the old absolute-relative value once joined).
+        return Path(p).relative_to(self._dir).as_posix()
+
+    def _reroot(self, stored: str, profile_id: str) -> Path | None:
+        """Re-root a foreign absolute path onto this data dir by matching the
+        ``profiles/<id>/<file>`` (or trailing ``profiles/...``) suffix."""
+        norm = stored.replace("\\", "/")
+        marker = f"profiles/{profile_id}/"
+        i = norm.find(marker)
+        if i == -1:
+            i = norm.rfind("profiles/")
+        return (self._dir / norm[i:]) if i != -1 else None
+
+    def _resolve_avatar(self, stored: str, profile_id: str) -> str:
+        """Map a stored avatar path to an absolute path on THIS machine.
+
+        Blank stays blank. A path that exists as-is (Linux-native today, or a
+        Windows-absolute row) is returned verbatim; a relative row resolves
+        under the data dir; a stale foreign-absolute row is re-rooted. When
+        nothing is on disk we still return the most likely intended location
+        so the row is stable — the app renders a blank avatar when the file
+        can't be opened."""
+        if not stored:
+            return ""
+        # `self._dir / stored`: a relative row lands under the data dir; an
+        # absolute row (with drive/root) replaces and is returned unchanged —
+        # so on Linux an existing absolute path is byte-identical to before.
+        cand = self._dir / stored
+        if cand.exists():
+            return str(cand)
+        rerooted = self._reroot(stored, profile_id)
+        if rerooted is not None and rerooted.exists():
+            return str(rerooted)
+        return str(rerooted) if rerooted is not None else str(cand)
+
     def _init_schema(self) -> None:
         with self._conn() as c:
             c.executescript(
@@ -192,7 +237,7 @@ class ProfileStore:
             preset_engine=row["preset_engine"],
             preset_voice_id=row["preset_voice_id"],
             created_at=row["created_at"] or 0.0,
-            avatar_path=row["avatar_path"] or "",
+            avatar_path=self._resolve_avatar(row["avatar_path"] or "", row["id"]),
             avatar_mode=row["avatar_mode"] or "circle",
             avatar_sx=row["avatar_sx"] or 0,
             avatar_sy=row["avatar_sy"] or 0,
@@ -243,6 +288,7 @@ class ProfileStore:
         p = self.get(profile_id)
         if not p:
             raise ValueError(f"unknown profile: {profile_id}")
+        # p.avatar_path is already resolved to an absolute path on this machine.
         path = p.avatar_path
         if src and src != p.avatar_path:
             dest_dir = self._profiles_dir / profile_id
@@ -255,11 +301,19 @@ class ProfileStore:
             path = str(dest)
         if mode not in ("circle", "panel"):
             mode = "circle"
+        # Store RELATIVE to the data dir (portable across OSes); this also
+        # migrates a legacy absolute row to relative the next time it's touched.
+        stored = path
+        if path:
+            try:
+                stored = self._rel(path)
+            except ValueError:
+                stored = path  # outside the data dir (shouldn't happen) — keep as-is
         with self._conn() as c:
             c.execute(
                 "UPDATE profiles SET avatar_path=?, avatar_mode=?, avatar_sx=?, avatar_sy=?, "
                 "avatar_side=?, avatar_sh=? WHERE id=?",
-                (path, mode, sx, sy, sw, sh, profile_id),
+                (stored, mode, sx, sy, sw, sh, profile_id),
             )
 
     # --- export / import ------------------------------------------------

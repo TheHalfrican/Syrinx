@@ -973,6 +973,9 @@ export component AppWindow inherits Window {
     // Win/mac, where a spawned engine always dies with the app (RPC §13). Rust
     // sets this from cfg!(target_os = "linux").
     in property <bool> is-linux: true;
+    // decorative titlebar chrome — SET FROM RUST per OS (Linux keeps the exact
+    // "hyprland · workspace N"; Win/mac get an equivalently subtle string).
+    in property <string> desktop-chrome: "hyprland · workspace 3";
     in property <string> st-export-dir: "";
     in property <string> st-data-dir: "";
     in property <[string]> st-cap-names: ["3:00"];
@@ -1021,7 +1024,7 @@ export component AppWindow inherits Window {
                 Text { text: "Syrinx"; font-size: 13px; font-weight: 600; color: Theme.tb-fg; vertical-alignment: center; }
                 Text { text: "— local AI voice studio"; font-size: 11.5px; color: Theme.tb-fg; opacity: 0.65; vertical-alignment: center; }
                 Rectangle {}
-                Text { text: "hyprland · workspace 3"; font-size: 10.5px; font-family: Theme.mono; color: Theme.tb-fg; opacity: 0.55; vertical-alignment: center; }
+                Text { text: root.desktop-chrome; font-size: 10.5px; font-family: Theme.mono; color: Theme.tb-fg; opacity: 0.55; vertical-alignment: center; }
             }
         }
 
@@ -2467,7 +2470,9 @@ export component AppWindow inherits Window {
                                             clicked => { root.st-toggle-refine(); }
                                         }
                                     }
-                                    HorizontalLayout {
+                                    // the compositor keybind hint is Hyprland-specific; hide it
+                                    // off-Linux, where dictation ships in phase 3 (RPC §—).
+                                    if root.is-linux : HorizontalLayout {
                                         spacing: 6px;
                                         Text {
                                             text: "Hyprland bind:  bind = SUPER, D, exec, syrinx-dictate toggle";

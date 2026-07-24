@@ -5,7 +5,10 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-slint = "1.8"
+# unstable-fontique-010: run-time font registration + script fallback, used to
+# bundle a symbol fallback font on non-Linux (Linux keeps fontconfig). This API
+# is only present from slint 1.17, hence the bumped floor.
+slint = { version = "1.17", features = ["unstable-fontique-010"] }
 syrinx-shared.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

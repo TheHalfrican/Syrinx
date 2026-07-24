@@ -173,6 +173,50 @@ def test_set_avatar_on_an_unknown_profile_raises(tmp_path):
         ProfileStore().set_avatar("nope", str(photo(tmp_path)), "circle", 0, 0, 1, 1)
 
 
+def test_new_avatars_are_stored_relative_but_read_back_absolute(isolated_env, tmp_path):
+    """Portable rows: the DB holds a data-dir-relative posix path, while the
+    profile still hands the app an absolute path that exists on this box."""
+    store = ProfileStore()
+    pid = store.create("Piccolo", "cloned")
+    store.set_avatar(pid, str(photo(tmp_path)), "circle", 0, 0, 10, 10)
+    with sqlite3.connect(isolated_env / "syrinx.db") as c:
+        raw = c.execute("SELECT avatar_path FROM profiles WHERE id=?", (pid,)).fetchone()[0]
+    assert raw == f"profiles/{pid}/avatar.png"  # relative, forward slashes
+    p = store.get(pid)
+    assert Path(p.avatar_path).is_absolute() and Path(p.avatar_path).exists()
+
+
+def test_a_foreign_absolute_row_is_rerooted_and_migrated(isolated_env, tmp_path):
+    """A restored snapshot leaves a /home/... path in the DB, but the copied
+    pixels under profiles/<id>/ came along — resolve re-roots onto this box,
+    and the next write migrates the row to the portable relative form."""
+    store = ProfileStore()
+    pid = store.create("Piccolo", "cloned")
+    store.set_avatar(pid, str(photo(tmp_path)), "panel", 1, 2, 3, 4)
+    foreign = f"/home/someone/.local/share/syrinx/profiles/{pid}/avatar.png"
+    with sqlite3.connect(isolated_env / "syrinx.db") as c:
+        c.execute("UPDATE profiles SET avatar_path=? WHERE id=?", (foreign, pid))
+    p = store.get(pid)
+    assert Path(p.avatar_path).exists()
+    assert p.avatar_path.replace("\\", "/").endswith(f"profiles/{pid}/avatar.png")
+
+    store.set_avatar(pid, "", "panel", 1, 2, 3, 4)  # crop-only touch → migrates
+    with sqlite3.connect(isolated_env / "syrinx.db") as c:
+        raw = c.execute("SELECT avatar_path FROM profiles WHERE id=?", (pid,)).fetchone()[0]
+    assert raw == f"profiles/{pid}/avatar.png"
+
+
+def test_a_missing_avatar_resolves_gracefully(tmp_path):
+    """Case (b): the source pixels never made it across — resolution never
+    raises, and the app renders a blank avatar rather than crashing."""
+    store = ProfileStore()
+    pid = store.create("Piccolo", "cloned")
+    store.set_avatar(pid, str(photo(tmp_path)), "circle", 0, 0, 10, 10)
+    Path(store.get(pid).avatar_path).unlink()
+    p = store.get(pid)  # must not raise
+    assert not Path(p.avatar_path).exists()
+
+
 # --- export / import -----------------------------------------------------
 
 

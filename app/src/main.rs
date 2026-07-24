@@ -4,6 +4,13 @@
 //! connection to `sh.syrinx.Engine1`. Theme switching and tab nav are pure UI
 //! (Slint globals); voices, generate, level, and history cross the bridge.
 
+// Release builds on Windows detach from the console — the "Syrinx (dev)"
+// shortcut launches the release exe, and a stray terminal window alongside the
+// app is user-visible noise. Debug builds keep stdout so `cargo run` still
+// streams tracing. Linux and macOS are unaffected. (Engine stdout/err already
+// go to engine.log with CREATE_NO_WINDOW, seam 1.2 — no console reappears.)
+#![cfg_attr(all(not(debug_assertions), target_os = "windows"), windows_subsystem = "windows")]
+
 slint::include_modules!();
 
 // Win/mac own the engine as a supervised child process (RPC-PROTOCOL.md §13);
@@ -134,6 +141,14 @@ struct AppConfig {
     /// activation brings it straight back on the next launch.
     #[serde(default = "default_true")]
     stop_engine_on_quit: bool,
+    /// Non-Linux HiDPI escape hatch. Forces the winit scale factor (via
+    /// SLINT_SCALE_FACTOR) at startup. `0.0` = unset → the app compensates the
+    /// OS scale down to 1.0 so the perceived density matches the Linux
+    /// reference. Set e.g. `1.25` for a slightly larger UI. File-only for now
+    /// (`%APPDATA%\syrinx\settings.json`); applies on the next launch. Ignored
+    /// on Linux, where native scaling is left completely untouched.
+    #[serde(default)]
+    ui_scale: f32,
 }
 
 // hand-rolled (not derived) so `stop_engine_on_quit` is true with no file at
@@ -147,6 +162,7 @@ impl Default for AppConfig {
             refine_dictation: false,
             export_dir: String::new(),
             stop_engine_on_quit: true,
+            ui_scale: 0.0,
         }
     }
 }
@@ -221,7 +237,47 @@ fn save_config(cfg: &AppConfig) {
 fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
+    // --- HiDPI scale compensation (non-Linux only) ---
+    // The UI was authored at the Hyprland density (scale ≈ 1.0). Windows/mac
+    // report the monitor's OS scaling (e.g. 1.5–2.0), which makes every element
+    // that much larger — the "zoomed in, cramped" report. Force the winit
+    // backend's scale factor via SLINT_SCALE_FACTOR *before* the window exists
+    // (the only reliable override in slint 1.17; a runtime ScaleFactorChanged
+    // event gets reverted by the next monitor event). Default target 1.0 =
+    // match the Linux reference; `ui_scale` in settings.json overrides it.
+    // Linux never enters this block: no env var, native scaling untouched.
+    #[cfg(not(target_os = "linux"))]
+    let (ui_scale_cfg, scale_target) = {
+        let cfg = load_config();
+        let target = if cfg.ui_scale > 0.0 { cfg.ui_scale } else { 1.0 };
+        std::env::set_var("SLINT_SCALE_FACTOR", format!("{target}"));
+        (cfg.ui_scale, target)
+    };
+
     let ui = AppWindow::new()?;
+
+    // winit has made the process per-monitor-DPI-aware by now, so os_native_scale
+    // reads true (independent of SLINT_SCALE_FACTOR). The actual winit window is
+    // only created once the event loop runs, so scale_factor() here would still
+    // read the pre-creation default — a single-shot timer logs the applied value
+    // after first paint instead. Then register the bundled fallback fonts.
+    #[cfg(not(target_os = "linux"))]
+    {
+        tracing::info!(
+            "ui-scale: os-native≈{:.3} → forcing effective={:.3} via SLINT_SCALE_FACTOR (ui_scale cfg={}, {})",
+            os_native_scale(),
+            scale_target,
+            ui_scale_cfg,
+            if ui_scale_cfg > 0.0 { "override" } else { "default→1.0" },
+        );
+        register_fallback_fonts();
+        let w = ui.as_weak();
+        slint::Timer::single_shot(std::time::Duration::from_millis(700), move || {
+            if let Some(ui) = w.upgrade() {
+                tracing::info!("ui-scale: applied window scale_factor={:.3}", ui.window().scale_factor());
+            }
+        });
+    }
 
     // wayland app_id — must match the desktop file's basename (syrinx.desktop)
     // so launchers/taskbars associate the window. Must come AFTER
@@ -242,6 +298,13 @@ fn main() -> anyhow::Result<()> {
         // The ENGINE / stop-on-quit card is systemd-specific; hide it on Win/mac
         // where a spawned engine always dies with the app (RPC-PROTOCOL.md §13).
         ui.set_is_linux(cfg!(target_os = "linux"));
+        // Decorative titlebar chrome, per OS. Linux keeps the authored
+        // "hyprland · workspace 3" (the slint default); Win/mac get an
+        // equivalently subtle, lowercase string.
+        #[cfg(target_os = "windows")]
+        ui.set_desktop_chrome("windows 11 · desktop 1".into());
+        #[cfg(target_os = "macos")]
+        ui.set_desktop_chrome("macos · space 1".into());
     }
 
     let history = Rc::new(VecModel::<HistItem>::default());
@@ -938,6 +1001,61 @@ fn main() -> anyhow::Result<()> {
             .status();
     }
     Ok(())
+}
+
+/// The monitor's OS scale factor, for the diagnostic scale log. Read *after*
+/// window creation (winit has set per-monitor-DPI awareness by then, so the
+/// value is real, not clamped to 96 dpi); SLINT_SCALE_FACTOR does not affect it.
+#[cfg(target_os = "windows")]
+fn os_native_scale() -> f64 {
+    // user32!GetDpiForSystem (Win10 1607+): 96 dpi == scale 1.0.
+    extern "system" {
+        fn GetDpiForSystem() -> u32;
+    }
+    (unsafe { GetDpiForSystem() } as f64) / 96.0
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+fn os_native_scale() -> f64 {
+    // mac: no cheap pre-query; the effective window scale in the same log line
+    // is the meaningful number there.
+    f64::NAN
+}
+
+/// Bundle DejaVu Sans (broad symbol coverage) plus a tiny merged Noto subset
+/// (⏸ ⏻ ⧉ ＋ — the four glyphs DejaVu lacks) as *fallback* fonts. On Linux
+/// fontconfig already resolves these symbols to DejaVu; the femtovg text stack
+/// on Windows/mac does not fall back to system fonts, so the glyphs render as
+/// tofu. Registering as fallback only (not as the default family) means the
+/// themes' own font choices (Tahoma for the '95 skin, etc.) keep winning for
+/// every glyph they cover — only genuinely-missing glyphs reach these fonts.
+///
+/// Slint's shaper groups Common-script symbols with the surrounding run (Latin
+/// for the UI's text) or keeps them Common when a Text holds only a glyph, so
+/// the fallback is appended for both "Latn" and "Zyyy".
+///
+/// Gated off Linux entirely so Linux keeps its exact fontconfig glyph selection.
+#[cfg(not(target_os = "linux"))]
+fn register_fallback_fonts() {
+    use slint::fontique_010::fontique;
+    let mut collection = slint::fontique_010::shared_collection();
+    for bytes in [
+        include_bytes!("../ui/fonts/DejaVuSans.ttf").as_slice(),
+        include_bytes!("../ui/fonts/SyrinxFallback.ttf").as_slice(),
+    ] {
+        let blob = fontique::Blob::new(std::sync::Arc::new(bytes.to_vec()));
+        let families: Vec<_> = collection
+            .register_fonts(blob, None)
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
+        for script in ["Latn", "Zyyy"] {
+            collection.append_fallbacks(
+                fontique::FallbackKey::new(fontique::Script::from_str_unchecked(script), None),
+                families.iter().copied(),
+            );
+        }
+    }
+    tracing::info!("registered bundled fallback fonts (DejaVu Sans + Syrinx symbols)");
 }
 
 fn voice_name(ui: &AppWindow, id: &str) -> String {
