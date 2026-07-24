@@ -11,15 +11,31 @@ PCM, so we don't marshal seconds of audio over D-Bus.
 import asyncio
 import logging
 import os
+import shutil
 import sys
 from pathlib import Path
 
 log = logging.getLogger("syrinx.engine.stt")
 
 
-def _cublas_bin_dirs() -> list:
-    """Candidate ``nvidia/cublas/bin`` dirs under the running interpreter's
-    site-packages (the pip-installed ``nvidia-cublas-cu12`` wheel)."""
+# The cu12 CUDA DLLs CTranslate2 4.8.x needs at GPU-encode time, each mapped to
+# the ``nvidia-*-cu12`` wheel bin dir (relative to site-packages) it ships in.
+# Deliberately NOT cuDNN: torch 2.13+cu130 bundles its own cuDNN 9 (a cu13
+# build) and MUST keep winning the loader — staging the cu12 ``cudnn64_9.dll``
+# anywhere gives CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH in every conv.
+_CT2_CUDA_DLLS = {
+    "cublas64_12.dll": ("nvidia", "cublas", "bin"),
+    "cublasLt64_12.dll": ("nvidia", "cublas", "bin"),
+    # cublas64_12 delay-loads cudart64_12 on the first GPU matmul; torch's
+    # cu130 build ships only cudart64_13, so cudart64_12 must be staged too or
+    # the very first cuBLAS call raises "cudart64_12.dll not found".
+    "cudart64_12.dll": ("nvidia", "cuda_runtime", "bin"),
+}
+
+
+def _site_packages_dirs() -> list:
+    """purelib/platlib bases under the running interpreter (where pip-installed
+    wheels — ctranslate2, nvidia-*-cu12 — land)."""
     import sysconfig
 
     dirs = []
@@ -28,38 +44,72 @@ def _cublas_bin_dirs() -> list:
         base = paths.get(key)
         if not base:
             continue
-        d = Path(base) / "nvidia" / "cublas" / "bin"
-        if d not in dirs:
-            dirs.append(d)
+        p = Path(base)
+        if p not in dirs:
+            dirs.append(p)
     return dirs
 
 
-def _add_cuda_dll_dirs() -> None:
-    """On Windows, let faster-whisper/CTranslate2 find CUDA's cuBLAS DLLs
-    without a global PATH edit — add the pip-installed
-    ``nvidia/cublas/bin`` to the DLL search path via
-    ``os.add_dll_directory``. Silently skips when the dir is absent (CPU
-    boxes have no nvidia-cublas wheel).
+def _ctranslate2_dir() -> Path | None:
+    """The installed ``ctranslate2`` package dir (where ``ctranslate2.dll`` and
+    its bundled ``cudnn64_9.dll`` live) — ``None`` if faster-whisper's CT2 isn't
+    installed."""
+    for base in _site_packages_dirs():
+        d = base / "ctranslate2"
+        if d.is_dir():
+            return d
+    return None
 
-    Deliberately NOT cuDNN: torch 2.13+cu130 bundles its own cuDNN 9 (a cu13
-    build) and loads it first. Adding the ``nvidia-cudnn-cu12`` bin dir makes
-    the cu12 ``cudnn64_9.dll`` resolve ahead of torch's, giving
-    CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH in every torch conv (one
-    cudnn64_9.dll per process). CTranslate2 reuses torch's already-loaded
-    cuDNN, so only cuBLAS needs a hint here.
+
+def _stage_ct2_cuda_dlls() -> None:
+    """On Windows, copy the cu12 cuBLAS + cudart DLLs *into* the ctranslate2
+    package dir so faster-whisper's CUDA path can load them.
+
+    CTranslate2 4.8.x loads cuBLAS ONLY from its own package dir (beside
+    ``ctranslate2.dll``) — it honours neither ``os.add_dll_directory`` nor
+    ``PATH``. So an add-dll-directory hint (what this used to do) never worked;
+    the DLLs have to physically sit next to ``ctranslate2.dll``.
+
+    Idempotent: a DLL already present with a matching byte size is left alone,
+    so re-imports and re-runs never re-copy. Size (not a hash) is enough — the
+    ``nvidia-*-cu12`` wheels are versioned, so a size match is the same binary.
+
+    Non-fatal: a missing source or a failed copy logs a single clear warning
+    naming the piece and returns. CPU inference still works, and a partial or
+    absent stage must never crash import.
     """
     if sys.platform != "win32":
         return
-    add = getattr(os, "add_dll_directory", None)
-    if add is None:
+    dest = _ctranslate2_dir()
+    if dest is None:
+        log.debug("ctranslate2 dir not found; skipping CUDA DLL staging")
         return
-    for d in _cublas_bin_dirs():
+    bases = _site_packages_dirs()
+    for name, sub in _CT2_CUDA_DLLS.items():
+        src = next(
+            (b.joinpath(*sub, name) for b in bases if b.joinpath(*sub, name).exists()),
+            None,
+        )
+        if src is None:
+            # No nvidia-*-cu12 wheel for this piece — a CPU box, or the CUDA
+            # runtime wheels aren't installed. Warn once and continue; CUDA STT
+            # is unavailable but import (and CPU fallback) must survive.
+            log.warning(
+                "CUDA STT: %s not found under nvidia/*/bin — CTranslate2 GPU "
+                "inference will be unavailable (CPU fallback still works)",
+                name,
+            )
+            continue
+        target = dest / name
         try:
-            if d.exists():
-                add(str(d))
-                log.debug("added CUDA DLL dir: %s", d)
-        except OSError:  # noqa: PERF203
-            log.debug("could not add CUDA DLL dir: %s", d)
+            if target.exists() and target.stat().st_size == src.stat().st_size:
+                continue  # already staged, same binary
+            shutil.copy2(src, target)
+            log.debug("staged CUDA DLL %s -> %s", src, target)
+        except OSError as e:  # noqa: PERF203
+            log.warning(
+                "CUDA STT: could not stage %s into the ctranslate2 dir: %s", name, e
+            )
 
 
 class Transcriber:
@@ -79,7 +129,7 @@ class Transcriber:
         await asyncio.to_thread(self._load_sync)
 
     def _load_sync(self) -> None:
-        _add_cuda_dll_dirs()  # win32: cuBLAS on the DLL search path (see helper)
+        _stage_ct2_cuda_dlls()  # win32: cu12 cuBLAS/cudart into ctranslate2 dir (see helper)
         from faster_whisper import WhisperModel
 
         try:

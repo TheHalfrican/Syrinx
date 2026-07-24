@@ -14,45 +14,106 @@ from syrinx_engine import stt
 from syrinx_engine.backends import qwen
 
 
-# --- stt: os.add_dll_directory(nvidia/cublas/bin) on win32 ----------------
+# --- stt: staging cu12 cuBLAS/cudart into the ctranslate2 dir on win32 -----
 
 
-def test_add_cuda_dll_dirs_is_a_noop_off_windows(monkeypatch):
+def _fake_site_layout(tmp_path):
+    """Build a site-packages tree with an empty ctranslate2 dir and the three
+    nvidia-*-cu12 source DLLs. Returns (site_root, ct2_dir, {name: src_path})."""
+    site = tmp_path / "site-packages"
+    ct2 = site / "ctranslate2"
+    ct2.mkdir(parents=True)
+    (ct2 / "ctranslate2.dll").write_bytes(b"ct2")  # the marker file _ctranslate2_dir looks for
+    srcs = {}
+    for name, sub in stt._CT2_CUDA_DLLS.items():
+        d = site.joinpath(*sub)
+        d.mkdir(parents=True, exist_ok=True)
+        p = d / name
+        p.write_bytes(name.encode())  # distinct content/size per DLL
+        srcs[name] = p
+    return site, ct2, srcs
+
+
+def test_stage_ct2_cuda_dlls_is_a_noop_off_windows(monkeypatch, tmp_path):
+    site, ct2, _ = _fake_site_layout(tmp_path)
     monkeypatch.setattr(stt.sys, "platform", "linux")
-    called = []
-    monkeypatch.setattr(stt.os, "add_dll_directory", called.append, raising=False)
-    stt._add_cuda_dll_dirs()
-    assert called == []
+    monkeypatch.setattr(stt, "_site_packages_dirs", lambda: [site])
+    stt._stage_ct2_cuda_dlls()
+    # Linux path must not stage anything (torch owns the CUDA libs there).
+    assert not (ct2 / "cublas64_12.dll").exists()
 
 
-def test_add_cuda_dll_dirs_adds_an_existing_cublas_bin(monkeypatch, tmp_path):
-    cublas = tmp_path / "nvidia" / "cublas" / "bin"
-    cublas.mkdir(parents=True)
+def test_stage_ct2_cuda_dlls_copies_all_three(monkeypatch, tmp_path):
+    site, ct2, srcs = _fake_site_layout(tmp_path)
     monkeypatch.setattr(stt.sys, "platform", "win32")
-    monkeypatch.setattr(stt, "_cublas_bin_dirs", lambda: [cublas])
-    added = []
-    monkeypatch.setattr(stt.os, "add_dll_directory", added.append, raising=False)
-    stt._add_cuda_dll_dirs()
-    assert added == [str(cublas)]
+    monkeypatch.setattr(stt, "_site_packages_dirs", lambda: [site])
+    stt._stage_ct2_cuda_dlls()
+    for name, src in srcs.items():
+        staged = ct2 / name
+        assert staged.exists(), f"{name} not staged"
+        assert staged.read_bytes() == src.read_bytes()
+    # cuDNN must NEVER be staged (torch's cu13 cudnn64_9 must win the loader).
+    assert not (ct2 / "cudnn64_9.dll").exists()
 
 
-def test_add_cuda_dll_dirs_skips_a_missing_dir(monkeypatch, tmp_path):
-    # CPU boxes have no nvidia-cublas wheel — must not raise, must not add.
-    missing = tmp_path / "nvidia" / "cublas" / "bin"
+def test_stage_ct2_cuda_dlls_is_idempotent(monkeypatch, tmp_path):
+    site, ct2, srcs = _fake_site_layout(tmp_path)
     monkeypatch.setattr(stt.sys, "platform", "win32")
-    monkeypatch.setattr(stt, "_cublas_bin_dirs", lambda: [missing])
-    added = []
-    monkeypatch.setattr(stt.os, "add_dll_directory", added.append, raising=False)
-    stt._add_cuda_dll_dirs()
-    assert added == []
+    monkeypatch.setattr(stt, "_site_packages_dirs", lambda: [site])
+    stt._stage_ct2_cuda_dlls()
+    # Same-size present -> left untouched: no copy on the second pass.
+    calls = []
+    real_copy = stt.shutil.copy2
+    monkeypatch.setattr(stt.shutil, "copy2", lambda s, d: calls.append((s, d)) or real_copy(s, d))
+    stt._stage_ct2_cuda_dlls()
+    assert calls == [], "idempotent pass should not re-copy same-size DLLs"
 
 
-def test_cublas_bin_dirs_resolves_under_site_packages():
-    # Never cuDNN — only cuBLAS gets a DLL-dir hint (torch owns cuDNN).
-    dirs = stt._cublas_bin_dirs()
-    assert dirs, "expected at least one site-packages candidate"
-    for d in dirs:
-        assert d.parts[-3:] == ("nvidia", "cublas", "bin")
+def test_stage_ct2_cuda_dlls_restages_on_size_mismatch(monkeypatch, tmp_path):
+    site, ct2, srcs = _fake_site_layout(tmp_path)
+    monkeypatch.setattr(stt.sys, "platform", "win32")
+    monkeypatch.setattr(stt, "_site_packages_dirs", lambda: [site])
+    stt._stage_ct2_cuda_dlls()
+    # A stale, differently-sized staged DLL is overwritten from source.
+    (ct2 / "cudart64_12.dll").write_bytes(b"stale")
+    stt._stage_ct2_cuda_dlls()
+    assert (ct2 / "cudart64_12.dll").read_bytes() == srcs["cudart64_12.dll"].read_bytes()
+
+
+def test_stage_ct2_cuda_dlls_missing_source_is_non_fatal(monkeypatch, tmp_path, caplog):
+    # CPU box: nvidia wheels absent. Must warn per-DLL, not raise.
+    site = tmp_path / "site-packages"
+    ct2 = site / "ctranslate2"
+    ct2.mkdir(parents=True)
+    (ct2 / "ctranslate2.dll").write_bytes(b"ct2")
+    monkeypatch.setattr(stt.sys, "platform", "win32")
+    monkeypatch.setattr(stt, "_site_packages_dirs", lambda: [site])
+    with caplog.at_level("WARNING"):
+        stt._stage_ct2_cuda_dlls()  # no source DLLs anywhere
+    assert not (ct2 / "cublas64_12.dll").exists()
+    assert "cublas64_12.dll" in caplog.text
+
+
+def test_stage_ct2_cuda_dlls_no_ctranslate2_dir_is_non_fatal(monkeypatch, tmp_path):
+    monkeypatch.setattr(stt.sys, "platform", "win32")
+    monkeypatch.setattr(stt, "_site_packages_dirs", lambda: [tmp_path / "empty"])
+    stt._stage_ct2_cuda_dlls()  # must not raise when CT2 isn't installed
+
+
+def test_site_packages_dirs_resolves_real_bases():
+    dirs = stt._site_packages_dirs()
+    assert dirs, "expected at least one site-packages base"
+
+
+def test_ct2_cuda_dll_map_excludes_cudnn():
+    # Guard the invariant: torch's bundled cu13 cuDNN must keep winning — we
+    # only ever stage cuBLAS/cublasLt/cudart, never cudnn.
+    assert not any("cudnn" in n for n in stt._CT2_CUDA_DLLS)
+    assert set(stt._CT2_CUDA_DLLS) == {
+        "cublas64_12.dll",
+        "cublasLt64_12.dll",
+        "cudart64_12.dll",
+    }
 
 
 # --- qwen: actionable SoX-missing error -----------------------------------

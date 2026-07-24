@@ -81,12 +81,17 @@ $mlSpec = if ($Wheel) { "$($Wheel.FullName)[qwen]" } else { 'kokoro>=0.9.2', 'mi
 if ($LASTEXITCODE -ne 0) { Die 'ML stack install failed' }
 
 if ($useCuda) {
-    # ctranslate2 (faster-whisper) needs cublas64_12.dll; torch's bundled cuDNN
-    # is cu13 and MUST win, so ONLY cublas goes near PATH (stt.py does the
-    # os.add_dll_directory dance). We only install the wheels here.
-    Log 'Installing CUDA runtime wheels for ctranslate2 (cublas + cudnn cu12)'
-    & $PyExe -m pip install --no-warn-script-location nvidia-cublas-cu12 nvidia-cudnn-cu12
-    if ($LASTEXITCODE -ne 0) { Die 'nvidia cublas/cudnn install failed' }
+    # ctranslate2 (faster-whisper) needs the cu12 cublas64_12.dll, and that in
+    # turn delay-loads cudart64_12.dll on the first GPU matmul (torch's cu130
+    # build ships only cudart64_13, so the cu12 runtime wheel is mandatory —
+    # 2026-07-24 finding). torch's bundled cuDNN is cu13 and MUST win the
+    # loader, so we install the cudnn cu12 wheel but stt.py never stages it —
+    # it copies ONLY cublas/cublasLt/cudart into the ctranslate2 package dir
+    # (CTranslate2 loads cuBLAS only from beside its own DLL). We lay the
+    # wheels down here; stt.py does the staging.
+    Log 'Installing CUDA runtime wheels for ctranslate2 (cublas + cuda-runtime + cudnn cu12)'
+    & $PyExe -m pip install --no-warn-script-location nvidia-cublas-cu12 nvidia-cuda-runtime-cu12 nvidia-cudnn-cu12
+    if ($LASTEXITCODE -ne 0) { Die 'nvidia cublas/cuda-runtime/cudnn install failed' }
 }
 Ok 'ML stack'
 

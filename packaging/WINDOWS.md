@@ -100,12 +100,19 @@ visible in a PowerShell window. It is re-runnable and:
    index. Windows default-PyPI torch is CPU-only, so the index-url is mandatory.
 5. Installs the ML stack via `<wheel>[qwen]` + `numba>=0.60` (pulls kokoro,
    misaki, faster-whisper, pedalboard, qwen-tts, transformers; torch already
-   satisfied stays put). On CUDA it also installs `nvidia-cublas-cu12` +
-   `nvidia-cudnn-cu12` (the ctranslate2 `cublas64_12.dll` fix). Per the
-   2026-07-24 finding, **only cublas** may reach the loader ahead of torch's
-   bundled cu13 cuDNN — that ordering lives in the engine's `stt.py`
-   (`os.add_dll_directory`), not in packaging; the installer only lays the
-   wheels down.
+   satisfied stays put). On CUDA it also installs three cu12 runtime wheels —
+   `nvidia-cublas-cu12`, `nvidia-cuda-runtime-cu12`, `nvidia-cudnn-cu12` — for
+   the ctranslate2 `cublas64_12.dll` fix (2026-07-24 finding). CTranslate2
+   4.8.x loads cuBLAS **only from its own package dir** (it ignores both
+   `os.add_dll_directory` and `PATH`), and `cublas64_12.dll` delay-loads
+   `cudart64_12.dll` on the first GPU matmul — which torch's cu130 build
+   doesn't provide (it ships only `cudart64_13`), hence the extra
+   `nvidia-cuda-runtime-cu12`. So the engine's `stt.py` **stages** the cu12
+   `cublas`/`cublasLt`/`cudart` DLLs *into* the `ctranslate2` package dir
+   (idempotent, size-checked, win32-only) before first use. cuDNN is installed
+   but **never staged**: torch's bundled cu13 `cudnn64_9.dll` must keep winning
+   the loader (staging the cu12 one gives `CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH`).
+   The installer only lays the wheels down; `stt.py` does the staging.
 6. **Import proof:** `import torch, kokoro, faster_whisper, pedalboard, sox` — a
    bad combination fails at setup, not at first conversion (the setup-script
    philosophy).
@@ -140,6 +147,16 @@ visible in a PowerShell window. It is re-runnable and:
   disabled by policy, launch `syrinx-app.exe` after setting `SYRINX_ENGINE_CMD`
   and `PATH` yourself.
 - First-run needs network (PyTorch index + PyPI) and ~2–7 GB (CUDA) of download.
+- **Concurrent model downloads race huggingface_hub's symlink probe** (verified
+  2026-07-24). Without Windows **Developer Mode** (or admin), `huggingface_hub`
+  can't create symlinks and probes for support at download time; two overlapping
+  `DownloadModel` calls race that probe and one dies with `WinError 1314` ("A
+  required privilege is not held by the client"). Sequential downloads always
+  succeed, and copy-mode (the non-symlink fallback) roughly doubles the cache's
+  disk footprint. Future work: serialize downloads engine-side (a per-process
+  download lock in the model-download path — lives in engine files owned by the
+  concurrent agent today). Workarounds now: enable Developer Mode, or download
+  models one at a time from the Models tab.
 
 ## A future CI release job would run
 
