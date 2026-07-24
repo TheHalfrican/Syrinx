@@ -143,9 +143,9 @@ still on D-Bus; the transport contract tests pass on both wrappers.
 | Backend | Linux | Windows | macOS |
 |---|---|---|---|
 | Kokoro | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU / MPS |
-| Qwen-TTS | CUDA ✅ | CUDA | MPS (verify) / CPU — consider MLX port later |
+| Qwen-TTS | CUDA ✅ | CUDA ✅ (Base + CustomVoice, 1.7B & 0.6B) | MPS (verify) / CPU — consider MLX port later |
 | LuxTTS (venv) | CPU ✅ / CUDA (k2 cuda wheels) | ❌ blocked (2026-07-24): piper-phonemize ships no win wheels/sdist; k2 CPU wheels for win_amd64 EXIST and work (exact HANDOFF pin verified) — revisit if piper-phonemize gains Windows support | verify k2 mac wheels (CPU) |
-| faster-whisper (CTranslate2) | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU (no Metal in CT2 — still fast) |
+| faster-whisper (CTranslate2) | CPU ✅ / CUDA ✅ | CPU / CUDA ✅ (base/large/turbo — see cu12 DLL gotcha, Findings 2026-07-24 sweep) | CPU (no Metal in CT2 — still fast) |
 | Qwen3 LLM | CPU ✅ / CUDA fp16 ✅ | CUDA fp16 | **MPS fp16** (add "mps" to llm.py device pick) |
 | Chatterbox VC (⇄) | CPU ✅ / CUDA ✅ | CPU / CUDA | MPS (verify — same stack as Chatterbox TTS) |
 | Seed-VC (⇄ + ♫, venv) | CPU ✅ / CUDA ✅ | CPU / CUDA (plain pip torch) | MPS unverified; CPU works (slow — minutes per clip) |
@@ -406,3 +406,66 @@ sole (documented) Windows exclusion. Dev QoL: "Syrinx (dev)" Start-Menu
 shortcut → target\release\syrinx-app.exe with the repo as cwd (engine
 resolves via the checkout venv; shares data + HF cache with everything
 else).
+
+**2026-07-24 — Model-variant sweep COMPLETE (Windows/CUDA on the 4090).**
+The five leftover variants from the prior NEXT-SESSION list, all validated
+live over RPC (warm = 2nd generation, model already resident; cold = 1st
+gen incl. model load; downloads via the Models-tab DownloadModel path):
+- **whisper-turbo** (deepdml/faster-whisper-large-v3-turbo-ct2, 1.6 GB) ✅
+  Transcribe on CUDA cold 0.5s / warm 0.21s, text verbatim.
+- **qwen-tts-0.6B** (1.2 GB) ✅ real clone flow (Piccolo profile, 0.6B
+  prompt cache) cold 14.2s (incl. 0.6B load) / warm 8.8s.
+- **qwen-custom-voice-1.7B** (3.5 GB) ✅ preset speaker Ryan, cold 16.2s /
+  warm 8.4s (`SetActiveModel` lists the 9 CV presets as
+  `builtin:qwen_custom_voice:<speaker>`).
+- **qwen-custom-voice-0.6B** (1.2 GB) ✅ preset speaker Ryan, cold 14.2s /
+  warm 7.0s.
+- **tada-3b-ml** (~8 GB; tada-codec pre-cached from tada-1b) ✅ clone flow
+  (Piccolo; existing size-agnostic `_tada.pt` codec prompt reused — TADA's
+  cache keys on profile id, not size, and the codec encoding is
+  size-independent), cold 10.0s (incl. 3B load) / warm 1.68s. TADA routing
+  needs the profile's `default_engine` = tada (temporarily pinned via
+  UpdateProfile, reverted after) — `clone_engine` alone is overridden by a
+  profile's pinned engine.
+Every catalogued Qwen-TTS size (1.7B/0.6B × Base/CustomVoice), TADA size
+(1B/3B-ml), and whisper (base/large/turbo) now run on Windows CUDA; LuxTTS
+stays the sole documented exclusion.
+
+New gotchas earned:
+1. **The phase-2 "stt.py self-serves the cuBLAS DLL dir — no PATH setup"
+   claim does NOT hold for CT2 4.8.1 inference on the pure cu130 venv.**
+   faster-whisper's `WhisperModel` CONSTRUCTS fine on CUDA, but the first
+   GPU matmul (`encode`) dies with `RuntimeError: Library cublas64_12.dll
+   is not found or cannot be loaded`. Two compounding causes, both
+   verified: (a) CT2 4.8.1 loads cuBLAS only from **its own package dir**
+   (`site-packages/ctranslate2/`, where its bundled `cudnn64_9.dll`
+   already sits) — it ignores BOTH `os.add_dll_directory` user dirs
+   (what stt.py does) AND `PATH` (neither made cublas resolvable); (b)
+   even once found, `cublas64_12.dll` (nvidia-cublas-cu12 12.9.2.10)
+   **delay-loads `cudart64_12.dll`** on first cublas call, and that
+   runtime was **entirely absent** — torch 2.13.0+cu130 bundles
+   cudart64_**13** (wrong version), and no nvidia-cuda-runtime-cu12 wheel
+   was installed. Fix applied to engine/.venv: `pip install
+   nvidia-cuda-runtime-cu12` (12.9.79, matches cublas 12.9) **and** copy
+   `cublas64_12.dll` + `cublasLt64_12.dll` + `cudart64_12.dll` into
+   `site-packages/ctranslate2/` beside `ctranslate2.dll`. Transcribe then
+   works cold-fresh (0.5s). **This belongs in stt.py/packaging**: the
+   `add_dll_directory` approach is insufficient; the reliable pattern is to
+   stage the cu12 cublas+cudart DLLs next to `ctranslate2.dll` and pin
+   nvidia-cuda-runtime-cu12 alongside nvidia-cublas-cu12. Corollary:
+   phase-2's whisper-base "0.9s CUDA, no PATH" was environment-luck;
+   whisper on CUDA was in fact broken on this venv until this fix.
+2. **HF downloads race the symlink-support probe under concurrency.** This
+   box lacks SeCreateSymbolicLink privilege (no Developer Mode), so
+   huggingface_hub must use copy-mode. Running 4 `DownloadModel` calls
+   concurrently in one engine process over one HF cache races the
+   per-cache symlink-support detection, and some downloads wrongly attempt
+   `os.symlink` on `.gitattributes` → `OSError [WinError 1314] A required
+   privilege is not held by the client` → download "error". Run downloads
+   **sequentially** and they consistently pick copy-mode and succeed
+   (whisper-turbo + cv-0.6B both errored concurrently, both succeeded
+   solo). Copy-mode roughly doubles the on-disk cache footprint vs. the
+   network download (e.g. Qwen 0.6B-Base 1.2 GB down → ~2.4 GB on disk) —
+   the LongPaths/disk-space caveat from phase-2 applies. (Enabling
+   Developer Mode or running the download step elevated would restore
+   symlink dedup, but that is a packaging/first-run decision.)
