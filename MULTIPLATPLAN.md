@@ -512,3 +512,31 @@ Two Opus agents on disjoint ownership, orchestrator integration on top.
   after kill() even in tests.
 - Remaining for a mac phase 3: BlackHole detection + Carbon/NSEvent
   hotkey + CGEventPost — nothing on Windows blocks it.
+
+**2026-07-24 evening — post-phase-3 session close.** The user's first real
+day driving the Windows build produced and closed five more items, all
+pushed @ d2dcf3b: DownloadModel serialization (the symlink-probe race,
+ModelManager._fetch_lock); honest download progress (real hub byte totals
+via HfApi files_metadata w/ estimate fallback, new "finalizing" stage +
+finishing marquee, all 22 catalog size_mb re-measured — the stale
+estimates had ALSO manufactured the debunked "copy-mode doubles the
+cache" claim); a restore-swap gap class: the overnight data-dir swap
+orphaned seed-vc's data-dir weights AND the vevo Amphion clone (worker
+died at os.chdir while the Models tab showed no warning) — clone restored
+via setup-vevo.ps1 re-run, _vc_setup_warning now requires venv AND clone;
+and one genuine new feature: ⇄ speech pitch fine-tune (−6..+6 st dropdown
++ ⌖ auto-match via new SuggestPitchShift, wire surface 70 — engine
+pre-shifts the SOURCE so profile timbre stays authentic; e2e: requested
++3 measured 2.60 st at the converter output). Developer Mode is now ON
+on this box (symlink layout for future downloads).
+
+**NEXT SESSION — macOS phase 3 (the port's last frontier):**
+1. System capture: BlackHole loopback driver detection (document install,
+   detect absence gracefully) behind the same `system-capture-supported`
+   capability property; the Capture enum's macOS arm mirrors capture_win.
+2. Dictation: NSEvent/Carbon global hotkey + CGEventPost injection,
+   in-app like dictation_win (dictate/ stays Linux-only).
+3. Before either: a macOS phase-1/2 validation pass (transport, supervised
+   lifecycle, device matrix incl. MPS, packaging) — the Windows campaign's
+   playbook in this file's Findings is the template. No Mac hardware has
+   been touched yet; everything above is design-ready, not started.
