@@ -30,6 +30,7 @@ from .profiles import ProfileStore
 from .history import CaptureStore, HistoryStore, SourceClipStore
 from .llm import PersonalityLLM
 from .models import ModelManager, spec as model_spec, detect_hardware
+from .recording import RecordingManager
 from . import audio, effects, settings as engine_settings
 
 log = logging.getLogger("syrinx.engine.service")
@@ -63,6 +64,7 @@ class EngineCore:
         self._fx_store = effects.EffectPresetStore()
         self._llm = PersonalityLLM()  # lazy — loads on first Compose/Rewrite
         self._models = ModelManager()
+        self._recorder = RecordingManager()  # mic capture (Win/mac; §14)
         # apply persisted active-model choices to the lazy components
         if (s := self._models.active_spec("llm")):
             self._llm.set_model(s.size)
@@ -889,6 +891,27 @@ class EngineCore:
             return
         engine_settings.set_value(key, val)
         log.info("setting %s -> %r", key, val)
+
+    # --- recording (mic capture on Win/mac; §14) -------------------------
+
+    async def ListRecordingDevices(self) -> str:
+        """JSON array of input devices ("[]" when enumeration fails)."""
+        return self._recorder.list_devices()
+
+    async def StartRecording(self, device_id) -> str:
+        """Start capturing mic input to a WAV; returns a recording id ("" on
+        failure). "" device = system default input. A second call cancels the
+        previous capture (latest-wins)."""
+        return self._recorder.start(device_id)
+
+    async def StopRecording(self, rec_id) -> str:
+        """Stop + finalize; returns the WAV's absolute path ("" for an
+        unknown/already-stopped id)."""
+        return self._recorder.stop(rec_id)
+
+    async def CancelRecording(self, rec_id) -> None:
+        """Stop and delete the WAV. Unknown id is a no-op."""
+        self._recorder.cancel(rec_id)
 
     def Cancel(self, gen_id) -> None:
         task = self._tasks.get(gen_id)

@@ -7,13 +7,16 @@ from pathlib import Path
 
 import pytest
 
+from syrinx_engine import paths
 from syrinx_engine.profiles import Profile, ProfileStore, _data_dir
 
 
 def test_data_dir_follows_the_env(isolated_env, monkeypatch):
     assert _data_dir() == isolated_env
     monkeypatch.delenv("SYRINX_DATA_DIR")
-    assert _data_dir() == Path.home() / ".local" / "share" / "syrinx"
+    # env deleted → the per-OS default (byte-identical to ~/.local/share/syrinx
+    # on Linux; see test_paths.py for the platform-by-platform identity proof).
+    assert _data_dir() == paths._default_data_dir()
 
 
 # --- profiles ------------------------------------------------------------

@@ -9,6 +9,7 @@ transports disagree on a method's result or a signal payload, the parametrized
 
 import asyncio
 import json
+import os
 
 import pytest
 from dbus_next.service import ServiceInterface
@@ -107,6 +108,20 @@ async def exercise_transcribe_file_signal_flow(a):
     assert results == [[req, "so today we begin"]]
 
 
+async def exercise_recording_round_trip(a):
+    # §14: enumerate → start → stop returns a real WAV path; unknown ids are ""
+    # / no-op. sounddevice is stubbed (fake_sd) so this runs identically on both
+    # transports with no real device.
+    devs = json.loads(await a.call("ListRecordingDevices"))
+    assert any(d["id"] for d in devs)
+    rid = await a.call("StartRecording", "")
+    assert isinstance(rid, str) and rid
+    path = await a.call("StopRecording", rid)
+    assert path.endswith(".wav") and os.path.exists(path)
+    assert await a.call("StopRecording", rid) == ""       # already stopped
+    assert await a.call("CancelRecording", "nope") is None  # unknown → void/null
+
+
 EXERCISES = [
     exercise_hardware,
     exercise_list_models,
@@ -117,12 +132,13 @@ EXERCISES = [
     exercise_void_method_returns_null,
     exercise_download_signal_flow,
     exercise_transcribe_file_signal_flow,
+    exercise_recording_round_trip,
 ]
 
 
 @pytest.mark.parametrize("transport", ["dbus", "rpc"])
 @pytest.mark.parametrize("exercise", EXERCISES, ids=lambda f: f.__name__)
-def test_exercise(transport, exercise, tmp_path):
+def test_exercise(transport, exercise, tmp_path, fake_sd):
     async def go():
         if transport == "dbus":
             adapter = DbusAdapter()
@@ -148,7 +164,7 @@ def test_method_surface_matches_across_wrappers():
     iface = EngineInterface()
     dbus_methods = {m.name for m in ServiceInterface._get_methods(iface)}
     assert rpc_methods == dbus_methods
-    assert len(rpc_methods) == 65
+    assert len(rpc_methods) == 69  # 65 + 4 recording methods (§14)
     # the 4 transport-only methods have no D-Bus analog (spec §0)
     assert not (set(TRANSPORT_METHODS) & dbus_methods)
 
@@ -251,6 +267,10 @@ def _sweep_args(iface):
         "TrimHistoryClip": ("nope", 0.0, 1.0),
         "GetSettings": (),
         "SetSetting": ("seedvc_steps", "3"),
+        "ListRecordingDevices": (),
+        "StartRecording": ("",),
+        "StopRecording": ("nope",),
+        "CancelRecording": ("nope",),
         "Cancel": (999,),
     }
 

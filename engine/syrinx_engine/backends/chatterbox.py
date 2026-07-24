@@ -17,7 +17,6 @@ defaults, and the per-chunk trailing-hallucination trim.
 
 import asyncio
 import logging
-import os
 import threading
 from pathlib import Path
 
@@ -25,6 +24,7 @@ import numpy as np
 
 from . import detect_device, empty_device_cache
 from .. import chunking
+from ..paths import data_dir
 
 log = logging.getLogger("syrinx.engine.tts.chatterbox")
 
@@ -123,10 +123,7 @@ class _ChatterboxBase:
         self.model_size = "default"
         self._model = None
         self._load_lock = asyncio.Lock()
-        data_dir = os.environ.get(
-            "SYRINX_DATA_DIR", str(Path.home() / ".local" / "share" / "syrinx")
-        )
-        self._voices_dir = Path(data_dir) / "voices"
+        self._voices_dir = data_dir() / "voices"
         self._voices_dir.mkdir(parents=True, exist_ok=True)
 
     # --- model ----------------------------------------------------------

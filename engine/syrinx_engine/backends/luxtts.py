@@ -16,6 +16,7 @@ import numpy as np
 
 from . import detect_device
 from .. import chunking
+from ..paths import worker_log_path
 
 log = logging.getLogger("syrinx.engine.tts.luxtts")
 
@@ -23,7 +24,7 @@ _HERE = Path(__file__).resolve()
 _ENGINE_DIR = _HERE.parents[2]  # .../engine
 _LUX_PY = _ENGINE_DIR / ".venv-luxtts" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "luxtts_worker.py"  # .../engine/syrinx_engine/luxtts_worker.py
-_STDERR_LOG = Path.home() / ".cache" / "syrinx-luxtts.log"
+_STDERR_LOG = worker_log_path("luxtts")
 
 
 class LuxTTSBackend:
@@ -81,7 +82,7 @@ class LuxTTSBackend:
             line = await self._proc.stdout.readline()
             if not line:
                 self._proc = None
-                raise RuntimeError("LuxTTS worker exited (see ~/.cache/syrinx-luxtts.log)")
+                raise RuntimeError(f"LuxTTS worker exited (see {_STDERR_LOG})")
             try:
                 resp = json.loads(line.decode())
             except json.JSONDecodeError:

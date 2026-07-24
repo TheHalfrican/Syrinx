@@ -20,6 +20,7 @@ from pathlib import Path
 from . import detect_device
 from .chatterbox import combined_ref_wav
 from .chatterbox_vc import check_source_cap
+from ..paths import data_dir, worker_log_path
 
 log = logging.getLogger("syrinx.engine.vc.vevo")
 
@@ -27,7 +28,7 @@ _HERE = Path(__file__).resolve()
 _ENGINE_DIR = _HERE.parents[2]  # .../engine
 _VEVO_PY = _ENGINE_DIR / ".venv-vevo" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "vevo_worker.py"
-_STDERR_LOG = Path.home() / ".cache" / "syrinx-vevo.log"
+_STDERR_LOG = worker_log_path("vevo")
 
 
 def _steps() -> int:
@@ -50,10 +51,7 @@ class VevoTimbreBackend:
         self._proc = None
         self._lock = asyncio.Lock()
         self._req_id = 0
-        data_dir = os.environ.get(
-            "SYRINX_DATA_DIR", str(Path.home() / ".local" / "share" / "syrinx")
-        )
-        self._voices_dir = Path(data_dir) / "voices"
+        self._voices_dir = data_dir() / "voices"
         self._voices_dir.mkdir(parents=True, exist_ok=True)
 
     def check_source(self, source_wav: str) -> None:
@@ -105,7 +103,7 @@ class VevoTimbreBackend:
                 if not line:
                     self._proc = None
                     raise RuntimeError(
-                        "Vevo worker exited (see ~/.cache/syrinx-vevo.log)"
+                        f"Vevo worker exited (see {_STDERR_LOG})"
                     )
                 try:
                     resp = json.loads(line.decode())

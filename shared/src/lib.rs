@@ -281,6 +281,25 @@ pub trait Engine {
     /// Cancel an in-flight generation.
     fn cancel(&self, gen_id: u32) -> zbus::Result<()>;
 
+    // --- recording (mic capture on Win/mac; RPC-PROTOCOL.md §14) ----------
+    // Present on D-Bus too for drift parity; the Linux app keeps its native
+    // parecord/pactl path and never calls these.
+
+    /// Input capture devices as JSON `[{id,name,default}]` ("[]" on failure).
+    fn list_recording_devices(&self) -> zbus::Result<String>;
+
+    /// Start capturing mic input to a WAV; returns a recording id ("" on
+    /// failure). "" device = system default input; a second call cancels the
+    /// previous capture (latest-wins).
+    fn start_recording(&self, device_id: &str) -> zbus::Result<String>;
+
+    /// Stop + finalize; returns the WAV's absolute path ("" if
+    /// unknown/already-stopped).
+    fn stop_recording(&self, rec_id: &str) -> zbus::Result<String>;
+
+    /// Stop and delete the WAV. Unknown id is a no-op.
+    fn cancel_recording(&self, rec_id: &str) -> zbus::Result<()>;
+
     #[zbus(property)]
     fn model_loaded(&self) -> zbus::Result<bool>;
 

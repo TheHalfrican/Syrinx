@@ -21,13 +21,13 @@ TADA hardcodes the gated meta-llama tokenizer repo — the ungated
 import asyncio
 import logging
 import os
-from pathlib import Path
 
 import numpy as np
 
 from . import detect_device, empty_device_cache
 from .. import chunking
 from ..dac_shim import install_dac_shim
+from ..paths import data_dir
 
 log = logging.getLogger("syrinx.engine.tts.tada")
 
@@ -48,10 +48,7 @@ class TadaBackend:
         self._encoder = None
         self._prompts: dict[str, dict] = {}  # profile_id -> tensor dict
         self._load_lock = asyncio.Lock()
-        data_dir = os.environ.get(
-            "SYRINX_DATA_DIR", str(Path.home() / ".local" / "share" / "syrinx")
-        )
-        self._voices_dir = Path(data_dir) / "voices"
+        self._voices_dir = data_dir() / "voices"
         self._voices_dir.mkdir(parents=True, exist_ok=True)
 
     # --- model ----------------------------------------------------------

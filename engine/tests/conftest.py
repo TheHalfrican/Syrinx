@@ -70,18 +70,74 @@ class FakeStream:
         return int(sum(len(b) for b in self.written))
 
 
+class FakeInputStream:
+    """Stands in for a PortAudio input stream — feeds one silent block on start
+    so the recorder produces a finalizable WAV without any real device."""
+
+    def __init__(self, samplerate, channels, dtype, device=None, callback=None):
+        self.samplerate = samplerate
+        self.channels = channels
+        self.dtype = dtype
+        self.device = device
+        self.callback = callback
+        self.started = self.stopped = self.closed = False
+
+    def start(self):
+        self.started = True
+        if self.callback:
+            # 480 frames of PCM16 mono silence (bytes; the real API hands a numpy
+            # array, but the recorder just does bytes(indata))
+            self.callback(b"\x00\x00" * 480, 480, None, None)
+
+    def stop(self):
+        self.stopped = True
+
+    def close(self):
+        self.closed = True
+
+
 @pytest.fixture
 def fake_sd(monkeypatch):
     """Install a fake ``sounddevice`` module — sounddevice is not in the CI
     dependency contract and a real stream needs a PipeWire sink, but the block
-    loop around it is engine logic worth testing. ``.made`` lists the streams."""
+    loop around it is engine logic worth testing. ``.made`` lists output
+    streams, ``.in_made`` the input (recording) streams."""
     made = []
+    in_made = []
 
     def OutputStream(samplerate, channels, dtype):  # noqa: N802 — mirrors the real name
         made.append(FakeStream(samplerate, channels, dtype))
         return made[-1]
 
-    module = types.SimpleNamespace(OutputStream=OutputStream, made=made)
+    def InputStream(samplerate, channels, dtype, device=None, callback=None):  # noqa: N802
+        in_made.append(FakeInputStream(samplerate, channels, dtype, device, callback))
+        return in_made[-1]
+
+    _devs = [
+        {"name": "Fake Mic", "max_input_channels": 2, "max_output_channels": 0,
+         "default_samplerate": 48000.0},
+        {"name": "Fake Speakers", "max_input_channels": 0, "max_output_channels": 2,
+         "default_samplerate": 48000.0},
+    ]
+
+    def query_devices(device=None, kind=None):
+        if kind == "input":
+            return _devs[0]
+        if device is None:
+            return list(_devs)
+        if isinstance(device, int):
+            return _devs[device]
+        for d in _devs:
+            if d["name"] == device or device in d["name"]:
+                return d
+        raise ValueError(f"no device matching {device!r}")
+
+    module = types.SimpleNamespace(
+        OutputStream=OutputStream, made=made,
+        InputStream=InputStream, in_made=in_made,
+        query_devices=query_devices,
+        default=types.SimpleNamespace(device=[0, 1]),
+    )
     monkeypatch.setitem(sys.modules, "sounddevice", module)
     return module
 

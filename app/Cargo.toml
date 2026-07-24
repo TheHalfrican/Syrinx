@@ -10,6 +10,8 @@ syrinx-shared.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { workspace = true, features = ["process", "time"] }
+# per-OS config/data dirs — mirrors shared's discovery-path derivation (§2.2)
+dirs.workspace = true
 # avatar thumbnails: decode + crop + high-quality downscale (the GPU's plain
 # bilinear sampling pixelates 4K photos squeezed into small circles)
 image = "0.25"

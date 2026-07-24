@@ -294,3 +294,22 @@ E2E-verified on Windows: cold-spawn over a stale rpc.json / mid-session
 kill → auto-respawn / app kill → engine exits + file cleaned / manual
 engine adopted and survives. 292 pytest @ 95.77%, 44+5 cargo, clippy zero.
 Next: 1.3 recording (sounddevice), 1.4 paths (platformdirs/dirs).
+
+**2026-07-24 — Phases 1.3 (recording) + 1.4 (paths) landed. Phase 1 seams
+COMPLETE.** 1.3: four engine methods (RPC-PROTOCOL §14 — surface now 69),
+`recording.py` RecordingManager (lazy sounddevice, name-based device ids,
+latest-wins, device-native-rate PCM16 WAVs under data_dir/recordings/);
+app capture seam cfg-selects parecord (Linux, verbatim) vs engine methods;
+system-capture buttons + monitor picker + ♫ record-from-browser hidden
+off-Linux (phase 3; import-file-only there). 1.4: `paths.py` central
+resolver — **Linux branches hand-rolled, not platformdirs**, because
+platformdirs honors XDG_DATA_HOME/XDG_CACHE_HOME and the historical
+literals don't (byte-identity proven by tests, incl. the bare
+~/.cache/syrinx-*.log worker logs); Win data converges on
+%LOCALAPPDATA%\syrinx\syrinx beside rpc.json, app config →
+dirs::config_dir(). Live on this box: cold app launch → spawned engine →
+2s real mic capture over the wire → WAV in the new root → valid envelope;
+teardown clean. 315 pytest @ 95.20%, 49 cargo, ruff/clippy zero. Phase-1
+exit criteria met modulo full-studio ML validation, which awaits the CUDA
+venv on Windows (environment, not seams). Next: phase 2 device matrix /
+packaging, or Windows CUDA venv bring-up.

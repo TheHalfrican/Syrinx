@@ -19,6 +19,7 @@ from pathlib import Path
 from . import detect_device
 from .chatterbox import combined_ref_wav
 from .chatterbox_vc import check_source_cap
+from ..paths import data_dir, worker_log_path
 
 log = logging.getLogger("syrinx.engine.vc.seedvc")
 
@@ -26,7 +27,7 @@ _HERE = Path(__file__).resolve()
 _ENGINE_DIR = _HERE.parents[2]  # .../engine
 _SEEDVC_PY = _ENGINE_DIR / ".venv-seedvc" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "seedvc_worker.py"
-_STDERR_LOG = Path.home() / ".cache" / "syrinx-seedvc.log"
+_STDERR_LOG = worker_log_path("seedvc")
 
 
 def _steps() -> int:
@@ -56,15 +57,13 @@ class SeedVCBackend:
         self._proc = None
         self._lock = asyncio.Lock()
         self._req_id = 0
-        data_dir = os.environ.get(
-            "SYRINX_DATA_DIR", str(Path.home() / ".local" / "share" / "syrinx")
-        )
-        self._voices_dir = Path(data_dir) / "voices"
+        root = data_dir()
+        self._voices_dir = root / "voices"
         self._voices_dir.mkdir(parents=True, exist_ok=True)
         # seed-vc downloads models to ./checkpoints relative to CWD — pin the
         # worker's cwd here so weights never land in (and get committed to)
         # whatever directory the engine happened to start from
-        self._work_dir = Path(data_dir) / "seedvc"
+        self._work_dir = root / "seedvc"
         self._work_dir.mkdir(parents=True, exist_ok=True)
 
     def check_source(self, source_wav: str) -> None:
@@ -117,7 +116,7 @@ class SeedVCBackend:
                 if not line:
                     self._proc = None
                     raise RuntimeError(
-                        "Seed-VC worker exited (see ~/.cache/syrinx-seedvc.log)"
+                        f"Seed-VC worker exited (see {_STDERR_LOG})"
                     )
                 try:
                     resp = json.loads(line.decode())

@@ -368,6 +368,31 @@ class EngineInterface(ServiceInterface):
         """Set one engine setting (JSON-encoded value; null clears it)."""
         await self._core.SetSetting(key, value_json)
 
+    # --- recording (mic capture on Win/mac; §14) -------------------------
+
+    @method()
+    async def ListRecordingDevices(self) -> "s":  # noqa: F821
+        """JSON array of input devices ("[]" when enumeration fails)."""
+        return await self._core.ListRecordingDevices()
+
+    @method()
+    async def StartRecording(self, device_id: "s") -> "s":  # noqa: F821
+        """Start capturing mic input to a WAV; returns a recording id ("" on
+        failure). "" device = system default input; a second call cancels the
+        previous capture (latest-wins)."""
+        return await self._core.StartRecording(device_id)
+
+    @method()
+    async def StopRecording(self, rec_id: "s") -> "s":  # noqa: F821
+        """Stop + finalize; returns the WAV's absolute path ("" for an
+        unknown/already-stopped id)."""
+        return await self._core.StopRecording(rec_id)
+
+    @method()
+    async def CancelRecording(self, rec_id: "s") -> None:  # noqa: F821
+        """Stop and delete the WAV. Unknown id is a no-op."""
+        await self._core.CancelRecording(rec_id)
+
     @method()
     def Cancel(self, gen_id: "u") -> None:  # noqa: F821
         self._core.Cancel(gen_id)

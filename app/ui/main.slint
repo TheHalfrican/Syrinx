@@ -1669,7 +1669,8 @@ export component AppWindow inherits Window {
                                     generate: tr-recording && tr-rec-mode == "mic";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("mic"); } }
                                 }
-                                TBtn {
+                                // system-audio capture is Linux-only until phase 3
+                                if root.is-linux : TBtn {
                                     label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
                                     generate: tr-recording && tr-rec-mode == "system";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("system"); } }
@@ -1902,7 +1903,9 @@ export component AppWindow inherits Window {
                                     generate: vc-recording && vc-rec-mode == "mic";
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("mic"); } }
                                 }
-                                TBtn {
+                                // system-audio capture (incl. ♫ music from the
+                                // browser) is Linux-only until phase 3
+                                if root.is-linux : TBtn {
                                     label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
                                     generate: vc-recording && vc-rec-mode == "system";
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("system"); } }
@@ -2434,7 +2437,8 @@ export component AppWindow inherits Window {
                                             selected(i) => { root.st-pick-mic(i); }
                                         }
                                     }
-                                    HorizontalLayout {
+                                    // system-audio tap is Linux-only until phase 3
+                                    if root.is-linux : HorizontalLayout {
                                         spacing: 12px;
                                         Text { text: "System tap"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 130px; }
                                         ThemedDropdown {
@@ -2917,9 +2921,10 @@ export component AppWindow inherits Window {
                         Text { text: "REFERENCE AUDIO"; font-size: 11px; font-weight: 700; color: Theme.dim; }
                         HorizontalLayout {
                             spacing: 6px;
-                            for t[i] in [
-                                { k: "record", l: "Record" }, { k: "upload", l: "Upload" }, { k: "system", l: "System" }
-                            ] : Rectangle {
+                            // "System" audio source is Linux-only until phase 3
+                            for t[i] in (root.is-linux
+                                ? [ { k: "record", l: "Record" }, { k: "upload", l: "Upload" }, { k: "system", l: "System" } ]
+                                : [ { k: "record", l: "Record" }, { k: "upload", l: "Upload" } ]) : Rectangle {
                                 horizontal-stretch: 1; height: 30px; border-radius: Theme.rad;
                                 border-width: Theme.name == "win95" ? 0px : 1px;
                                 border-color: cv-mode == t.k ? Theme.acc : Theme.btn-brd;

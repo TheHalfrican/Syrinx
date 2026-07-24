@@ -63,7 +63,7 @@ impl EngineClient {
     }
 }
 
-/// Generate the 65 method + 2 property-getter dispatchers. Each expands to a
+/// Generate the 69 method + 2 property-getter dispatchers. Each expands to a
 /// `match` that either delegates to the zbus proxy (same method name) or issues
 /// an RPC `call` with the PascalCase method name and the args as positional
 /// JSON. Keeping this a table makes the surface auditable against `lib.rs`.
@@ -168,6 +168,12 @@ engine_methods! {
     fn get_settings() -> String => "GetSettings";
     fn set_setting(key: &str, value_json: &str) -> () => "SetSetting";
     fn cancel(gen_id: u32) -> () => "Cancel";
+
+    // --- recording (mic capture on Win/mac; §14) -------------------------
+    fn list_recording_devices() -> String => "ListRecordingDevices";
+    fn start_recording(device_id: &str) -> String => "StartRecording";
+    fn stop_recording(rec_id: &str) -> String => "StopRecording";
+    fn cancel_recording(rec_id: &str) -> () => "CancelRecording";
 
     // --- read-only properties → explicit getters (spec §5) ---------------
     fn backend() -> String => "GetBackend";

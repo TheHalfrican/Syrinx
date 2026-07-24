@@ -32,6 +32,8 @@ import platformdirs
 from websockets.asyncio.server import serve
 from websockets.exceptions import ConnectionClosed
 
+from .paths import _default_data_dir
+
 log = logging.getLogger("syrinx.engine.rpc")
 
 PROTOCOL_VERSION = 1
@@ -69,21 +71,22 @@ def engine_method_names(core) -> "list[str]":
 
 def discovery_path() -> Path:
     """Resolve the discovery-file path (spec §2.2). ``SYRINX_RPC_ENDPOINT``
-    (absolute path) overrides the per-OS default."""
+    (absolute path) overrides the per-OS default. The data-dir branches share
+    :func:`syrinx_engine.paths._default_data_dir`, so the discovery file lands
+    beside the engine's data on Win/mac (and at the same ~/.local/share/syrinx
+    fallback on Linux)."""
     override = os.environ.get("SYRINX_RPC_ENDPOINT")
     if override:
         return Path(override)
-    if sys.platform == "linux":
+    if sys.platform == "linux" and os.environ.get("XDG_RUNTIME_DIR"):
         # XDG_RUNTIME_DIR (tmpfs, 0700) is the right home for a session secret;
         # fall back to the data dir when it is unset.
-        if os.environ.get("XDG_RUNTIME_DIR"):
-            base = platformdirs.user_runtime_dir("syrinx", "syrinx")
-        else:
-            base = platformdirs.user_data_dir("syrinx", "syrinx")
+        base: Path = Path(platformdirs.user_runtime_dir("syrinx", "syrinx"))
     else:
-        # Windows: %LOCALAPPDATA%\syrinx\syrinx ; macOS: ~/Library/Application Support/syrinx
-        base = platformdirs.user_data_dir("syrinx", "syrinx")
-    return Path(base) / "rpc.json"
+        # Win: %LOCALAPPDATA%\syrinx\syrinx ; mac: ~/Library/Application Support/syrinx;
+        # Linux w/o XDG_RUNTIME_DIR: ~/.local/share/syrinx.
+        base = _default_data_dir()
+    return base / "rpc.json"
 
 
 def write_discovery(path: Path, port: int, token: str) -> None:

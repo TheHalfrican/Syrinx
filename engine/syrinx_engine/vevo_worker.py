@@ -30,6 +30,11 @@ import sys
 import tempfile
 from pathlib import Path
 
+# Runs under the isolated .venv-vevo, so reach the shared per-OS path resolver
+# by putting the engine root on sys.path (paths.py is stdlib-only on Linux).
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # .../engine
+from syrinx_engine.paths import data_dir  # noqa: E402
+
 # Reserve the real stdout for the JSON protocol (model downloads and torch
 # both chat on fd 1 otherwise).
 _PROTO = os.fdopen(os.dup(1), "w")
@@ -38,7 +43,7 @@ sys.stdout = sys.stderr
 
 _AMPHION = os.environ.get(
     "SYRINX_VEVO_AMPHION",
-    str(Path.home() / ".local" / "share" / "syrinx" / "vevo" / "Amphion"),
+    str(data_dir() / "vevo" / "Amphion"),
 )
 os.chdir(_AMPHION)
 sys.path.insert(0, _AMPHION)

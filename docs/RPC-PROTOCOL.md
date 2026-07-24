@@ -643,3 +643,23 @@ supervised child process (MULTIPLATPLAN §1.2).
   the process is still alive after a short grace (~3 s), kill it.
 - An **adopted** (externally started) engine whose socket drops is treated
   like case 2 above: fall through to spawn.
+
+---
+
+## 14. Recording methods (seam 1.3 — Win/mac capture)
+
+Four transport-agnostic engine methods (present on BOTH transports and in
+the D-Bus interface — the drift guards require it; the Linux app simply
+keeps its native `parecord`/`pactl` path and never calls them). This
+extends the §4 method table: the surface is now **69** methods. sounddevice
+(PortAudio) is the backend; its import is lazy per the engine-wide rule.
+
+| Method | Params | Returns | Semantics |
+|---|---|---|---|
+| `ListRecordingDevices` | `[]` | string | JSON array `[{"id": str, "name": str, "default": bool}]` of input devices; `"[]"` when enumeration fails. `id` is stable enough to persist in settings (prefer name-based ids over bare PortAudio indices, which reshuffle on hotplug). |
+| `StartRecording` | `[device_id: str]` | string | Start capturing mic input to a WAV (PCM16 mono, 48 kHz or device-native — implementation reports which). `""` device = system default input. Returns a recording id, `""` on failure (device missing/busy). A second `StartRecording` while one is live **cancels the previous** (latest-wins, mirroring playback epoch semantics). |
+| `StopRecording` | `[rec_id: str]` | string | Stop + finalize the WAV; returns its absolute path (`""` for an unknown/already-stopped id). The file lives in engine-owned scratch space and stays until consumed (AddSample/ConvertVoice/TranscribeFile all take paths). |
+| `CancelRecording` | `[rec_id: str]` | null | Stop and delete the file. Unknown id is a no-op. |
+
+No new signals (the recording UI has no live meter today; a
+`RecordingLevel` signal can be added later if the meter gets wired).

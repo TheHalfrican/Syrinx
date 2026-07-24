@@ -8,7 +8,7 @@ A profile is a named voice, of one of two kinds:
 Optional **personality** guides the LLM rewrite/compose (when that lands).
 Grounded in the Voicebox profiles + profile_samples model, simplified.
 
-Storage: $SYRINX_DATA_DIR/syrinx.db  (default ~/.local/share/syrinx)
+Storage: $SYRINX_DATA_DIR/syrinx.db  (default per-OS data dir — see paths.py)
 Samples: $SYRINX_DATA_DIR/profiles/<profile_id>/<sample_id>.wav
 """
 
@@ -23,11 +23,7 @@ import zipfile
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-
-def _data_dir() -> Path:
-    return Path(
-        os.environ.get("SYRINX_DATA_DIR", str(Path.home() / ".local" / "share" / "syrinx"))
-    )
+from .paths import data_dir as _data_dir
 
 
 @dataclass

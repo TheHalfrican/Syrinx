@@ -14,6 +14,7 @@ mod engine_proc;
 
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
+#[cfg(target_os = "linux")]
 use std::process::Stdio;
 use std::rc::Rc;
 use syrinx_shared::{EngineClient, EngineError, EngineEvent};
@@ -151,13 +152,51 @@ impl Default for AppConfig {
 }
 
 fn config_path() -> std::path::PathBuf {
-    std::env::var("XDG_CONFIG_HOME")
-        .map(std::path::PathBuf::from)
-        .unwrap_or_else(|_| {
+    // `dirs::config_dir()` is XDG_CONFIG_HOME-aware with the same ~/.config
+    // default on Linux (byte-identical to before), and %APPDATA%\syrinx on
+    // Windows. The HOME/.config fallback preserves the prior behavior if the
+    // crate can't resolve a base dir.
+    dirs::config_dir()
+        .unwrap_or_else(|| {
             std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default()).join(".config")
         })
         .join("syrinx")
         .join("settings.json")
+}
+
+/// The engine's data root, resolved to match the Python engine byte-for-byte
+/// (`engine/syrinx_engine/paths.py`): `SYRINX_DATA_DIR` wins everywhere, else
+/// the per-OS default. Linux keeps the historical `~/.local/share/syrinx`,
+/// deliberately ignoring XDG_DATA_HOME exactly as the engine does; Win/mac use
+/// the §2.2 data dir that also roots the RPC discovery file (see
+/// `shared::rpc_client`'s `default_discovery_dir`).
+fn engine_data_dir() -> std::path::PathBuf {
+    if let Ok(p) = std::env::var("SYRINX_DATA_DIR") {
+        if !p.is_empty() {
+            return std::path::PathBuf::from(p);
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        // %LOCALAPPDATA%\syrinx\syrinx
+        dirs::data_local_dir()
+            .map(|d| d.join("syrinx").join("syrinx"))
+            .unwrap_or_default()
+    }
+    #[cfg(target_os = "macos")]
+    {
+        // ~/Library/Application Support/syrinx
+        dirs::data_dir().map(|d| d.join("syrinx")).unwrap_or_default()
+    }
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+    {
+        // Byte-identical to the engine's hand-rolled Linux literal (ignores
+        // XDG_DATA_HOME, which dirs::data_dir() would otherwise honor).
+        std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+            .join(".local")
+            .join("share")
+            .join("syrinx")
+    }
 }
 
 fn load_config() -> AppConfig {
@@ -1161,6 +1200,7 @@ fn cv_wav_path() -> String {
 /// The default sink's `.monitor` source — a passive tap for system audio (the
 /// same approach as Voicebox). Works on analog/HDMI; Bluetooth A2DP monitors are
 /// silent, so those need a speaker/HDMI output while capturing.
+#[cfg(target_os = "linux")]
 async fn default_monitor() -> Option<String> {
     let out = tokio::process::Command::new("pactl")
         .arg("get-default-sink")
@@ -1178,6 +1218,7 @@ async fn default_monitor() -> Option<String> {
 /// `.monitor` for system audio). We use `parecord` (PulseAudio) rather than
 /// `pw-record`: the latter's `--target` silently no-ops for monitors here, so it
 /// only ever recorded the (dead) default mic.
+#[cfg(target_os = "linux")]
 async fn start_pw_record(wav: &str, device: Option<&str>) -> std::io::Result<tokio::process::Child> {
     let _ = std::fs::remove_file(wav);
     let mut cmd = tokio::process::Command::new("parecord");
@@ -1223,6 +1264,7 @@ fn recorded_label(wav: &str) -> String {
 /// children inherit an ignored SIGINT until parecord installs its handler)
 /// would otherwise park the whole worker loop in `wait()` — frozen timers,
 /// dead buttons. After 2 s we SIGKILL, which cannot be ignored.
+#[cfg(target_os = "linux")]
 async fn stop_pw_record(child: &mut tokio::process::Child) {
     if let Some(pid) = child.id() {
         let _ = tokio::process::Command::new("kill")
@@ -1234,6 +1276,114 @@ async fn stop_pw_record(child: &mut tokio::process::Child) {
     if tokio::time::timeout(grace, child.wait()).await.is_err() {
         let _ = child.start_kill();
         let _ = child.wait().await;
+    }
+}
+
+// --- capture seam (1.3) --------------------------------------------------
+//
+// The app-side interface the record buttons drive. On Linux it wraps the native
+// `parecord` child writing to an app-chosen wav (byte-identical to before);
+// elsewhere the engine owns the capture (sounddevice) and the wav path comes
+// back on stop. System-audio capture is Linux-only until phase 3 — the "◉
+// Record system" buttons + ⚙ monitor picker are hidden off-Linux, so
+// `capture_start` there is only ever asked for the mic.
+
+/// A live capture. Linux owns the `parecord` child; elsewhere it holds the
+/// engine's recording id (the engine owns the wav, path returned on stop).
+#[cfg(target_os = "linux")]
+struct Capture(tokio::process::Child);
+#[cfg(not(target_os = "linux"))]
+struct Capture {
+    rec_id: String,
+}
+
+/// Start a capture. `device` is a source name (`.monitor` for system on Linux,
+/// a mic name elsewhere); `None`/`""` = the platform default input.
+#[cfg(target_os = "linux")]
+async fn capture_start(
+    _proxy: &EngineClient,
+    wav: &str,
+    device: Option<&str>,
+) -> std::io::Result<Capture> {
+    start_pw_record(wav, device).await.map(Capture)
+}
+#[cfg(not(target_os = "linux"))]
+async fn capture_start(
+    proxy: &EngineClient,
+    _wav: &str,
+    device: Option<&str>,
+) -> std::io::Result<Capture> {
+    match proxy.start_recording(device.unwrap_or("")).await {
+        Ok(id) if !id.is_empty() => Ok(Capture { rec_id: id }),
+        Ok(_) => Err(std::io::Error::other("device missing or busy")),
+        Err(e) => Err(std::io::Error::other(e.to_string())),
+    }
+}
+
+/// Stop + finalize a capture; returns the finalized WAV path (`""` on failure).
+/// On Linux the file is already at `wav`, so it is returned unchanged (the
+/// failure branch is dead there, keeping behavior byte-identical).
+#[cfg(target_os = "linux")]
+async fn capture_stop(mut cap: Capture, _proxy: &EngineClient, wav: &str) -> String {
+    stop_pw_record(&mut cap.0).await;
+    wav.to_string()
+}
+#[cfg(not(target_os = "linux"))]
+async fn capture_stop(cap: Capture, proxy: &EngineClient, _wav: &str) -> String {
+    proxy.stop_recording(&cap.rec_id).await.unwrap_or_default()
+}
+
+/// Discard a capture without keeping the file (modal cancel). Linux reaps the
+/// child (the scratch wav is overwritten by the next take); elsewhere the
+/// engine deletes its scratch recording.
+#[cfg(target_os = "linux")]
+async fn capture_discard(mut cap: Capture, _proxy: &EngineClient) {
+    stop_pw_record(&mut cap.0).await;
+}
+#[cfg(not(target_os = "linux"))]
+async fn capture_discard(cap: Capture, proxy: &EngineClient) {
+    let _ = proxy.cancel_recording(&cap.rec_id).await;
+}
+
+/// Did the capture terminate on its own? Linux polls the `parecord` child;
+/// elsewhere the engine supervises the stream, so death instead surfaces as a
+/// `StopRecording` returning `""`.
+#[cfg(target_os = "linux")]
+fn capture_died(cap: &mut Capture) -> bool {
+    matches!(cap.0.try_wait(), Ok(Some(_)))
+}
+#[cfg(not(target_os = "linux"))]
+fn capture_died(_cap: &mut Capture) -> bool {
+    false
+}
+
+/// Resolve the capture device for a record request. `system` taps the output
+/// (Linux only); mic uses the ⚙ mic choice (`""` = default). Returns
+/// `(device, ok)` — `ok == false` means "system was requested but no monitor
+/// exists", which only happens on Linux.
+#[cfg(target_os = "linux")]
+async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String>, bool) {
+    if system {
+        let d = if cfg.monitor_device.is_empty() {
+            default_monitor().await
+        } else {
+            Some(cfg.monitor_device.clone())
+        };
+        let ok = d.is_some();
+        (d, ok)
+    } else if cfg.mic_device.is_empty() {
+        (None, true)
+    } else {
+        (Some(cfg.mic_device.clone()), true)
+    }
+}
+#[cfg(not(target_os = "linux"))]
+async fn resolve_capture_device(cfg: &AppConfig, _system: bool) -> (Option<String>, bool) {
+    // System capture is hidden off-Linux; always the mic.
+    if cfg.mic_device.is_empty() {
+        (None, true)
+    } else {
+        (Some(cfg.mic_device.clone()), true)
     }
 }
 
@@ -1740,9 +1890,13 @@ fn export_dialog(cfg_dir: &str) -> rfd::AsyncFileDialog {
     if cfg_dir.is_empty() { dlg } else { dlg.set_directory(cfg_dir) }
 }
 
-/// Enumerate PipeWire capture devices via pactl: (mics, sink monitors),
-/// each as (technical name, human description).
-async fn list_audio_devices() -> (Vec<(String, String)>, Vec<(String, String)>) {
+/// Enumerate capture devices for the ⚙ pickers: `(mics, sink monitors)`, each
+/// as `(technical name, human description)`. On Linux this taps PipeWire via
+/// pactl (monitors are a Linux feature); elsewhere the engine's sounddevice
+/// enumeration lists mics only (system monitors wait for phase 3, and their
+/// picker is hidden off-Linux).
+#[cfg(target_os = "linux")]
+async fn list_audio_devices(_proxy: &EngineClient) -> (Vec<(String, String)>, Vec<(String, String)>) {
     let out = tokio::process::Command::new("pactl")
         .args(["-f", "json", "list", "sources"])
         .output()
@@ -1764,6 +1918,24 @@ async fn list_audio_devices() -> (Vec<(String, String)>, Vec<(String, String)>) 
         }
     }
     (mics, monitors)
+}
+#[cfg(not(target_os = "linux"))]
+async fn list_audio_devices(proxy: &EngineClient) -> (Vec<(String, String)>, Vec<(String, String)>) {
+    // sounddevice ids are name-based (stable across hotplug); the description
+    // is the same name — good enough for the dropdown. No monitors (phase 3).
+    let mut mics = Vec::new();
+    if let Ok(json) = proxy.list_recording_devices().await {
+        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
+            for d in &arr {
+                let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("");
+                let name = d.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+                if !id.is_empty() {
+                    mics.push((id.to_string(), name.to_string()));
+                }
+            }
+        }
+    }
+    (mics, Vec::new())
 }
 
 /// Push the ⚙ tab's state to the UI (devices, config, engine knobs).
@@ -2153,7 +2325,7 @@ async fn run_session(
     let mut cv_edit_transcript = String::new();
     let mut cv_avatar: Option<(String, String, i32, i32, i32, i32)> = None; // staged (path, mode, sx, sy, sw, sh)
     // transcription view state
-    let mut tr_rec: Option<tokio::process::Child> = None;
+    let mut tr_rec: Option<Capture> = None;
     let mut tr_elapsed: u32 = 0;
     let tr_wav = std::env::var("XDG_RUNTIME_DIR")
         .map(|d| format!("{d}/syrinx-transcribe.wav"))
@@ -2162,7 +2334,7 @@ async fn run_session(
     let mut pending_tr: u32 = 0;
     let mut pending_tr_refine: u32 = 0;
     // voice-changer (⇄) view state
-    let mut vc_rec: Option<tokio::process::Child> = None;
+    let mut vc_rec: Option<Capture> = None;
     let mut vc_elapsed: u32 = 0;
     let vc_wav = std::env::var("XDG_RUNTIME_DIR")
         .map(|d| format!("{d}/syrinx-convert.wav"))
@@ -2196,7 +2368,7 @@ async fn run_session(
     let mut lib_loaded = false;
     let mut lib_filters: (String, i32, i32, bool, i32) = (String::new(), 0, 0, false, 0);
     // create-voice modal state
-    let mut cv_rec: Option<tokio::process::Child> = None;
+    let mut cv_rec: Option<Capture> = None;
     let cv_wav = cv_wav_path();
     let mut cv_sample: Option<String> = None;
     let mut rec_interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -2466,8 +2638,8 @@ async fn run_session(
                 // recorder died on its own (e.g. a suspended monitor source
                 // erroring at first open) — surface it instead of a phantom
                 // "recording" that never advances
-                if let Some(child) = vc_rec.as_mut() {
-                    if matches!(child.try_wait(), Ok(Some(_))) {
+                if let Some(cap) = vc_rec.as_mut() {
+                    if capture_died(cap) {
                         vc_rec = None;
                         ui.upgrade_in_event_loop(|ui| {
                             ui.set_vc_recording(false);
@@ -2479,10 +2651,16 @@ async fn run_session(
                     vc_elapsed += 1;
                     if vc_elapsed >= VC_REC_MAX {
                         // engine caps conversion sources — stop and keep the clip
-                        if let Some(mut child) = vc_rec.take() {
-                            stop_pw_record(&mut child).await;
-                            vc_source = Some(vc_wav.clone());
-                            let label = format!("{} · stopped at the 3:00 cap", recorded_label(&vc_wav));
+                        if let Some(cap) = vc_rec.take() {
+                            let path = capture_stop(cap, &proxy, &vc_wav).await;
+                            if path.is_empty() {
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_vc_recording(false);
+                                    ui.set_vc_status("⚠ recorder exited — try again or check the source".into());
+                                }).ok();
+                            } else {
+                            vc_source = Some(path.clone());
+                            let label = format!("{} · stopped at the 3:00 cap", recorded_label(&path));
                             ui.upgrade_in_event_loop(move |ui| {
                                 ui.set_vc_recording(false);
                                 ui.set_vc_has_source(true);
@@ -2491,7 +2669,7 @@ async fn run_session(
                                 ui.set_vc_armed_saved(false);
                                 ui.set_vc_status("".into());
                             }).ok();
-                            match proxy.transcribe_file(&vc_wav).await {
+                            match proxy.transcribe_file(&path).await {
                                 Ok(rid) => {
                                     pending_vc_tr = rid;
                                     vc_tr_clip.clear(); // scratch source — nothing to backfill
@@ -2501,6 +2679,7 @@ async fn run_session(
                                     }).ok();
                                 }
                                 Err(e) => tracing::error!("vc transcribe failed: {e}"),
+                            }
                             }
                         }
                     } else {
@@ -2514,19 +2693,26 @@ async fn run_session(
                     tr_elapsed += 1;
                     if tr_elapsed >= TR_REC_MAX {
                         // safety cap — stop and transcribe what we have
-                        if let Some(mut child) = tr_rec.take() {
-                            stop_pw_record(&mut child).await;
-                            match proxy.transcribe_file(&tr_wav).await {
+                        if let Some(cap) = tr_rec.take() {
+                            let path = capture_stop(cap, &proxy, &tr_wav).await;
+                            if path.is_empty() {
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_tr_recording(false);
+                                    ui.set_tr_status("⚠ recording failed — try again".into());
+                                }).ok();
+                            } else {
+                            match proxy.transcribe_file(&path).await {
                                 Ok(id) => pending_tr = id,
                                 Err(e) => tracing::error!("transcribe failed: {e}"),
                             }
-                            tr_source = tr_wav.clone();
+                            tr_source = path.clone();
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_tr_recording(false);
                                 ui.set_tr_busy(true);
                                 ui.set_tr_has_source(true);
                                 ui.set_tr_status("transcribing…".into());
                             }).ok();
+                            }
                         }
                     } else {
                         let e = tr_elapsed;
@@ -2539,14 +2725,21 @@ async fn run_session(
                 rec_elapsed += 1;
                 if rec_elapsed >= REC_MAX {
                     // hit the cap — auto-stop and keep the clip
-                    if let Some(mut child) = cv_rec.take() {
-                        stop_pw_record(&mut child).await;
-                        cv_sample = Some(cv_wav.clone());
-                        let label = recorded_label(&cv_wav);
-                        ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_cv_recording(false);
-                            ui.set_cv_sample_label(label.into());
-                        }).ok();
+                    if let Some(cap) = cv_rec.take() {
+                        let path = capture_stop(cap, &proxy, &cv_wav).await;
+                        if path.is_empty() {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_cv_recording(false);
+                                ui.set_cv_sample_label("⚠ recording failed — try again".into());
+                            }).ok();
+                        } else {
+                            cv_sample = Some(path.clone());
+                            let label = recorded_label(&path);
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_cv_recording(false);
+                                ui.set_cv_sample_label(label.into());
+                            }).ok();
+                        }
                     }
                 } else {
                     let e = rec_elapsed;
@@ -2836,22 +3029,12 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::CvStartRecord { system }) => {
-                    // System audio = passive tap of the default sink's monitor.
-                    // Settings-tab device choices win; "" = system default
-                    let target = if system {
-                        if cfg.monitor_device.is_empty() {
-                            default_monitor().await
-                        } else {
-                            Some(cfg.monitor_device.clone())
-                        }
-                    } else if cfg.mic_device.is_empty() {
-                        None
-                    } else {
-                        Some(cfg.mic_device.clone())
-                    };
-                    match start_pw_record(&cv_wav, target.as_deref()).await {
-                        Ok(child) => {
-                            cv_rec = Some(child);
+                    // System audio = passive tap of the default sink's monitor
+                    // (Linux only; the ⚙ mic choice wins for mic, "" = default).
+                    let (target, _ok) = resolve_capture_device(&cfg, system).await;
+                    match capture_start(&proxy, &cv_wav, target.as_deref()).await {
+                        Ok(cap) => {
+                            cv_rec = Some(cap);
                             rec_elapsed = 0;
                             rec_interval.reset();  // first tick a full second out
                             ui.upgrade_in_event_loop(|ui| {
@@ -2859,18 +3042,25 @@ async fn run_session(
                                 ui.set_cv_sample_label("● recording… 0s / 30s".into());
                             }).ok();
                         }
-                        Err(e) => tracing::error!("pw-record failed: {e}"),
+                        Err(e) => tracing::error!("record failed: {e}"),
                     }
                 }
                 Some(Cmd::CvStopRecord) => {
-                    if let Some(mut child) = cv_rec.take() {
-                        stop_pw_record(&mut child).await;
-                        cv_sample = Some(cv_wav.clone());
-                        let label = recorded_label(&cv_wav);
-                        ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_cv_recording(false);
-                            ui.set_cv_sample_label(label.into());
-                        }).ok();
+                    if let Some(cap) = cv_rec.take() {
+                        let path = capture_stop(cap, &proxy, &cv_wav).await;
+                        if path.is_empty() {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_cv_recording(false);
+                                ui.set_cv_sample_label("⚠ recording failed — try again".into());
+                            }).ok();
+                        } else {
+                            cv_sample = Some(path.clone());
+                            let label = recorded_label(&path);
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_cv_recording(false);
+                                ui.set_cv_sample_label(label.into());
+                            }).ok();
+                        }
                     }
                 }
                 Some(Cmd::CvPickFile) => {
@@ -3105,8 +3295,8 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::CvCancel) => {
-                    if let Some(mut child) = cv_rec.take() {
-                        stop_pw_record(&mut child).await;
+                    if let Some(cap) = cv_rec.take() {
+                        capture_discard(cap, &proxy).await;
                     }
                     cv_sample = None;
                     cv_edit = None;
@@ -3383,19 +3573,24 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::TrToggleRecord { system }) => {
-                    if let Some(mut child) = tr_rec.take() {
+                    if let Some(cap) = tr_rec.take() {
                         // stop → transcribe (unless the capture came out silent)
-                        stop_pw_record(&mut child).await;
-                        if wav_rms(&tr_wav).map(|r| r < 0.006).unwrap_or(true) {
+                        let path = capture_stop(cap, &proxy, &tr_wav).await;
+                        if path.is_empty() {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_recording(false);
+                                ui.set_tr_status("⚠ recording failed — try again".into());
+                            }).ok();
+                        } else if wav_rms(&path).map(|r| r < 0.006).unwrap_or(true) {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_tr_recording(false);
                                 ui.set_tr_status("⚠ capture was silent — check the input device".into());
                             }).ok();
                         } else {
-                            match proxy.transcribe_file(&tr_wav).await {
+                            match proxy.transcribe_file(&path).await {
                                 Ok(id) => {
                                     pending_tr = id;
-                                    tr_source = tr_wav.clone();
+                                    tr_source = path.clone();
                                     ui.upgrade_in_event_loop(|ui| {
                                         ui.set_tr_recording(false);
                                         ui.set_tr_busy(true);
@@ -3413,26 +3608,17 @@ async fn run_session(
                             }
                         }
                     } else {
-                        // Settings-tab device choices win; "" = system default
-                        let device = if system {
-                            if cfg.monitor_device.is_empty() {
-                                default_monitor().await
-                            } else {
-                                Some(cfg.monitor_device.clone())
-                            }
-                        } else if cfg.mic_device.is_empty() {
-                            None
-                        } else {
-                            Some(cfg.mic_device.clone())
-                        };
-                        if system && device.is_none() {
+                        // System taps the output (Linux only); mic uses the ⚙
+                        // choice ("" = default).
+                        let (device, ok) = resolve_capture_device(&cfg, system).await;
+                        if !ok {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_tr_status("no default sink monitor found".into());
                             }).ok();
                         } else {
-                            match start_pw_record(&tr_wav, device.as_deref()).await {
-                                Ok(child) => {
-                                    tr_rec = Some(child);
+                            match capture_start(&proxy, &tr_wav, device.as_deref()).await {
+                                Ok(cap) => {
+                                    tr_rec = Some(cap);
                                     tr_elapsed = 0;
                                     rec_interval.reset();  // first tick a full second out
                                     let mode = if system { "system" } else { "mic" };
@@ -3553,16 +3739,21 @@ async fn run_session(
                     vc_clips_data = refresh_vc_clips(&ui, &proxy).await;
                 }
                 Some(Cmd::VcToggleRecord { system }) => {
-                    if let Some(mut child) = vc_rec.take() {
+                    if let Some(cap) = vc_rec.take() {
                         // stop → arm the clip as the conversion source
-                        stop_pw_record(&mut child).await;
-                        if wav_rms(&vc_wav).map(|r| r < 0.006).unwrap_or(true) {
+                        let path = capture_stop(cap, &proxy, &vc_wav).await;
+                        if path.is_empty() {
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_vc_recording(false);
+                                ui.set_vc_status("⚠ recorder exited — try again or check the source".into());
+                            }).ok();
+                        } else if wav_rms(&path).map(|r| r < 0.006).unwrap_or(true) {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_vc_recording(false);
                                 ui.set_vc_status("⚠ capture was silent — check the input device".into());
                             }).ok();
                         } else {
-                            vc_source = Some(vc_wav.clone());
+                            vc_source = Some(path.clone());
                             let e = vc_elapsed;
                             let label = format!("recorded clip · {}:{:02}", e / 60, e % 60);
                             ui.upgrade_in_event_loop(move |ui| {
@@ -3573,7 +3764,7 @@ async fn run_session(
                                 ui.set_vc_armed_saved(false);
                                 ui.set_vc_status("".into());
                             }).ok();
-                            match proxy.transcribe_file(&vc_wav).await {
+                            match proxy.transcribe_file(&path).await {
                                 Ok(rid) => {
                                     pending_vc_tr = rid;
                                     vc_tr_clip.clear(); // scratch source — nothing to backfill
@@ -3586,26 +3777,17 @@ async fn run_session(
                             }
                         }
                     } else {
-                        // Settings-tab device choices win; "" = system default
-                        let device = if system {
-                            if cfg.monitor_device.is_empty() {
-                                default_monitor().await
-                            } else {
-                                Some(cfg.monitor_device.clone())
-                            }
-                        } else if cfg.mic_device.is_empty() {
-                            None
-                        } else {
-                            Some(cfg.mic_device.clone())
-                        };
-                        if system && device.is_none() {
+                        // System taps the output (Linux only); mic uses the ⚙
+                        // choice ("" = default).
+                        let (device, ok) = resolve_capture_device(&cfg, system).await;
+                        if !ok {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_vc_status("no default sink monitor found".into());
                             }).ok();
                         } else {
-                            match start_pw_record(&vc_wav, device.as_deref()).await {
-                                Ok(child) => {
-                                    vc_rec = Some(child);
+                            match capture_start(&proxy, &vc_wav, device.as_deref()).await {
+                                Ok(cap) => {
+                                    vc_rec = Some(cap);
                                     vc_elapsed = 0;
                                     pending_vc_tr = 0;  // a stale transcription no longer applies
                                     vc_tr_clip.clear();
@@ -3820,7 +4002,7 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::SettingsLoad) => {
-                    let (mics, mons) = list_audio_devices().await;
+                    let (mics, mons) = list_audio_devices(&proxy).await;
                     st_mics = mics;
                     st_mons = mons;
                     // effective engine knobs select the dropdown rows
@@ -3854,9 +4036,7 @@ async fn run_session(
                     let refine = cfg.refine_dictation;
                     let stop_engine = cfg.stop_engine_on_quit;
                     let export_dir = cfg.export_dir.clone();
-                    let data_dir = std::env::var("SYRINX_DATA_DIR").unwrap_or_else(|_| {
-                        format!("{}/.local/share/syrinx", std::env::var("HOME").unwrap_or_default())
-                    });
+                    let data_dir = engine_data_dir().to_string_lossy().into_owned();
                     ui.upgrade_in_event_loop(move |ui| {
                         ui.set_st_mic_names(ModelRc::from(Rc::new(VecModel::from(mic_names))));
                         ui.set_st_mic_index(mic_idx);

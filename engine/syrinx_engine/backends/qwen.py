@@ -5,9 +5,9 @@ and speaks arbitrary text in it. ~3.5 GB (1.7B) / ~1.2 GB (0.6B). Wants a GPU â€
 this is the one that lights up on the RTX 4090 (bf16 + TF32 + flash attention).
 On CPU it still runs (float32), just slowly.
 
-Cloned voices persist to ``$SYRINX_DATA_DIR/voices`` (default
-``~/.local/share/syrinx/voices``): one ``<id>.pt`` per prompt + an ``index.json``
-mapping id -> display name.
+Cloned voices persist to ``$SYRINX_DATA_DIR/voices`` (default the per-OS data
+dir â€” see ``paths.py``): one ``<id>.pt`` per prompt + an ``index.json`` mapping
+id -> display name.
 
 Grounded in the Voicebox pytorch_backend.py reference:
     Qwen3TTSModel.from_pretrained(...)
@@ -29,6 +29,7 @@ import numpy as np
 
 from . import VoiceInfo, detect_device, empty_device_cache
 from .. import chunking
+from ..paths import data_dir
 
 log = logging.getLogger("syrinx.engine.tts.qwen")
 
@@ -64,10 +65,7 @@ class QwenBackend:
             self.model_size = "1.7B"
         self._model = None
         self._prompts: dict[str, object] = {}  # voice_id -> loaded prompt (cache)
-        data_dir = os.environ.get(
-            "SYRINX_DATA_DIR", str(Path.home() / ".local" / "share" / "syrinx")
-        )
-        self._voices_dir = Path(data_dir) / "voices"
+        self._voices_dir = data_dir() / "voices"
         self._voices_dir.mkdir(parents=True, exist_ok=True)
 
     # --- model ----------------------------------------------------------
