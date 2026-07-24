@@ -230,7 +230,9 @@ def test_detect_hardware_survives_a_missing_sysconf(monkeypatch):
     def boom(_name):
         raise OSError("no sysconf here")
 
-    monkeypatch.setattr(models.os, "sysconf", boom)
+    # raising=False so this also runs on Windows, where os.sysconf doesn't exist
+    # (the detect_hardware fallback we're asserting is exactly that platform's)
+    monkeypatch.setattr(models.os, "sysconf", boom, raising=False)
     assert models.detect_hardware()["ram_gb"] == 0.0
 
 

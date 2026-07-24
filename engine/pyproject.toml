@@ -4,7 +4,9 @@ version = "0.1.0"
 description = "Syrinx ML engine — Qwen3-TTS + whisper.cpp, exposed on D-Bus"
 requires-python = ">=3.11"
 dependencies = [
-    "dbus-next>=0.2.3",   # async D-Bus service
+    "dbus-next>=0.2.3",   # async D-Bus service (Linux transport; pure-Python, installs on Win/mac but never connects there)
+    "websockets>=13",     # JSON-RPC WebSocket transport (Windows/macOS)
+    "platformdirs>=4",    # per-OS discovery-file path (must match Rust `dirs`)
     "numpy",
     "sounddevice",        # PipeWire capture/playback
     "soundfile",          # audio I/O

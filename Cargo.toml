@@ -10,11 +10,17 @@ repository = "https://github.com/TheHalfrican/syrinx"
 
 [workspace.dependencies]
 syrinx-shared = { path = "shared" }
-# D-Bus (async, pure-Rust)
+# D-Bus (async, pure-Rust) — the Linux transport
 zbus = "4"
+# JSON-RPC-over-WebSocket transport (Windows/macOS + contract tests)
+tokio-tungstenite = "0.24"
 # Async runtime
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
 anyhow = "1"
 serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+futures-util = "0.3"
+# per-OS data/runtime dirs — resolves the discovery-file path (spec §2.2)
+dirs = "5"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }

@@ -1,9 +1,10 @@
-"""The sh.syrinx.Engine1 D-Bus surface, driven without a bus.
+"""The engine method surface, driven directly against the transport-agnostic
+``EngineCore``.
 
-dbus-next's ServiceInterface works unattached — signal emission is a no-op
-with no bus, so the interface can be constructed and called directly. Its
-``@method()`` wrapper swallows the return value on a plain call, so tests go
-through the coroutine it left on ``__wrapped__``.
+The core's methods are plain coroutines (no transport decorator), so they can
+be constructed and awaited directly; signal emission goes through the injected
+``_emit`` seam, a no-op here. The D-Bus wrapper and the RPC server are exercised
+over these same methods by the contract tests in ``test_contract.py``.
 
 Only the paths that stay clear of ML inference are exercised: Speak /
 ConvertVoice / Transcribe spawn model loads, so RegenerateHistory is tested
@@ -19,21 +20,24 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from syrinx_engine.service import EngineInterface
+from syrinx_engine.core import EngineCore
 
 RATE = 24_000
 
 
 def call(iface, name, *args):
-    """Invoke a D-Bus method for real (the @method() wrapper drops returns)."""
-    fn = getattr(type(iface), name).__wrapped__
+    """Invoke an engine method for real. Works against the core (plain
+    coroutines) and the D-Bus shim (the @method() wrapper drops returns, so
+    reach the coroutine it left on ``__wrapped__``)."""
+    fn = getattr(type(iface), name)
+    fn = getattr(fn, "__wrapped__", fn)
     out = fn(iface, *args)
     return asyncio.run(out) if inspect.iscoroutine(out) else out
 
 
 @pytest.fixture
 def iface():
-    return EngineInterface()
+    return EngineCore()
 
 
 def tone(secs=1.0, rate=RATE, amp=0.5):
@@ -83,8 +87,8 @@ def test_delete_model_of_an_unknown_id_is_a_no_op(iface):
 
 
 def test_properties(iface):
-    assert iface.ModelLoaded is False
-    assert iface.Backend in ("cpu", "cuda", "rocm")
+    assert iface._model_loaded is False
+    assert iface.backend_name in ("cpu", "cuda", "rocm")
 
 
 # --- settings ------------------------------------------------------------

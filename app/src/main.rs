@@ -6,12 +6,11 @@
 
 slint::include_modules!();
 
-use futures_util::StreamExt;
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
 use std::process::Stdio;
 use std::rc::Rc;
-use syrinx_shared::EngineProxy;
+use syrinx_shared::{EngineClient, EngineError, EngineEvent};
 use tokio::sync::mpsc;
 
 enum Cmd {
@@ -1125,8 +1124,9 @@ const STYLES: &[(&str, &str)] = &[
     ("Serious", "Speak in a grave, deadly serious tone — measured, cold, and commanding."),
 ];
 
-/// Short human message for a failed profile D-Bus call.
-fn profile_err_msg(e: &zbus::Error) -> String {
+/// Short human message for a failed profile call (either transport). Matches on
+/// the raw engine failure text, which `EngineError::Display` surfaces verbatim.
+fn profile_err_msg(e: &EngineError) -> String {
     let s = e.to_string();
     if s.contains("UNIQUE constraint failed: profiles.name") {
         "A voice with that name already exists.".into()
@@ -1330,7 +1330,7 @@ fn hardware_line(json: &str) -> String {
 /// dropdown order plus the active voice engine name.
 async fn refresh_models(
     ui: &slint::Weak<AppWindow>,
-    proxy: &EngineProxy<'_>,
+    proxy: &EngineClient,
 ) -> (Vec<(String, String)>, String) {
     let models_json = proxy.list_models().await.unwrap_or_else(|_| "[]".into());
     let hw_json = proxy.hardware().await.unwrap_or_default();
@@ -1376,7 +1376,7 @@ async fn refresh_models(
 /// Rebuild the voice-card grid from the engine (after create/edit/delete/import).
 async fn refresh_grid(
     ui: &slint::Weak<AppWindow>,
-    proxy: &EngineProxy<'_>,
+    proxy: &EngineClient,
     cache: &mut HashMap<String, RgbaBuf>,
 ) {
     let raw = proxy.list_voices().await.unwrap_or_default();
@@ -1430,7 +1430,7 @@ fn vp_to_rows(data: &[VpRowData], filter: &str) -> Vec<ProfileRow> {
 /// Fill the Voices-tab inspector from GetProfile (+ cached table row data).
 async fn inspect_profile(
     ui: &slint::Weak<AppWindow>,
-    proxy: &EngineProxy<'_>,
+    proxy: &EngineClient,
     voices_all: &[VpRowData],
     id: &str,
 ) {
@@ -1486,7 +1486,7 @@ async fn inspect_profile(
 /// Rebuild the Voices-tab table (profiles + per-voice generation counts).
 async fn refresh_voices_table(
     ui: &slint::Weak<AppWindow>,
-    proxy: &EngineProxy<'_>,
+    proxy: &EngineClient,
     cache: &mut HashMap<String, RgbaBuf>,
     out: &mut Vec<VpRowData>,
 ) {
@@ -1804,7 +1804,7 @@ fn lib_engines_for_type(type_idx: i32) -> Vec<&'static str> {
 }
 
 /// Fetch and classify all generations for the Library.
-async fn lib_load(proxy: &EngineProxy<'_>) -> (Vec<LibRow>, Vec<String>) {
+async fn lib_load(proxy: &EngineClient) -> (Vec<LibRow>, Vec<String>) {
     let j = proxy.list_history().await.unwrap_or_else(|_| "[]".into());
     let arr: Vec<serde_json::Value> = serde_json::from_str(&j).unwrap_or_default();
     let mut rows = Vec::new();
@@ -1913,7 +1913,7 @@ fn lib_apply(
 /// worker keeps for arming/audition/deletion by id.
 async fn refresh_vc_clips(
     ui: &slint::Weak<AppWindow>,
-    proxy: &EngineProxy<'_>,
+    proxy: &EngineClient,
 ) -> Vec<(String, String, String, String)> {
     let j = proxy.list_source_clips().await.unwrap_or_else(|_| "[]".into());
     let arr: Vec<serde_json::Value> = serde_json::from_str(&j).unwrap_or_default();
@@ -1947,7 +1947,7 @@ fn set_captures_model(ui: &AppWindow, items: Vec<CaptureItem>) {
 /// editor's preset list. Returns (dropdown ids, editor (id, builtin) pairs).
 async fn refresh_effect_presets(
     ui: &slint::Weak<AppWindow>,
-    proxy: &EngineProxy<'_>,
+    proxy: &EngineClient,
 ) -> (Vec<String>, Vec<(String, bool)>) {
     let fx_json = proxy.list_effect_presets().await.unwrap_or_else(|_| "[]".into());
     let fx: Vec<serde_json::Value> = serde_json::from_str(&fx_json).unwrap_or_default();
@@ -2049,12 +2049,35 @@ fn fxe_sync(
     .ok();
 }
 
+/// Bring up the engine transport. Linux: the session-bus D-Bus proxy, exactly
+/// as before (the connect attempt is what wakes the engine via D-Bus
+/// activation). Win/mac: the JSON-RPC client, retried with backoff while the
+/// cold-launch splash keeps cycling — the engine is started manually for now
+/// (auto-spawn is a later seam), so "not ready yet" is the normal early state.
+#[cfg(unix)]
+async fn connect_engine(_ui: &slint::Weak<AppWindow>) -> anyhow::Result<EngineClient> {
+    Ok(EngineClient::connect_dbus().await?)
+}
+
+#[cfg(not(unix))]
+async fn connect_engine(_ui: &slint::Weak<AppWindow>) -> anyhow::Result<EngineClient> {
+    loop {
+        match EngineClient::connect_rpc().await {
+            Ok(c) => return Ok(c),
+            Err(e) => {
+                tracing::debug!("engine not ready yet: {e}");
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+        }
+    }
+}
+
 async fn worker(
     ui: slint::Weak<AppWindow>,
     mut rx: mpsc::UnboundedReceiver<Cmd>,
 ) -> anyhow::Result<()> {
-    let conn = zbus::Connection::session().await?;
-    let proxy = EngineProxy::new(&conn).await?;
+    let proxy = connect_engine(&ui).await?;
+    let mut events = proxy.events();
 
     let backend = proxy.backend().await.unwrap_or_else(|_| "cpu".into());
     let raw = proxy.list_voices().await.unwrap_or_default();
@@ -2087,15 +2110,6 @@ async fn worker(
         .ok();
     }
 
-    let mut levels = proxy.receive_audio_level().await?;
-    let mut gprog = proxy.receive_generation_progress().await?;
-    let mut tprog = proxy.receive_transcribe_progress().await?;
-    let mut tres = proxy.receive_transcribe_result().await?;
-    let mut ended = proxy.receive_speak_ended().await?;
-    let mut pinfo = proxy.receive_playback_info().await?;
-    let mut pprog = proxy.receive_playback_progress().await?;
-    let mut llm_res = proxy.receive_llm_result().await?;
-    let mut mprog = proxy.receive_model_progress().await?;
     let mut pending_llm: u32 = 0;
     let (mut voice_models, mut active_engine) = refresh_models(&ui, &proxy).await;
     let mut lang_codes = update_composer_langs(&ui, "kokoro", "en");
@@ -2186,17 +2200,17 @@ async fn worker(
 
     loop {
         tokio::select! {
-            Some(sig) = levels.next() => {
-                if let Ok(a) = sig.args() {
-                    let rms = a.rms as f32;
+            // One unified event stream feeds every arm the nine D-Bus signal
+            // streams used to; the transport (D-Bus or RPC) is invisible here.
+            Some(ev) = events.recv() => match ev {
+                EngineEvent::AudioLevel { rms, .. } => {
+                    let rms = rms as f32;
                     ui.upgrade_in_event_loop(move |ui| ui.set_level(rms)).ok();
                 }
-            }
-            Some(sig) = gprog.next() => {
-                if let Ok(a) = sig.args() {
+                EngineEvent::GenerationProgress { gen_id, state, .. } => {
                     // conversions report to the ⇄ tab, not the composer
-                    let is_vc = pending_vc != 0 && a.gen_id == pending_vc;
-                    if let Some(msg) = a.state.strip_prefix("error:") {
+                    let is_vc = pending_vc != 0 && gen_id == pending_vc;
+                    if let Some(msg) = state.strip_prefix("error:") {
                         let msg = msg.trim().to_string();
                         ui.upgrade_in_event_loop(move |ui| {
                             if is_vc {
@@ -2208,7 +2222,7 @@ async fn worker(
                             }
                         }).ok();
                     } else if is_vc {
-                        let stage: SharedString = match a.state.as_str() {
+                        let stage: SharedString = match state.as_str() {
                             "loading model" => "loading model…".into(),
                             "separating" => "separating stems…".into(),
                             "converting" if pending_vc_music => "converting vocals…".into(),
@@ -2223,7 +2237,7 @@ async fn worker(
                         }).ok();
                         // the clip is already saved when auto-play starts —
                         // surface it in the rail now, not when playback ends
-                        if a.state == "playing" {
+                        if state == "playing" {
                             if let Ok(j) = proxy.list_history().await {
                                 let items = build_history(&j);
                                 ui.upgrade_in_event_loop(move |ui| set_history_model(&ui, items)).ok();
@@ -2231,23 +2245,16 @@ async fn worker(
                         }
                     }
                 }
-            }
-            Some(sig) = tprog.next() => {
-                if let Ok(a) = sig.args() {
-                    if a.req_id == pending_tr && pending_tr != 0 {
-                        let partial = a.partial.to_string();
+                EngineEvent::TranscribeProgress { req_id, partial } => {
+                    if req_id == pending_tr && pending_tr != 0 {
                         ui.upgrade_in_event_loop(move |ui| ui.set_tr_text(partial.into())).ok();
-                    } else if a.req_id == pending_vc_tr && pending_vc_tr != 0 {
-                        let partial = a.partial.to_string();
+                    } else if req_id == pending_vc_tr && pending_vc_tr != 0 {
                         ui.upgrade_in_event_loop(move |ui| ui.set_vc_transcript(partial.into())).ok();
                     }
                 }
-            }
-            Some(sig) = tres.next() => {
-                if let Ok(a) = sig.args() {
-                    if a.req_id == pending_vc_tr && pending_vc_tr != 0 && a.req_id != pending_tr {
+                EngineEvent::TranscribeResult { req_id, text } => {
+                    if req_id == pending_vc_tr && pending_vc_tr != 0 && req_id != pending_tr {
                         pending_vc_tr = 0;
-                        let text = a.text.to_string();
                         // clip armed/saved before whisper finished — cache it
                         if !vc_tr_clip.is_empty() {
                             if !text.trim().is_empty() {
@@ -2268,9 +2275,8 @@ async fn worker(
                             ui.set_vc_transcribing(false);
                             ui.set_vc_transcript(text.into());
                         }).ok();
-                    } else if a.req_id == pending_tr && pending_tr != 0 {
+                    } else if req_id == pending_tr && pending_tr != 0 {
                         pending_tr = 0;
-                        let text = a.text.to_string();
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_tr_busy(false);
                             if text.trim().is_empty() {
@@ -2282,18 +2288,14 @@ async fn worker(
                         }).ok();
                     }
                 }
-            }
-            Some(sig) = pinfo.next() => {
-                if let Ok(a) = sig.args() {
-                    current_play_gen = a.gen_id;
+                EngineEvent::PlaybackInfo { gen_id, clip_id, title, duration, bars } => {
+                    current_play_gen = gen_id;
                     playing = true;
-                    player_dur = a.duration;
+                    player_dur = duration;
                     last_pct = 0.0;
-                    current_clip = a.clip_id.to_string();
-                    let bars: Vec<f32> = serde_json::from_str(&a.bars).unwrap_or_default();
-                    let title = a.title;
-                    let clip_id = a.clip_id;
-                    let time = format!("0:00 / {}", fmt_dur(a.duration));
+                    current_clip = clip_id.clone();
+                    let bars: Vec<f32> = serde_json::from_str(&bars).unwrap_or_default();
+                    let time = format!("0:00 / {}", fmt_dur(duration));
                     ui.upgrade_in_event_loop(move |ui| {
                         ui.set_player_active_visible(true);
                         ui.set_player_bars(ModelRc::from(Rc::new(VecModel::from(bars))));
@@ -2307,12 +2309,9 @@ async fn worker(
                         ui.set_synthesizing(false);
                     }).ok();
                 }
-            }
-            Some(sig) = mprog.next() => {
-                if let Ok(a) = sig.args() {
-                    let id = a.model_id.to_string();
-                    match a.status.as_str() {
-                        "downloading" => set_model_progress(&ui, id, a.pct as f32, true),
+                EngineEvent::ModelProgress { model_id, pct, status } => {
+                    match status.as_str() {
+                        "downloading" => set_model_progress(&ui, model_id, pct as f32, true),
                         _ => { // done / error
                             let r = refresh_models(&ui, &proxy).await;
                             voice_models = r.0;
@@ -2320,13 +2319,10 @@ async fn worker(
                         }
                     }
                 }
-            }
-            Some(sig) = llm_res.next() => {
-                if let Ok(a) = sig.args() {
+                EngineEvent::LlmResult { req_id, text } => {
                     // transcription-view refine result routes to tr-text
-                    if a.req_id == pending_tr_refine && pending_tr_refine != 0 {
+                    if req_id == pending_tr_refine && pending_tr_refine != 0 {
                         pending_tr_refine = 0;
-                        let text = a.text.to_string();
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_tr_busy(false);
                             ui.set_tr_status("".into());
@@ -2334,9 +2330,8 @@ async fn worker(
                                 ui.set_tr_text(text.into());
                             }
                         }).ok();
-                    } else if a.req_id == pending_llm && pending_llm != 0 {
+                    } else if req_id == pending_llm && pending_llm != 0 {
                         pending_llm = 0;
-                        let text = a.text;
                         let ui_text = text.clone();
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_llm_busy(false);
@@ -2360,85 +2355,83 @@ async fn worker(
                         }
                     }
                 }
-            }
-            Some(sig) = pprog.next() => {
-                if let Ok(a) = sig.args() {
+                EngineEvent::PlaybackProgress { gen_id, pct } => {
                     // trim preview reached the out-handle — stop there
-                    if trim_gen != 0 && a.gen_id == trim_gen && a.pct >= trim_end_pct {
+                    if trim_gen != 0 && gen_id == trim_gen && pct >= trim_end_pct {
                         proxy.cancel(trim_gen).await.ok();
                         trim_gen = 0;
                         ui.upgrade_in_event_loop(|ui| ui.set_trim_playing(false)).ok();
                     }
-                    if a.gen_id == current_play_gen {
-                        last_pct = a.pct;
-                        let pct = a.pct as f32;
-                        let time = format!("{} / {}", fmt_dur(a.pct * player_dur), fmt_dur(player_dur));
+                    if gen_id == current_play_gen {
+                        last_pct = pct;
+                        let pctf = pct as f32;
+                        let time = format!("{} / {}", fmt_dur(pct * player_dur), fmt_dur(player_dur));
                         ui.upgrade_in_event_loop(move |ui| {
-                            ui.set_play_pct(pct);
+                            ui.set_play_pct(pctf);
                             ui.set_player_time(time.into());
                         }).ok();
                     }
                 }
-            }
-            Some(sig) = ended.next() => {
-                let is_current = sig.args().map(|a| a.gen_id == current_play_gen).unwrap_or(false);
-                if is_current { playing = false; }
-                // trim preview ran out (or was cancelled) — flip ▶ back
-                if trim_gen != 0 && sig.args().map(|a| a.gen_id == trim_gen).unwrap_or(false) {
-                    trim_gen = 0;
-                    ui.upgrade_in_event_loop(|ui| ui.set_trim_playing(false)).ok();
-                }
-                // conversion ran its course (played out or errored) — settle the ⇄ tab
-                if pending_vc != 0 && sig.args().map(|a| a.gen_id == pending_vc).unwrap_or(false) {
-                    pending_vc = 0;
-                    ui.upgrade_in_event_loop(|ui| {
-                        ui.set_vc_busy(false);
-                        if ui.get_vc_status().starts_with("done") {
-                            ui.set_vc_status("done · saved to History".into());
+                EngineEvent::SpeakEnded { gen_id } => {
+                    let is_current = gen_id == current_play_gen;
+                    if is_current { playing = false; }
+                    // trim preview ran out (or was cancelled) — flip ▶ back
+                    if trim_gen != 0 && gen_id == trim_gen {
+                        trim_gen = 0;
+                        ui.upgrade_in_event_loop(|ui| ui.set_trim_playing(false)).ok();
+                    }
+                    // conversion ran its course (played out or errored) — settle the ⇄ tab
+                    if pending_vc != 0 && gen_id == pending_vc {
+                        pending_vc = 0;
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_vc_busy(false);
+                            if ui.get_vc_status().starts_with("done") {
+                                ui.set_vc_status("done · saved to History".into());
+                            }
+                        }).ok();
+                    }
+                    // source-clip audition finished -> flip ■ back to ▶
+                    if vc_audition_gen != 0 && gen_id == vc_audition_gen {
+                        vc_audition_gen = 0;
+                        vc_audition_id.clear();
+                        ui.upgrade_in_event_loop(|ui| ui.set_vc_audition_id("".into())).ok();
+                    }
+                    // sample audition ran to its end (or was replaced) -> flip ■ back to ▶
+                    let sample_done = sample_gen != 0 && gen_id == sample_gen;
+                    if sample_done {
+                        sample_gen = 0;
+                        sample_playing.clear();
+                        ui.upgrade_in_event_loop(|ui| ui.set_vs_playing("".into())).ok();
+                    }
+                    // Loop: re-trigger only when the clip ran to its natural end
+                    // (a Stop/Cancel arrives with the progress short of 1.0).
+                    let looping = is_current && loop_on && last_pct > 0.97 && !current_clip.is_empty();
+                    // Refresh history only on success — never wipe the list on a failed call.
+                    let refreshed = proxy.list_history().await.ok().map(|j| build_history(&j));
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_generating(false);
+                        ui.set_synthesizing(false);
+                        ui.set_level(0.0);
+                        if is_current && !looping {
+                            ui.set_player_playing(false);
+                            ui.set_player_paused(false);
+                            ui.set_play_pct(1.0);
+                        }
+                        if let Some(items) = refreshed {
+                            set_history_model(&ui, items);
                         }
                     }).ok();
-                }
-                // source-clip audition finished -> flip ■ back to ▶
-                if vc_audition_gen != 0
-                    && sig.args().map(|a| a.gen_id == vc_audition_gen).unwrap_or(false)
-                {
-                    vc_audition_gen = 0;
-                    vc_audition_id.clear();
-                    ui.upgrade_in_event_loop(|ui| ui.set_vc_audition_id("".into())).ok();
-                }
-                // sample audition ran to its end (or was replaced) -> flip ■ back to ▶
-                let sample_done = sample_gen != 0
-                    && sig.args().map(|a| a.gen_id == sample_gen).unwrap_or(false);
-                if sample_done {
-                    sample_gen = 0;
-                    sample_playing.clear();
-                    ui.upgrade_in_event_loop(|ui| ui.set_vs_playing("".into())).ok();
-                }
-                // Loop: re-trigger only when the clip ran to its natural end
-                // (a Stop/Cancel arrives with the progress short of 1.0).
-                let looping = is_current && loop_on && last_pct > 0.97 && !current_clip.is_empty();
-                // Refresh history only on success — never wipe the list on a failed call.
-                let refreshed = proxy.list_history().await.ok().map(|j| build_history(&j));
-                ui.upgrade_in_event_loop(move |ui| {
-                    ui.set_generating(false);
-                    ui.set_synthesizing(false);
-                    ui.set_level(0.0);
-                    if is_current && !looping {
-                        ui.set_player_playing(false);
-                        ui.set_player_paused(false);
-                        ui.set_play_pct(1.0);
-                    }
-                    if let Some(items) = refreshed {
-                        set_history_model(&ui, items);
-                    }
-                }).ok();
-                if looping {
-                    last_pct = 0.0;
-                    if let Ok(gid) = proxy.play_history(&current_clip).await {
-                        current_gen = gid;
+                    if looping {
+                        last_pct = 0.0;
+                        if let Ok(gid) = proxy.play_history(&current_clip).await {
+                            current_gen = gid;
+                        }
                     }
                 }
-            }
+                // SpeakStarted / PropertiesChanged: the app consumes neither
+                // (the D-Bus path never subscribed to them either).
+                _ => {}
+            },
             _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() || vc_rec.is_some() => {
                 // recorder died on its own (e.g. a suspended monitor source
                 // erroring at first open) — surface it instead of a phantom
@@ -3002,7 +2995,7 @@ async fn worker(
                                 proxy.delete_profile(&pid).await.ok();
                                 return Err(e);
                             }
-                            zbus::Result::Ok(pid)
+                            Ok::<String, EngineError>(pid)
                         }.await;
                         match outcome {
                             Ok(pid) => {
@@ -4628,12 +4621,12 @@ mod tests {
 
     #[test]
     fn profile_err_msg_humanizes_the_duplicate_name_error() {
-        let dup = zbus::Error::Failure(
+        let dup = EngineError::Engine(
             "sqlite3.IntegrityError: UNIQUE constraint failed: profiles.name".into(),
         );
         assert_eq!(profile_err_msg(&dup), "A voice with that name already exists.");
-        // anything else passes through as the raw D-Bus message
-        let other = zbus::Error::Failure("engine is busy".into());
+        // anything else passes through as the raw engine message
+        let other = EngineError::Engine("engine is busy".into());
         assert_eq!(profile_err_msg(&other), "engine is busy");
     }
 

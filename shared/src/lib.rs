@@ -10,6 +10,17 @@
 
 use serde::{Deserialize, Serialize};
 
+mod client;
+mod error;
+mod event;
+mod rpc_client;
+#[cfg(unix)]
+mod dbus_client;
+
+pub use client::EngineClient;
+pub use error::EngineError;
+pub use event::EngineEvent;
+
 /// A voice the engine can speak with (built-in or a cloned profile).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Voice {
@@ -27,7 +38,10 @@ pub enum Backend {
 
 /// Async proxy for `sh.syrinx.Engine1` on the session bus.
 ///
-/// `zbus` generates the method/signal/property plumbing from this trait.
+/// `zbus` generates the method/signal/property plumbing from this trait. Linux
+/// only — the D-Bus transport is unix-native; `syrinx-dictate` uses this proxy
+/// directly, and the `EngineClient` seam wraps it (see `dbus_client`).
+#[cfg(unix)]
 #[zbus::proxy(
     interface = "sh.syrinx.Engine1",
     default_service = "sh.syrinx.Engine",

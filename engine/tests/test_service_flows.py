@@ -16,6 +16,7 @@ import pytest
 
 from syrinx_engine import models
 from syrinx_engine.backends import VoiceInfo
+from syrinx_engine.core import EngineCore
 from syrinx_engine.service import EngineInterface
 
 RATE = 24_000
@@ -142,7 +143,7 @@ class FakeLLM:
 
 @pytest.fixture
 def iface(fake_sd):
-    e = EngineInterface()
+    e = EngineCore()
     e._tts = FakeTTS()
     e._stt = FakeSTT()
     e._llm = FakeLLM()
@@ -151,30 +152,25 @@ def iface(fake_sd):
 
 @pytest.fixture
 def signals(iface):
-    """Record every emitted signal (instance attrs shadow the class ones)."""
+    """Record every signal the core emits through its ``_emit`` seam."""
     seen = {}
 
-    def recorder(name):
-        def emit(*args):
-            seen.setdefault(name, []).append(args)
+    def emit(name, *args):
+        seen.setdefault(name, []).append(args)
 
-        return emit
-
-    for name in ("GenerationProgress", "PlaybackInfo", "PlaybackProgress", "AudioLevel",
-                 "SpeakStarted", "SpeakEnded", "LlmResult", "TranscribeProgress",
-                 "TranscribeResult", "ModelProgress"):
-        setattr(iface, name, recorder(name))
+    iface._emit = emit
     return seen
 
 
 def drive(iface, name, *args):
-    """Call a D-Bus method and wait out every task it spawned."""
+    """Call an engine method and wait out every task it spawned."""
 
     async def go():
         # the audio lock binds to whichever loop first awaits it, and every
         # asyncio.run() is a fresh loop — rebind before each drive
         iface._audio_lock = asyncio.Lock()
-        out = await getattr(type(iface), name).__wrapped__(iface, *args)
+        fn = getattr(type(iface), name)
+        out = await getattr(fn, "__wrapped__", fn)(iface, *args)
         pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
         if pending:
             await asyncio.gather(*pending, return_exceptions=True)
@@ -194,9 +190,9 @@ def profile(iface, name="Piccolo", **over):
 
 
 def test_warmup_flips_model_loaded(iface):
-    assert iface.ModelLoaded is False
+    assert iface._model_loaded is False
     asyncio.run(iface.warmup())
-    assert iface.ModelLoaded is True
+    assert iface._model_loaded is True
     assert iface._tts.loaded is True
 
 
@@ -457,7 +453,7 @@ def test_cancel_stops_a_running_generation(iface, signals):
         iface._audio_lock = asyncio.Lock()
         gen_id = iface._start_speak("hi", "builtin:kokoro:af_heart")
         await asyncio.sleep(0)  # let run() reach the synthesize await
-        getattr(type(iface), "Cancel").__wrapped__(iface, gen_id)
+        iface.Cancel(gen_id)
         await asyncio.gather(*[t for t in asyncio.all_tasks()
                                if t is not asyncio.current_task()],
                              return_exceptions=True)

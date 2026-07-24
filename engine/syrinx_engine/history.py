@@ -100,7 +100,9 @@ class HistoryStore:
                 c.execute("ALTER TABLE history ADD COLUMN vc_json TEXT DEFAULT ''")
 
     def _rel(self, p: Path) -> str:
-        return str(p.relative_to(self._dir))
+        # forward slashes so the stored path stays portable across OSes
+        # (on Linux as_posix() == str(); on Windows it avoids backslashes)
+        return p.relative_to(self._dir).as_posix()
 
     def _abs(self, rel: str) -> Path:
         return self._dir / rel

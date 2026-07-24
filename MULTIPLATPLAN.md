@@ -253,3 +253,24 @@ all three conversion engines, ♫ music mode — is validated on a CUDA desktop
 (release build + systemd user service + .desktop entry), is worth doing
 *before* phase 1 since 1.2's lifecycle seam builds directly on it. Phase 1
 can start whenever it's prioritized; until then, append findings here.
+
+---
+
+## Findings
+
+**2026-07-24 — Phase 1.1 (transport seam) landed, on Windows.**
+`docs/RPC-PROTOCOL.md` is the wire contract (65 methods / 2 properties /
+10 signals — the "~50" above was an undercount). Engine: `core.py` holds the
+transport-agnostic `EngineCore`; `service.py` is now a thin dbus_next shim
+(introspection-verified byte-identical); `rpc.py` serves JSON-RPC over a
+loopback WebSocket; `__main__.py` selects by platform (`SYRINX_TRANSPORT=
+dbus|rpc|both` override). Rust: `EngineClient` enum in `shared/` (zbus impl
+`#[cfg(unix)]`, tungstenite RPC impl everywhere), unified `EngineEvent`
+stream; `app/` rethreaded onto it, call sites unchanged. Contract tests run
+the same exercises over both wrappers with drift guards (285 pytest @ 95.77%,
+34+5 cargo, clippy clean, `cargo check --target x86_64-unknown-linux-gnu`
+validates the unix impl from Windows). Live smoke: real engine ↔ real Rust
+client ↔ real app window, on Windows, torch-free venv. First Windows
+portability fixes: `HistoryStore` relative paths now stored `as_posix()`
+(Linux-identical), one test's `os.sysconf` monkeypatch. Next: 1.2 lifecycle
+(app spawns engine on Win), 1.3 recording, 1.4 paths.
