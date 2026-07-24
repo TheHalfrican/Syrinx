@@ -10,6 +10,7 @@ CPU-friendly zero-shot cloning — the one cloning engine usable on this box.
 import asyncio
 import json
 import logging
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -22,7 +23,12 @@ log = logging.getLogger("syrinx.engine.tts.luxtts")
 
 _HERE = Path(__file__).resolve()
 _ENGINE_DIR = _HERE.parents[2]  # .../engine
-_LUX_PY = _ENGINE_DIR / ".venv-luxtts" / "bin" / "python"
+# venv layout is per-OS: POSIX puts the interpreter in bin/python, Windows in
+# Scripts/python.exe. The Linux string is byte-identical to before this seam.
+if sys.platform == "win32":
+    _LUX_PY = _ENGINE_DIR / ".venv-luxtts" / "Scripts" / "python.exe"
+else:
+    _LUX_PY = _ENGINE_DIR / ".venv-luxtts" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "luxtts_worker.py"  # .../engine/syrinx_engine/luxtts_worker.py
 _STDERR_LOG = worker_log_path("luxtts")
 

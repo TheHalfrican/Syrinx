@@ -226,13 +226,24 @@ def test_a_models_json_that_cannot_be_written_is_logged_not_raised(tmp_path):
 # --- hardware probing ----------------------------------------------------
 
 
-def test_detect_hardware_survives_a_missing_sysconf(monkeypatch):
+def test_detect_hardware_reports_ram_on_this_platform():
+    # Linux (sysconf) and Windows (ctypes GlobalMemoryStatusEx) both report
+    # real RAM — the cross-platform fix. Only a sysconf-less non-Windows box
+    # returns 0.0 (asserted separately, below).
+    hw = models.detect_hardware()
+    if sys.platform in ("linux", "win32"):
+        assert hw["ram_gb"] > 0.0
+
+
+def test_detect_hardware_falls_back_to_zero_without_a_ram_source(monkeypatch):
     def boom(_name):
         raise OSError("no sysconf here")
 
-    # raising=False so this also runs on Windows, where os.sysconf doesn't exist
-    # (the detect_hardware fallback we're asserting is exactly that platform's)
+    # raising=False so this also runs on Windows, where os.sysconf doesn't
+    # exist. Force a non-win32 platform too, so the ctypes fallback is skipped
+    # and we're asserting the true no-source path on every host OS.
     monkeypatch.setattr(models.os, "sysconf", boom, raising=False)
+    monkeypatch.setattr(models.sys, "platform", "no-ram-source")
     assert models.detect_hardware()["ram_gb"] == 0.0
 
 

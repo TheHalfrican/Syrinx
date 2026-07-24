@@ -14,6 +14,7 @@ import json
 import logging
 import os
 import shutil
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -171,13 +172,45 @@ def spec(model_id: str):
 
 # --- hardware ---------------------------------------------------------------
 
+def _total_ram_gb() -> float:
+    """Total physical RAM in GiB, cross-platform, zero new deps.
+
+    Linux/macOS use ``os.sysconf`` (the historical path — value byte-identical
+    to before). Windows has no ``sysconf``, so fall back to the Win32
+    ``GlobalMemoryStatusEx`` via ctypes. 0.0 when no source is available."""
+    try:
+        return round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3), 1)
+    except (AttributeError, ValueError, OSError):
+        pass
+    if sys.platform == "win32":
+        try:
+            import ctypes
+
+            class _MemoryStatusEx(ctypes.Structure):
+                _fields_ = [
+                    ("dwLength", ctypes.c_ulong),
+                    ("dwMemoryLoad", ctypes.c_ulong),
+                    ("ullTotalPhys", ctypes.c_ulonglong),
+                    ("ullAvailPhys", ctypes.c_ulonglong),
+                    ("ullTotalPageFile", ctypes.c_ulonglong),
+                    ("ullAvailPageFile", ctypes.c_ulonglong),
+                    ("ullTotalVirtual", ctypes.c_ulonglong),
+                    ("ullAvailVirtual", ctypes.c_ulonglong),
+                    ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+                ]
+
+            stat = _MemoryStatusEx()
+            stat.dwLength = ctypes.sizeof(_MemoryStatusEx)
+            if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(stat)):
+                return round(stat.ullTotalPhys / (1024**3), 1)
+        except Exception:  # noqa: BLE001
+            pass
+    return 0.0
+
+
 def detect_hardware() -> dict:
     cores = os.cpu_count() or 1
-    ram_gb = 0.0
-    try:
-        ram_gb = round(os.sysconf("SC_PAGE_SIZE") * os.sysconf("SC_PHYS_PAGES") / (1024**3), 1)
-    except Exception:  # noqa: BLE001
-        pass
+    ram_gb = _total_ram_gb()
     gpu = False
     gpu_name = ""
     try:

@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from . import detect_device
@@ -26,7 +27,12 @@ log = logging.getLogger("syrinx.engine.vc.vevo")
 
 _HERE = Path(__file__).resolve()
 _ENGINE_DIR = _HERE.parents[2]  # .../engine
-_VEVO_PY = _ENGINE_DIR / ".venv-vevo" / "bin" / "python"
+# venv layout is per-OS: POSIX puts the interpreter in bin/python, Windows in
+# Scripts/python.exe. The Linux string is byte-identical to before this seam.
+if sys.platform == "win32":
+    _VEVO_PY = _ENGINE_DIR / ".venv-vevo" / "Scripts" / "python.exe"
+else:
+    _VEVO_PY = _ENGINE_DIR / ".venv-vevo" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "vevo_worker.py"
 _STDERR_LOG = worker_log_path("vevo")
 

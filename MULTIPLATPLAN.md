@@ -144,7 +144,7 @@ still on D-Bus; the transport contract tests pass on both wrappers.
 |---|---|---|---|
 | Kokoro | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU / MPS |
 | Qwen-TTS | CUDA ✅ | CUDA | MPS (verify) / CPU — consider MLX port later |
-| LuxTTS (venv) | CPU ✅ / CUDA (k2 cuda wheels) | verify k2 Windows wheels; fallback CPU torch + k2 CPU wheel | verify k2 mac wheels (CPU) |
+| LuxTTS (venv) | CPU ✅ / CUDA (k2 cuda wheels) | ❌ blocked (2026-07-24): piper-phonemize ships no win wheels/sdist; k2 CPU wheels for win_amd64 EXIST and work (exact HANDOFF pin verified) — revisit if piper-phonemize gains Windows support | verify k2 mac wheels (CPU) |
 | faster-whisper (CTranslate2) | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU (no Metal in CT2 — still fast) |
 | Qwen3 LLM | CPU ✅ / CUDA fp16 ✅ | CUDA fp16 | **MPS fp16** (add "mps" to llm.py device pick) |
 | Chatterbox VC (⇄) | CPU ✅ / CUDA ✅ | CPU / CUDA | MPS (verify — same stack as Chatterbox TTS) |
@@ -332,3 +332,36 @@ process; ct2 must reuse torch's) — codify as win32
 manual attention, works; (4) `detect_hardware` reports ram_gb 0.0 on
 Windows (no os.sysconf) — fix in models.py. Suite green with the full ML
 stack installed (315 @ 95.66%).
+
+**2026-07-24 — Phase 2 (device matrix + Windows packaging) COMPLETE.**
+Windows/CUDA matrix, all validated live on the 4090 over RPC (warm times):
+kokoro ✅ · qwen-tts-1.7B ✅ 6.2s (real clone flow; cold first-gen ~231s =
+one-time import+load, splash-note it) · chatterbox ✅ 3.3s ·
+chatterbox-turbo ✅ 1.2s (needs >5s reference audio — engine assert, not
+platform) · tada-1b ✅ 0.9s (VRAM flat ×3 gens) · whisper-base ✅ 0.9s
+CUDA (stt.py now self-serves the cuBLAS DLL dir — no PATH setup) ·
+qwen3-1.7b LLM ✅ refine 4.7s · pedalboard ✅ · chatterbox_vc ✅ 0.9s ·
+seed-vc ✅ 9.6s speech (♫ music mode untested — no legitimate music file
+on the box; pipeline+demucs installed) · vevo-timbre ✅ 76s incl. weights
+(heavy as predicted) · LuxTTS ❌ piper-phonemize (see matrix). Fixes
+landed: stt.py add_dll_directory, models.py ram_gb via
+GlobalMemoryStatusEx (63.7GB, was 0.0), qwen.py actionable sox error,
+worker launchers per-OS (Scripts\ vs bin/). setup-seedvc.ps1 +
+setup-vevo.ps1 mirror the .sh (authoritative) with a pin-drift pytest
+guard; both prefer uv, fall back to pip. Packaging: scripts/
+build-windows.ps1 → 146MB torch-free bundle (embedded CPython 3.12 +
+sox) → packaging/windows/syrinx.nsi → dist/SyrinxSetup-x64.exe (34.8MB,
+per-user, no UAC); first-run bootstrap pulls cu130-or-CPU torch;
+installed-layout verified: app spawned its bundled engine to "engine
+ready", uninstall preserves user data; GPL/NC boundaries hold (Seed-VC/
+Amphion never bundled). New gotcha ledger: cmd AutoRun + Git-Bash find
+shadowing find.exe stalls every MSVC sdist build (webrtcvad/pyworld/
+parselmouth need BuildTools + clean PATH or vcvars); Seed-VC's HF cache
+overflows MAX_PATH under deep dirs (real data dir is short; enable
+LongPathsEnabled in packaging); pip console-script exes hardcode the
+build-time interpreter (first-run reinstalls the entry point); embeddable
+python needs setuptools + --no-build-isolation; hf_xet absent → slower
+HF downloads (optional install). Suite 327 @ 95.60% with all stacks
+installed. Remaining before phase 3: ♫ music mode ear-test (needs a real
+song), whisper-large/turbo + CV-0.6B/tada-3b variants (mechanical),
+CI release job for the installer.

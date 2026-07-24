@@ -11,8 +11,55 @@ PCM, so we don't marshal seconds of audio over D-Bus.
 import asyncio
 import logging
 import os
+import sys
+from pathlib import Path
 
 log = logging.getLogger("syrinx.engine.stt")
+
+
+def _cublas_bin_dirs() -> list:
+    """Candidate ``nvidia/cublas/bin`` dirs under the running interpreter's
+    site-packages (the pip-installed ``nvidia-cublas-cu12`` wheel)."""
+    import sysconfig
+
+    dirs = []
+    paths = sysconfig.get_paths()
+    for key in ("purelib", "platlib"):
+        base = paths.get(key)
+        if not base:
+            continue
+        d = Path(base) / "nvidia" / "cublas" / "bin"
+        if d not in dirs:
+            dirs.append(d)
+    return dirs
+
+
+def _add_cuda_dll_dirs() -> None:
+    """On Windows, let faster-whisper/CTranslate2 find CUDA's cuBLAS DLLs
+    without a global PATH edit — add the pip-installed
+    ``nvidia/cublas/bin`` to the DLL search path via
+    ``os.add_dll_directory``. Silently skips when the dir is absent (CPU
+    boxes have no nvidia-cublas wheel).
+
+    Deliberately NOT cuDNN: torch 2.13+cu130 bundles its own cuDNN 9 (a cu13
+    build) and loads it first. Adding the ``nvidia-cudnn-cu12`` bin dir makes
+    the cu12 ``cudnn64_9.dll`` resolve ahead of torch's, giving
+    CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH in every torch conv (one
+    cudnn64_9.dll per process). CTranslate2 reuses torch's already-loaded
+    cuDNN, so only cuBLAS needs a hint here.
+    """
+    if sys.platform != "win32":
+        return
+    add = getattr(os, "add_dll_directory", None)
+    if add is None:
+        return
+    for d in _cublas_bin_dirs():
+        try:
+            if d.exists():
+                add(str(d))
+                log.debug("added CUDA DLL dir: %s", d)
+        except OSError:  # noqa: PERF203
+            log.debug("could not add CUDA DLL dir: %s", d)
 
 
 class Transcriber:
@@ -32,6 +79,7 @@ class Transcriber:
         await asyncio.to_thread(self._load_sync)
 
     def _load_sync(self) -> None:
+        _add_cuda_dll_dirs()  # win32: cuBLAS on the DLL search path (see helper)
         from faster_whisper import WhisperModel
 
         try:

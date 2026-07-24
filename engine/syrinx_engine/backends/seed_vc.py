@@ -14,6 +14,7 @@ import asyncio
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 
 from . import detect_device
@@ -25,7 +26,12 @@ log = logging.getLogger("syrinx.engine.vc.seedvc")
 
 _HERE = Path(__file__).resolve()
 _ENGINE_DIR = _HERE.parents[2]  # .../engine
-_SEEDVC_PY = _ENGINE_DIR / ".venv-seedvc" / "bin" / "python"
+# venv layout is per-OS: POSIX puts the interpreter in bin/python, Windows in
+# Scripts/python.exe. The Linux string is byte-identical to before this seam.
+if sys.platform == "win32":
+    _SEEDVC_PY = _ENGINE_DIR / ".venv-seedvc" / "Scripts" / "python.exe"
+else:
+    _SEEDVC_PY = _ENGINE_DIR / ".venv-seedvc" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "seedvc_worker.py"
 _STDERR_LOG = worker_log_path("seedvc")
 

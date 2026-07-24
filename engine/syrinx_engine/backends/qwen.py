@@ -39,6 +39,28 @@ MODELS = {
 }
 
 
+def _import_qwen_tts():
+    """Import ``qwen_tts.Qwen3TTSModel``, translating the opaque pysox failure
+    on a SoX-less box into an actionable message.
+
+    qwen_tts pulls in pysox, which shells out to the ``sox`` binary at import
+    time (``_get_valid_formats``); without it the import dies deep in pysox and
+    the app's GenerationProgress error surface would otherwise show a cryptic
+    ImportError instead of the one thing the user needs to do."""
+    import importlib
+
+    try:
+        mod = importlib.import_module("qwen_tts")
+    except Exception as e:  # noqa: BLE001
+        if "sox" in str(e).lower():
+            raise RuntimeError(
+                "qwen engines need the SoX binary on PATH — install it "
+                "(winget install ChrisBagwell.SoX) and restart the engine"
+            ) from e
+        raise
+    return mod.Qwen3TTSModel
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return s or "voice"
@@ -77,7 +99,8 @@ class QwenBackend:
 
     def _load_sync(self) -> None:
         import torch
-        from qwen_tts import Qwen3TTSModel
+
+        Qwen3TTSModel = _import_qwen_tts()
 
         model_path = MODELS[self.model_size]
         if self.device in ("cuda", "rocm"):
@@ -302,7 +325,8 @@ class QwenCustomVoiceBackend:
 
     def _load_sync(self) -> None:
         import torch
-        from qwen_tts import Qwen3TTSModel
+
+        Qwen3TTSModel = _import_qwen_tts()
 
         path = CV_MODELS[self.model_size]
         if self.device in ("cuda", "rocm"):
