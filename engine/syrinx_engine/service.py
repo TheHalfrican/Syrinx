@@ -70,6 +70,14 @@ class EngineInterface(ServiceInterface):
         return await self._core.ConvertVoice(audio_path, profile_id, engine, label, transcript, mode, semitones)
 
     @method()
+    async def SuggestPitchShift(self, clip_path: "s", profile_id: "s") -> "i":  # noqa: F821
+        """Auto-match for the speech pitch fine-tune: the median-f0 gap in
+        semitones between *clip_path* and *profile_id*'s reference voice
+        (positive = shift the clip up to reach the profile). Raises when the
+        profile is preset/sampleless or either side has no voiced speech."""
+        return await self._core.SuggestPitchShift(clip_path, profile_id)
+
+    @method()
     async def ListVoices(self) -> "a(ss)":  # noqa: F821
         return await self._core.ListVoices()
 

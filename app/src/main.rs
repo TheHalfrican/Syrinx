@@ -94,6 +94,7 @@ enum Cmd {
     VcToggleRecord { system: bool },
     VcPickFile,
     VcConvert { index: usize, engine_index: usize, label: String, transcript: String, mode: String, semitones: i32 },
+    VcSuggestPitch { index: usize },
     VcSaveClip { name: String, transcript: String, kind: String },
     VcDeleteClip { id: String },
     VcArmClip { id: String },
@@ -810,15 +811,22 @@ fn main() -> anyhow::Result<()> {
             } else {
                 ui.get_vc_engine_index().max(0) as usize
             };
-            // ♫ octave dropdown: index 0..4 → −2..+2 octaves, in semitones
+            // ♫ octave dropdown: index 0..4 → −2..+2 octaves, in semitones;
+            // speech semitone dropdown: index 0..12 → −6..+6 st (fine-tune)
             let semitones = if mode == "music" {
                 (ui.get_vc_octave_index().clamp(0, 4) - 2) * 12
             } else {
-                0
+                semitone_index_to_st(ui.get_vc_semitones_index())
             };
             let _ = tx.send(Cmd::VcConvert {
                 index: i.max(0) as usize, engine_index, label, transcript, mode, semitones,
             });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_vc_suggest_pitch(move |i| {
+            let _ = tx.send(Cmd::VcSuggestPitch { index: i.max(0) as usize });
         });
     }
     {
@@ -1600,6 +1608,22 @@ fn fmt_dur(d: f64) -> String {
 /// Engines whose history rows are conversions, not TTS generations.
 fn is_vc_engine(engine: &str) -> bool {
     matches!(engine, "chatterbox_vc" | "seed_vc" | "vevo_timbre" | "vevo2")
+}
+
+/// Speech pitch fine-tune: the 13-entry dropdown (index 0..12) maps to −6..+6
+/// semitones, with index 6 = ±0. Beyond ±6 the shift artifacts outweigh the
+/// register match for speech (music keeps the coarser octave tool).
+const VC_SEMITONE_LIMIT: i32 = 6;
+
+/// Dropdown index → semitones. Clamped so a stray index can't over-shift.
+fn semitone_index_to_st(index: i32) -> i32 {
+    index.clamp(0, 2 * VC_SEMITONE_LIMIT) - VC_SEMITONE_LIMIT
+}
+
+/// A suggested/selected semitone value → dropdown index (inverse of the above),
+/// clamping the engine's suggestion into the ±6 the control can display.
+fn st_to_semitone_index(st: i32) -> i32 {
+    st.clamp(-VC_SEMITONE_LIMIT, VC_SEMITONE_LIMIT) + VC_SEMITONE_LIMIT
 }
 
 /// Conversion-model ids, index-aligned with the vc-engine-names dropdown.
@@ -4123,6 +4147,35 @@ async fn run_session(
                         }
                     }
                 }
+                Some(Cmd::VcSuggestPitch { index }) => {
+                    // ⌖ auto-match: median-f0 gap between the armed source and
+                    // the target profile → clamp to ±6 st → the semitone dropdown
+                    if let (Some(src), Some(pid)) =
+                        (vc_source.clone(), vc_voice_ids.get(index).cloned())
+                    {
+                        match proxy.suggest_pitch_shift(&src, &pid).await {
+                            Ok(st) => {
+                                let idx = st_to_semitone_index(st);
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_vc_semitones_index(idx);
+                                    ui.set_vc_status(format!(
+                                        "auto pitch {st:+} st"
+                                    ).into());
+                                }).ok();
+                            }
+                            Err(e) => {
+                                tracing::error!("suggest pitch failed: {e}");
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_vc_status("⚠ no pitch match".into());
+                                }).ok();
+                            }
+                        }
+                    } else {
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_vc_status("⚠ arm a source first".into());
+                        }).ok();
+                    }
+                }
                 Some(Cmd::VcSaveClip { name, transcript, kind }) => {
                     if let Some(src) = vc_source.clone() {
                         match proxy.save_source_clip(&src, &name, &transcript, &kind).await {
@@ -4831,6 +4884,28 @@ mod tests {
     fn vc_engine_id_tables_stay_in_the_vc_family() {
         assert!(VC_ENGINE_IDS.iter().all(|e| is_vc_engine(e)));
         assert!(VC_MUSIC_ENGINE_IDS.iter().all(|e| is_vc_engine(e)));
+    }
+
+    // --- speech pitch fine-tune index <-> semitones ----------------------
+
+    #[test]
+    fn semitone_index_maps_symmetrically_around_zero() {
+        assert_eq!(semitone_index_to_st(0), -6);
+        assert_eq!(semitone_index_to_st(6), 0); // default ±0
+        assert_eq!(semitone_index_to_st(12), 6);
+        // round-trips for every displayable value
+        for st in -6..=6 {
+            assert_eq!(semitone_index_to_st(st_to_semitone_index(st)), st);
+        }
+    }
+
+    #[test]
+    fn st_to_semitone_index_clamps_out_of_range_suggestions() {
+        assert_eq!(st_to_semitone_index(99), 12); // +6 st cap
+        assert_eq!(st_to_semitone_index(-99), 0); // −6 st cap
+        // and a stray dropdown index never over-shifts
+        assert_eq!(semitone_index_to_st(-5), -6);
+        assert_eq!(semitone_index_to_st(50), 6);
     }
 
     // --- build_history ---------------------------------------------------

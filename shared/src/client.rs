@@ -63,7 +63,7 @@ impl EngineClient {
     }
 }
 
-/// Generate the 69 method + 2 property-getter dispatchers. Each expands to a
+/// Generate the 70 method + 2 property-getter dispatchers. Each expands to a
 /// `match` that either delegates to the zbus proxy (same method name) or issues
 /// an RPC `call` with the PascalCase method name and the args as positional
 /// JSON. Keeping this a table makes the surface auditable against `lib.rs`.
@@ -111,6 +111,7 @@ engine_methods! {
     // --- async transcription & voice conversion --------------------------
     fn transcribe_file(audio_path: &str) -> u32 => "TranscribeFile";
     fn convert_voice(audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str, mode: &str, semitones: i32) -> u32 => "ConvertVoice";
+    fn suggest_pitch_shift(clip_path: &str, profile_id: &str) -> i32 => "SuggestPitchShift";
 
     // --- voice-changer source clips --------------------------------------
     fn save_source_clip(path: &str, name: &str, transcript: &str, kind: &str) -> String => "SaveSourceClip";

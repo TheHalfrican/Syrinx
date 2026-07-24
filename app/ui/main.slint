@@ -786,6 +786,7 @@ export component AppWindow inherits Window {
     in property <[string]> vc-music-engine-names: ["Seed-VC (singing)", "Vevo2 (singing)"];
     in-out property <int> vc-music-engine-index: 0;
     in-out property <int> vc-octave-index: 2;    // 0..4 → −2..+2 octaves (♫ register shift)
+    in-out property <int> vc-semitones-index: 6; // 0..12 → −6..+6 st (speech fine-tune; 6 = ±0)
     // saved source clips (rail), split by kind — the rail shows only the
     // clips matching the active vc-mode (music mode → music clips, etc.)
     in property <[SourceClipItem]> vc-clips-speech;
@@ -935,6 +936,7 @@ export component AppWindow inherits Window {
     callback vc-toggle-record(string);  // "mic" | "system"
     callback vc-pick-file();
     callback vc-convert(int);           // index into vc-voice-names
+    callback vc-suggest-pitch(int);     // ⌖ auto-match: index into vc-voice-names
     callback vc-save-clip();            // persist the armed source (name from vc-clip-name)
     callback vc-delete-clip(string);    // clip id
     callback vc-arm-clip(string);       // clip id -> becomes the conversion source
@@ -2107,6 +2109,24 @@ export component AppWindow inherits Window {
                                     horizontal-stretch: 1;
                                     model: vc-engine-names;
                                     current-index <=> vc-engine-index;
+                                }
+                                // speech semitone fine-tune — pre-shifts the
+                                // source ±6 st before conversion (register nudge
+                                // without the coarse ♫ octave jump)
+                                if vc-mode == "speech" : ThemedDropdown {
+                                    width: narrow ? 76px : 88px;
+                                    model: ["−6 st", "−5 st", "−4 st", "−3 st", "−2 st", "−1 st", "±0 st", "+1 st", "+2 st", "+3 st", "+4 st", "+5 st", "+6 st"];
+                                    current-index <=> vc-semitones-index;
+                                }
+                                // ⌖ auto-match: median-f0 gap source→target
+                                if vc-mode == "speech" : TBtn {
+                                    label: "⌖";
+                                    min-width: 34px;
+                                    clicked => {
+                                        if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
+                                            root.vc-suggest-pitch(vc-voice-index);
+                                        }
+                                    }
                                 }
                                 if vc-mode == "music" : ThemedDropdown {
                                     horizontal-stretch: 1;

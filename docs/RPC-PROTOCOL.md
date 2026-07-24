@@ -23,7 +23,7 @@ document, not one implementation.
 
 | | Count | Source of truth |
 |---|---|---|
-| Methods | **65** | 65 `@method()` in `service.py`; 65 `fn` (of 77) in `lib.rs` |
+| Methods | **66** | 66 `@method()` in `service.py`; 66 `fn` (of 78) in `lib.rs` |
 | Read-only properties | **2** | `ModelLoaded`, `Backend` → become `GetModelLoaded` / `GetBackend` + `PropertiesChanged` |
 | Signals | **10** | 10 `@signal()` → become server→client notifications |
 | Transport-only RPC methods | **4** | `Authenticate`, `GetModelLoaded`, `GetBackend`, `GetProtocolVersion` (no D-Bus analog; properties/handshake are native there) |
@@ -230,7 +230,8 @@ name. `→ null` means a void reply (`{"result":null}`).
 | Method | Params | Result | Semantics |
 |---|---|---|---|
 | `TranscribeFile` | `[audio_path: string]` | integer (req_id) | Async transcription for long files. Partials via `TranscribeProgress`; final via `TranscribeResult`. |
-| `ConvertVoice` | `[audio_path: string, profile_id: string, engine: string, label: string, transcript: string, mode: string, semitones: integer]` | integer (gen_id) | Style-preserved voice conversion (⇄). `engine` `""`=default; `mode` `"music"`=song pipeline. Progress/errors via `GenerationProgress`; auto-plays + lands in history like `Speak`. |
+| `ConvertVoice` | `[audio_path: string, profile_id: string, engine: string, label: string, transcript: string, mode: string, semitones: integer]` | integer (gen_id) | Style-preserved voice conversion (⇄). `engine` `""`=default; `mode` `"music"`=song pipeline. In `"speech"` mode a nonzero `semitones` pitch-shifts the source before conversion (±6 st fine-tune, all VC engines); in `"music"` mode `semitones` shifts the sung register in octave steps. Progress/errors via `GenerationProgress`; auto-plays + lands in history like `Speak`. |
+| `SuggestPitchShift` | `[clip_path: string, profile_id: string]` | integer (semitones) | Auto-match for the speech pitch fine-tune: the median-f0 gap in semitones between `clip_path` and `profile_id`'s reference voice (positive = shift the clip up to reach the profile). **Errors** (not `0`) when the profile is preset/sampleless or either side has no voiced speech — mirroring `ConvertVoice`'s cloned+samples guard. |
 
 ### 4.5 Voice-changer source clips
 
@@ -556,15 +557,15 @@ Notes for the Rust client:
 
 ## 11. Appendix B — Completeness check
 
-- `service.py`: **65** `@method()`, **10** `@signal()`, **2** `@dbus_property`.
-- `lib.rs`: **77** `fn` = **65** methods + **10** signals + **2** properties.
-- §4's method table lists all **65** methods (4.1–4.10:
-  4+11+3+2+5+8+16+4+4+8 = **65**); §6 lists all **10** signals; §5 covers both
+- `service.py`: **66** `@method()`, **10** `@signal()`, **2** `@dbus_property`.
+- `lib.rs`: **78** `fn` = **66** methods + **10** signals + **2** properties.
+- §4's method table lists all **66** methods (4.1–4.10:
+  4+11+3+3+5+8+16+4+4+8 = **66**); §6 lists all **10** signals; §5 covers both
   properties.
 - **No `lib.rs` ↔ `service.py` mismatch** was found: names (PascalCase in
   `service.py`, snake_case-of-the-same in `lib.rs`), arities, and signatures
   correspond one-to-one. (The design brief's "68 methods / ~50 methods" figures
-  are approximate; the exact current count is **65**.)
+  are approximate; the exact current count is **66**.)
 - `Authenticate`, `GetModelLoaded`, `GetBackend`, `GetProtocolVersion` are
   RPC-transport-only additions with no D-Bus method analog (D-Bus uses native
   properties and has no app-level auth or version handshake).
@@ -651,7 +652,7 @@ supervised child process (MULTIPLATPLAN §1.2).
 Four transport-agnostic engine methods (present on BOTH transports and in
 the D-Bus interface — the drift guards require it; the Linux app simply
 keeps its native `parecord`/`pactl` path and never calls them). This
-extends the §4 method table: the surface is now **69** methods. sounddevice
+extends the §4 method table: the surface is now **70** methods. sounddevice
 (PortAudio) is the backend; its import is lazy per the engine-wide rule.
 
 | Method | Params | Returns | Semantics |

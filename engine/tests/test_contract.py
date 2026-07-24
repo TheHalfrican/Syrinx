@@ -180,7 +180,7 @@ def test_method_surface_matches_across_wrappers():
     iface = EngineInterface()
     dbus_methods = {m.name for m in ServiceInterface._get_methods(iface)}
     assert rpc_methods == dbus_methods
-    assert len(rpc_methods) == 69  # 65 + 4 recording methods (§14)
+    assert len(rpc_methods) == 70  # 66 + 4 recording methods (§14)
     # the 4 transport-only methods have no D-Bus analog (spec §0)
     assert not (set(TRANSPORT_METHODS) & dbus_methods)
 
@@ -200,7 +200,7 @@ def test_properties_map_to_getters():
 # --- D-Bus shim delegation sweep -----------------------------------------
 #
 # Every @method() on EngineInterface is a one-line delegation to the core. This
-# drives all 65 of them through the shim (with the ML boundary faked) so the
+# drives all 66 of them through the shim (with the ML boundary faked) so the
 # wrapper cannot silently rot — a delegation that stops calling its core method,
 # or a method whose signature drifts from the core's, fails here.
 
@@ -223,6 +223,7 @@ def _sweep_args(iface):
         "Transcribe": ("/x.wav",),
         "TranscribeFile": ("/x.wav",),
         "ConvertVoice": ("/x.wav", pid, "", "", "", "speech", 0),
+        "SuggestPitchShift": ("/x.wav", pid),
         "ListVoices": (),
         "CloneVoice": ("Cloned", "/x.wav", "ref"),
         "CreateProfile": (json.dumps({"name": "Another", "voice_type": "cloned"}),),

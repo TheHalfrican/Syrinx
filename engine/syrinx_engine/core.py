@@ -22,6 +22,7 @@ D-Bus service emitted before. Keep it that way.
 import asyncio
 import json
 import logging
+import uuid
 from pathlib import Path
 
 from .tts import SpeechSynthesizer
@@ -34,6 +35,55 @@ from .recording import RecordingManager
 from . import audio, effects, settings as engine_settings
 
 log = logging.getLogger("syrinx.engine.service")
+
+
+# Speech-mode pitch fine-tuning is capped at ±6 semitones: past that the
+# time-stretch artifacts of a phase-vocoder shift outweigh the register match
+# for speech. Music mode keeps the coarser key-preserving octave steps.
+PITCH_SHIFT_LIMIT = 6
+
+
+def _pitch_scratch_dir():
+    """Engine-owned scratch for pre-shifted conversion sources — mirrors
+    recording.py's ``$SYRINX_DATA_DIR/<subdir>`` layout."""
+    from .paths import data_dir
+
+    d = data_dir() / "vc_pitch"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _pitch_shift_wav(src_path: str, semitones: int) -> str:
+    """Pitch-shift *src_path* by *semitones* (phase-vocoder, duration kept) into
+    a fresh scratch WAV; returns its path. Source rate and channel count are
+    preserved so the downstream converter sees the same shape it would have."""
+    import librosa
+    import soundfile as sf
+
+    data, sr = sf.read(src_path, dtype="float32")
+    if data.ndim > 1:
+        # per-channel shift (librosa works along the last axis)
+        shifted = librosa.effects.pitch_shift(data.T, sr=sr, n_steps=semitones).T
+    else:
+        shifted = librosa.effects.pitch_shift(data, sr=sr, n_steps=semitones)
+    out = _pitch_scratch_dir() / f"shift_{uuid.uuid4().hex}.wav"
+    sf.write(str(out), shifted, sr)
+    return str(out)
+
+
+def _median_f0(path: str, max_secs: float = 30.0):
+    """Median fundamental frequency of the voiced speech in *path* (first
+    *max_secs* only, for speed); ``None`` when nothing voiced is found."""
+    import librosa
+    import numpy as np
+
+    y, sr = librosa.load(path, sr=None, mono=True, duration=max_secs)
+    f0, _voiced, _prob = librosa.pyin(
+        y, sr=sr,
+        fmin=librosa.note_to_hz("C2"), fmax=librosa.note_to_hz("C7"),
+    )
+    vals = f0[np.isfinite(f0)]
+    return float(np.median(vals)) if vals.size else None
 
 
 class _PlayCtl:
@@ -307,7 +357,22 @@ class EngineCore:
                     )
                 else:
                     self._emit("GenerationProgress", gen_id, "converting", 0.3)
-                    pcm, rate = await be.convert(audio_path, prof)
+                    # speech pitch fine-tune: pre-shift the SOURCE so every VC
+                    # backend (chatterbox_vc/seed_vc/vevo) converts the shifted
+                    # take with no per-engine code. semitones==0 → today's path.
+                    src = audio_path
+                    if semitones:
+                        src = await asyncio.to_thread(
+                            _pitch_shift_wav, audio_path, semitones
+                        )
+                    try:
+                        pcm, rate = await be.convert(src, prof)
+                    finally:
+                        if src != audio_path:
+                            try:
+                                Path(src).unlink()
+                            except OSError:
+                                pass
                 duration = audio.duration_of(pcm, rate)
                 # label becomes part of the display name (apply-effects style);
                 # the row's text is the source transcript so the history card's
@@ -363,6 +428,43 @@ class EngineCore:
         task = asyncio.create_task(run())
         self._tasks[gen_id] = task
         return gen_id
+
+    async def SuggestPitchShift(self, clip_path, profile_id) -> int:
+        """Auto-match for the speech pitch fine-tune: the median-f0 gap in
+        semitones between *clip_path* and *profile_id*'s reference voice.
+        Positive = shift the clip UP to reach the profile. Raises (surfacing as
+        an RPC error) when the profile is preset/sampleless — mirroring
+        ConvertVoice's guard — or when either side has no voiced speech to
+        measure."""
+        try:
+            return await asyncio.to_thread(
+                self._suggest_pitch_shift, clip_path, profile_id
+            )
+        except Exception:
+            log.exception("SuggestPitchShift(%s, %s) failed", clip_path, profile_id)
+            raise
+
+    def _suggest_pitch_shift(self, clip_path: str, profile_id: str) -> int:
+        import math
+
+        from .backends.chatterbox import combined_ref_wav
+        from .paths import data_dir
+
+        prof = self._profiles.get(profile_id)
+        if prof is None:
+            raise ValueError(f"unknown profile {profile_id!r}")
+        if prof.voice_type != "cloned" or not prof.samples:
+            raise ValueError(f"{prof.name} has no reference samples to match")
+        # combined_ref_wav caches into voices_dir but doesn't create it (the VC
+        # backends' __init__ normally does); ensure it exists off the hot path.
+        voices_dir = data_dir() / "voices"
+        voices_dir.mkdir(parents=True, exist_ok=True)
+        ref = combined_ref_wav(prof, voices_dir)
+        f_clip = _median_f0(clip_path)
+        f_ref = _median_f0(ref)
+        if not f_clip or not f_ref:
+            raise ValueError("no voiced speech to compare")
+        return int(round(12 * math.log2(f_ref / f_clip)))
 
     async def ListVoices(self) -> "list":
         return [[v.id, v.name] for v in await self._tts.list_voices()]

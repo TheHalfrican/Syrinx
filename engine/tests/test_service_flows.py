@@ -321,6 +321,104 @@ def test_music_mode_on_an_engine_without_it_is_refused(iface, make_wav, signals)
     assert "does not support music mode" in errors[0]
 
 
+# --- speech pitch fine-tune (pre-shift) ----------------------------------
+
+
+class _RecordingVC(FakeVC):
+    """Captures the exact source path (and its audio) that reaches convert /
+    convert_music — so the pre-shift can be observed before its temp is swept."""
+
+    def __init__(self):
+        super().__init__()
+        self.speech_paths = []
+        self.speech_audio = []
+        self.music_paths = []
+
+    async def convert(self, path, prof):
+        import soundfile as sf
+
+        self.speech_paths.append(path)
+        self.speech_audio.append(sf.read(path, dtype="float32"))  # while it exists
+        return tone(), RATE
+
+    async def convert_music(self, path, prof, on_stage=None, semitone=0):
+        self.music_paths.append(path)
+        return await super().convert_music(path, prof, on_stage, semitone)
+
+
+def _median_hz(data, sr):
+    import librosa
+    import numpy as np
+
+    f0, _v, _p = librosa.pyin(data, sr=sr, fmin=65.0, fmax=1000.0)
+    vals = f0[np.isfinite(f0)]
+    return float(np.median(vals))
+
+
+def test_speech_semitones_preshift_hands_the_backend_a_shifted_source(iface, make_wav):
+    import math
+
+    vc = _RecordingVC()
+    iface._tts.vc = vc
+    pid = cloned_with_sample(iface, make_wav)
+    src = make_wav("src.wav", secs=1.0, freq=150.0)
+    drive(iface, "ConvertVoice", str(src), pid, "seed_vc", "", "", "speech", 4)
+
+    assert len(vc.speech_paths) == 1
+    assert vc.speech_paths[0] != str(src)  # a temp, not the original
+    data, sr = vc.speech_audio[0]
+    up = 12 * math.log2(_median_hz(data, sr) / 150.0)
+    assert up == pytest.approx(4, abs=0.6)  # pitched ~+4 st
+
+
+def test_speech_semitones_zero_passes_the_original_source_untouched(iface, make_wav):
+    vc = _RecordingVC()
+    iface._tts.vc = vc
+    pid = cloned_with_sample(iface, make_wav)
+    src = make_wav("src.wav", secs=1.0)
+    drive(iface, "ConvertVoice", str(src), pid, "seed_vc", "", "", "speech", 0)
+    # semitones==0 is byte-identical to today: no load/rewrite, original path
+    assert vc.speech_paths == [str(src)]
+
+
+def test_music_mode_never_preshifts_the_source(iface, make_wav):
+    vc = _RecordingVC()
+    iface._tts.vc = vc
+    pid = cloned_with_sample(iface, make_wav)
+    src = make_wav("song.wav", secs=1.0)
+    drive(iface, "ConvertVoice", str(src), pid, "seed_vc", "", "", "music", 5)
+    # music keeps the original path (the octave shift happens inside the worker)
+    assert vc.music_paths == [str(src)]
+    assert vc.stages == [5]
+
+
+# --- SuggestPitchShift ---------------------------------------------------
+
+
+def test_suggest_pitch_shift_measures_the_median_f0_gap(iface, make_wav):
+    pid = profile(iface, "Piccolo")
+    # reference voice ~440 Hz, clip an octave below ~220 Hz → shift the clip +12
+    drive(iface, "AddSample", pid, str(make_wav("ref.wav", secs=1.0, freq=440.0)), "ref")
+    clip = make_wav("clip.wav", secs=1.0, freq=220.0)
+    assert drive(iface, "SuggestPitchShift", str(clip), pid) == 12
+    # symmetric: a high clip vs a low reference suggests shifting down
+    lo = profile(iface, "Bass")
+    drive(iface, "AddSample", lo, str(make_wav("bass.wav", secs=1.0, freq=110.0)), "ref")
+    assert drive(iface, "SuggestPitchShift", str(make_wav("hi.wav", secs=1.0, freq=220.0)), lo) == -12
+
+
+def test_suggest_pitch_shift_refuses_preset_or_sampleless_profiles(iface, make_wav):
+    clip = str(make_wav("clip.wav", secs=1.0, freq=220.0))
+    with pytest.raises(ValueError, match="unknown profile"):
+        drive(iface, "SuggestPitchShift", clip, "nope")
+    bare = profile(iface, "Bare")
+    with pytest.raises(ValueError, match="no reference samples"):
+        drive(iface, "SuggestPitchShift", clip, bare)
+    preset = profile(iface, "Preset", voice_type="preset")
+    with pytest.raises(ValueError, match="no reference samples"):
+        drive(iface, "SuggestPitchShift", clip, preset)
+
+
 # --- Regenerate ----------------------------------------------------------
 
 

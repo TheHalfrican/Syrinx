@@ -123,6 +123,12 @@ pub trait Engine {
     /// auto-plays and lands in history like Speak.
     fn convert_voice(&self, audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str, mode: &str, semitones: i32) -> zbus::Result<u32>;
 
+    /// Auto-match for the speech pitch fine-tune: the median-f0 gap in
+    /// semitones between `clip_path` and `profile_id`'s reference voice
+    /// (positive = shift the clip up to reach the profile). Errors when the
+    /// profile is preset/sampleless or either side has no voiced speech.
+    fn suggest_pitch_shift(&self, clip_path: &str, profile_id: &str) -> zbus::Result<i32>;
+
     /// Copy an audio file into the voice-changer clip store; returns the new
     /// clip id ("" on failure). An empty name gets a time-based default;
     /// `transcript` is cached so re-arming the clip skips re-transcription.
