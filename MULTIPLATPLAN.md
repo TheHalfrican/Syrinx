@@ -362,6 +362,14 @@ LongPathsEnabled in packaging); pip console-script exes hardcode the
 build-time interpreter (first-run reinstalls the entry point); embeddable
 python needs setuptools + --no-build-isolation; hf_xet absent → slower
 HF downloads (optional install). Suite 327 @ 95.60% with all stacks
-installed. Remaining before phase 3: ♫ music mode ear-test (needs a real
-song), whisper-large/turbo + CV-0.6B/tada-3b variants (mechanical),
-CI release job for the installer.
+installed. Remaining before phase 3: whisper-large/turbo +
+CV-0.6B/tada-3b variants (mechanical), CI release job for the installer.
+
+**2026-07-24 — ♫ music mode validated on Windows/CUDA: the matrix is
+done.** Real 31s song → demucs separation 4.8s → seed-vc f0 singing
+conversion 49s → remix instant → auto-play at 55s total; recipe stored,
+Regenerate-able. Every phase-2 row is now resolved; LuxTTS remains the
+sole (documented) Windows exclusion. Dev QoL: "Syrinx (dev)" Start-Menu
+shortcut → target\release\syrinx-app.exe with the repo as cwd (engine
+resolves via the checkout venv; shares data + HF cache with everything
+else).
