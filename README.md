@@ -1,15 +1,20 @@
 # Syrinx
 
-A native, Wayland-first voice studio for Linux — text-to-speech, voice cloning,
-and global-hotkey dictation — built for **CachyOS + Hyprland**.
+A native voice studio — text-to-speech, voice cloning, and global-hotkey
+dictation. Wayland-first on Linux (built for **CachyOS + Hyprland**), and as
+of 2026-07 also fully native on **Windows**.
 
 Named for the *syrinx*, the vocal organ birds sing with (and, in myth, the reeds
 a nymph became — the first pan-pipe).
 
-> Deliberately **not** cross-platform. Syrinx assumes a rolling Arch system,
-> Wayland/wlroots, PipeWire, and a real GPU, and uses each of them natively
-> instead of abstracting over them. That's the whole point: no WebView, no
-> bundled runtime, no compositor-fighting.
+> Native on every platform it touches, portable in none of the usual ways.
+> Linux is the reference platform: Wayland/wlroots, PipeWire, D-Bus, systemd —
+> used directly, never abstracted over. Windows gets its own native mechanisms
+> behind small strategy seams (JSON-RPC transport, app-supervised engine,
+> WASAPI-family audio) rather than a lowest-common-denominator layer. No
+> WebView, no bundled browser runtime, no compositor-fighting — that's still
+> the whole point. See [`MULTIPLATPLAN.md`](MULTIPLATPLAN.md) for how, and
+> [`docs/RPC-PROTOCOL.md`](docs/RPC-PROTOCOL.md) for the wire contract.
 
 ## Architecture at a glance
 
@@ -17,7 +22,7 @@ Four small pieces on the D-Bus session bus, each doing one thing well:
 
 | Component | Language | Role |
 |-----------|----------|------|
-| `engine/` | Python | ML inference — seven TTS engines (Kokoro, Qwen TTS, Qwen CustomVoice, LuxTTS, Chatterbox, Chatterbox Turbo, TADA), three voice-conversion engines (Chatterbox VC, Seed-VC, Vevo-Timbre), faster-whisper STT, Qwen3 personality LLM, Demucs stem separation, pedalboard effects. Plays audio via PipeWire; exposes `sh.syrinx.Engine1` on D-Bus. GPL / dependency-conflicting engines run as isolated-venv worker subprocesses. |
+| `engine/` | Python | ML inference — seven TTS engines (Kokoro, Qwen TTS, Qwen CustomVoice, LuxTTS, Chatterbox, Chatterbox Turbo, TADA), three voice-conversion engines (Chatterbox VC, Seed-VC, Vevo-Timbre), faster-whisper STT, Qwen3 personality LLM, Demucs stem separation, pedalboard effects. Plays audio via PipeWire/PortAudio. Two transports over one transport-free core: `sh.syrinx.Engine1` on D-Bus (Linux) or JSON-RPC 2.0 over a localhost WebSocket (Windows/macOS), with contract tests keeping them in lockstep. GPL / dependency-conflicting engines run as isolated-venv worker subprocesses. |
 | `app/`    | Rust + **Slint** | The main window — native GPU-rendered UI. |
 | `dictate/`| Rust | The dictation pill: a `wlr-layer-shell` overlay, PipeWire capture, `ydotool` paste. Fired by a Hyprland keybind. |
 | `mcp/`    | — | MCP server exposing `syrinx.speak` to agents (stub). |
@@ -31,6 +36,8 @@ a system-installed engine, `wlr-layer-shell`, and `ydotool`.
 See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) for the full design.
 
 ## Quickstart (dev)
+
+**Linux:**
 
 ```sh
 # Engine (Python) — the hot ML service
@@ -46,6 +53,25 @@ cargo run -p syrinx-app
 cargo run -p syrinx-dictate -- toggle
 ```
 
+**Windows** (Python 3.12, MSVC rustup toolchain, SoX on PATH — `winget install
+ChrisBagwell.SoX`; the qwen engines shell out to it at import):
+
+```powershell
+py -3.12 -m venv engine\.venv
+engine\.venv\Scripts\pip install -e engine "numba>=0.60"
+# CUDA: plain pip torch is CPU-only on Windows — use the cu130 index:
+engine\.venv\Scripts\pip install torch torchaudio --index-url https://download.pytorch.org/whl/cu130
+engine\.venv\Scripts\pip install nvidia-cublas-cu12 nvidia-cudnn-cu12   # STT-on-CUDA
+
+cargo run -p syrinx-app    # spawns + supervises the engine itself (no service needed)
+```
+
+Build the app only (`-p syrinx-app`) on Windows — `syrinx-dictate` is
+Linux-only by design. The ⇄ conversion engines install on demand via
+`engine/setup-seedvc.ps1` / `setup-vevo.ps1` (mirrors of the `.sh` scripts;
+MSVC Build Tools required for a few source-built deps). An NSIS installer
+comes from `scripts/build-windows.ps1` — see `packaging/WINDOWS.md`.
+
 Add to your Hyprland config (see `packaging/hyprland.conf`):
 
 ```
@@ -57,6 +83,15 @@ bind = SUPER, D, exec, syrinx-dictate toggle
 **Feature-complete against the original design** — every navigation
 destination is a real, working view. Daily-drivable on a CPU-only machine;
 a CUDA GPU makes the heavy engines fast rather than possible.
+
+**Windows (2026-07-24): the full studio runs natively** — validated
+end-to-end on CUDA: all TTS engines except LuxTTS (blocked upstream by
+piper-phonemize's missing Windows wheels), all three voice converters
+including ♫ music mode, STT, the personality LLM, effects, mic recording,
+and the Library — with the app spawning and supervising the engine itself.
+Not yet on Windows (phase 3): system-audio capture (WASAPI loopback) and
+dictation; those buttons hide themselves there. Linux behavior is
+byte-identical by construction — the contract tests enforce it.
 
 - **Text-to-speech** across seven engines: Kokoro presets (language-filtered),
   and zero-shot cloning with Qwen TTS (1.7B/0.6B), Qwen CustomVoice, LuxTTS

@@ -365,6 +365,39 @@ HF downloads (optional install). Suite 327 @ 95.60% with all stacks
 installed. Remaining before phase 3: whisper-large/turbo +
 CV-0.6B/tada-3b variants (mechanical), CI release job for the installer.
 
+**2026-07-24 (later) — Linux data restored + first-user-session polish.**
+The Linux snapshot (NAS: `Z:\Backups\Syrinx Data`) restored to
+`%LOCALAPPDATA%\syrinx\syrinx` + `%APPDATA%\syrinx`; Piccolo/Frieza/Goku,
+16 history rows, clips, active models all live on Windows (warmup
+auto-fetched whisper-large + qwen3-4b). Polish batch from real usage, all
+committed (7c6c214..0338be1): platform titlebar chip + dictation hint
+gated `is-linux`; **DPI compensation** — this panel is 300% native; app
+targets Linux density by default off-Linux, `ui_scale` in
+`%APPDATA%\syrinx\settings.json` overrides (set 2.0 here; ⚙ knob deferred
+— SLINT_SCALE_FACTOR is read pre-window, would need restart-to-apply);
+**bundled fallback fonts** (DejaVu Sans + 2.3KB Noto merge, fontique
+`unstable-fontique-010`, cfg'd off Linux — 46/46 UI glyphs, tofu gone);
+**avatar AND sample paths stored data-dir-relative** with lazy re-root of
+restored absolute rows — full DB path audit: category CLOSED (vc_json
+.source left inert/graceful by design); `windows_subsystem=windows` on
+release (consoleless shortcut, debug keeps stdout); **cold-engine qwen
+import race fixed** — warmup pre-imports the qwen stack (qwen-active
+only, off-loop, non-fatal, before ModelLoaded) so first generation never
+races; same mechanism could theoretically hit chatterbox/tada cold-first-
+gen — unconfirmed; if seen, generalize to a per-backend preimport() hook.
+Suite 336 @ 95.53%.
+
+**NEXT SESSION — the three remaining Windows items:**
+1. **Model-variant sweeps** (mechanical): whisper-turbo, qwen-tts-0.6B,
+   qwen-custom-voice (both sizes), tada-3b-ml — download + one generation
+   each on CUDA; update the matrix.
+2. **Installer CI release job**: encode packaging/WINDOWS.md's exact steps
+   in Actions (windows runner: cargo release build, build-windows.ps1,
+   portable-NSIS makensis, artifact upload; no signing yet).
+3. **Phase 3 on Windows**: WASAPI loopback system capture (unhides the ◉
+   System buttons + ⚙ tap picker, ♫ record-from-browser) and dictation
+   (RegisterHotKey + SendInput; pill overlay cosmetic — ship without).
+
 **2026-07-24 — ♫ music mode validated on Windows/CUDA: the matrix is
 done.** Real 31s song → demucs separation 4.8s → seed-vc f0 singing
 conversion 49s → remix instant → auto-play at 55s total; recipe stored,

@@ -1,5 +1,14 @@
 # Syrinx — Architecture
 
+> **2026-07 addendum:** this document describes the Linux reference
+> architecture, which is unchanged. Syrinx now also runs natively on Windows
+> via small strategy seams — same core, different native mechanism per OS:
+> D-Bus ↔ JSON-RPC/WebSocket transport ([`RPC-PROTOCOL.md`](RPC-PROTOCOL.md)),
+> systemd/D-Bus activation ↔ app-supervised child engine (§13 there),
+> parecord/PipeWire ↔ engine-side sounddevice capture, XDG ↔ platformdirs.
+> The seam design and per-OS findings live in
+> [`../MULTIPLATPLAN.md`](../MULTIPLATPLAN.md).
+
 ## Design principle
 
 The pain of a portable desktop app comes from abstractions that exist *only* to
