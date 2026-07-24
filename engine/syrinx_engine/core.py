@@ -92,9 +92,37 @@ class EngineCore:
         """Load models in the background, then flip ModelLoaded."""
         await self._tts.load()
         await self._stt.load()
+        # Cold-boot guard: a qwen clone setup's FIRST generation imports the
+        # qwen_tts / transformers stack, and on a fresh engine that first import
+        # can transiently lose a race on transformers' lazy init and fail with
+        # "cannot import name 'AutoConfig'" (a retry clears it). Pre-import it
+        # here — off the event loop, BEFORE ModelLoaded is advertised (the app
+        # gates generation on ModelLoaded) — so the first real generation reuses
+        # the already-imported module and never races. Only for qwen clone
+        # engines: kokoro / chatterbox / tada setups skip the multi-second
+        # import tax. Non-fatal: a SoX-less box logs a warning here and the same
+        # actionable error still resurfaces at generation via _import_qwen_tts.
+        if self._tts.clone_engine.startswith("qwen"):
+            await asyncio.to_thread(self._preimport_qwen_stack)
         self._model_loaded = True
         self._emit_props({"ModelLoaded": True})
         log.info("models loaded")
+
+    @staticmethod
+    def _preimport_qwen_stack() -> None:
+        """Blocking import of the qwen_tts stack, reusing the backend's own
+        wrapper so the SoX-missing error text stays identical to what surfaces
+        at generation time. Never raises — warmup must survive a failing import
+        (no SoX, partial venv); the first generation retries via the wrapper."""
+        try:
+            from .backends.qwen import _import_qwen_tts
+
+            _import_qwen_tts()
+            log.info("pre-imported qwen_tts stack (warmup)")
+        except Exception as e:  # noqa: BLE001
+            log.warning(
+                "qwen_tts pre-import skipped (%s); the first generation will retry", e
+            )
 
     # --- Methods --------------------------------------------------------
 

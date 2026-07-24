@@ -52,6 +52,70 @@ def seed_clip(iface, **over):
     return iface._history.save_clip(**kw)
 
 
+# --- warmup: qwen cold-boot pre-import guard -----------------------------
+
+
+def _stub_model_loads(iface, monkeypatch):
+    """Neuter the heavy tts/stt loads so warmup() exercises only the guard."""
+    async def _noop():
+        return None
+
+    monkeypatch.setattr(iface._tts, "load", _noop)
+    monkeypatch.setattr(iface._stt, "load", _noop)
+
+
+def test_warmup_preimports_qwen_when_clone_engine_is_qwen(iface, monkeypatch):
+    import syrinx_engine.backends.qwen as qwen
+
+    _stub_model_loads(iface, monkeypatch)
+    iface._tts.set_clone_engine("qwen")
+    calls = []
+    monkeypatch.setattr(qwen, "_import_qwen_tts", lambda: calls.append("imported"))
+    props = []
+    iface._emit_props = lambda changed: props.append(changed)
+
+    asyncio.run(iface.warmup())
+
+    assert calls == ["imported"]  # pre-imported exactly once, off the loop
+    assert iface._model_loaded is True
+    assert {"ModelLoaded": True} in props
+
+
+def test_warmup_skips_preimport_for_a_non_qwen_clone_engine(iface, monkeypatch):
+    import syrinx_engine.backends.qwen as qwen
+
+    _stub_model_loads(iface, monkeypatch)
+    iface._tts.set_clone_engine("chatterbox")  # kokoro/chatterbox/tada pay no tax
+    calls = []
+    monkeypatch.setattr(qwen, "_import_qwen_tts", lambda: calls.append("imported"))
+
+    asyncio.run(iface.warmup())
+
+    assert calls == []
+    assert iface._model_loaded is True
+
+
+def test_warmup_survives_a_failing_qwen_preimport(iface, monkeypatch):
+    """A SoX-less / partial venv must not sink warmup — it logs and continues,
+    and ModelLoaded still flips (the first generation retries the import)."""
+    import syrinx_engine.backends.qwen as qwen
+
+    _stub_model_loads(iface, monkeypatch)
+    iface._tts.set_clone_engine("qwen")
+
+    def _boom():
+        raise RuntimeError("qwen engines need the SoX binary on PATH — install it")
+
+    monkeypatch.setattr(qwen, "_import_qwen_tts", _boom)
+    props = []
+    iface._emit_props = lambda changed: props.append(changed)
+
+    asyncio.run(iface.warmup())  # must NOT raise
+
+    assert iface._model_loaded is True
+    assert {"ModelLoaded": True} in props
+
+
 # --- models / hardware ---------------------------------------------------
 
 

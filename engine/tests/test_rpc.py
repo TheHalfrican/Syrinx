@@ -258,6 +258,7 @@ def test_warmup_broadcasts_properties_changed(tmp_path):
     async def go():
         class FakeLoadable:
             backend = "cpu"
+            clone_engine = "kokoro"  # non-qwen → warmup skips the qwen pre-import
 
             async def load(self):
                 return None
