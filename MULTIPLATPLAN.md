@@ -313,3 +313,22 @@ teardown clean. 315 pytest @ 95.20%, 49 cargo, ruff/clippy zero. Phase-1
 exit criteria met modulo full-studio ML validation, which awaits the CUDA
 venv on Windows (environment, not seams). Next: phase 2 device matrix /
 packaging, or Windows CUDA venv bring-up.
+
+**2026-07-24 — Windows CUDA venv up; first device-matrix rows validated.**
+torch 2.13.0+cu130 (Linux parity; the cu128 index tops out at 2.11) +
+`engine[qwen]` + `numba>=0.60` resolved clean into engine/.venv. Live on
+the 4090: Hardware→RTX 4090, backend cuda, kokoro Speak (1.4s warm to
+playback), whisper-base Transcribe on CUDA (0.9s, correct text). Gotchas
+earned: (1) **qwen-tts needs the `sox` BINARY at import** (pysox shells
+out in `_get_valid_formats`) — winget ChrisBagwell.SoX fixes dev;
+packaging must bundle it; (2) the ctranslate2 `cublas64_12.dll` failure is
+the Linux cu12/cu13 split replayed — fix is `nvidia-cublas-cu12` +
+`nvidia-cudnn-cu12` wheels (win_amd64 exist) BUT **only cublas/bin may go
+on PATH: cudnn-cu12 resolving before torch's bundled cu13 cuDNN hits
+CUDNN_STATUS_SUBLIBRARY_VERSION_MISMATCH** (one cudnn64_9.dll per
+process; ct2 must reuse torch's) — codify as win32
+`os.add_dll_directory(nvidia/cublas/bin)` in stt.py's lazy import;
+(3) flash-attn not installed (Windows build ordeal) — qwen falls back to
+manual attention, works; (4) `detect_hardware` reports ram_gb 0.0 on
+Windows (no os.sysconf) — fix in models.py. Suite green with the full ML
+stack installed (315 @ 95.66%).
