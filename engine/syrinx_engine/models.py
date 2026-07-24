@@ -318,6 +318,11 @@ class ModelManager:
         self._settings = _data_dir() / "models.json"
         self._active = dict(_DEFAULT_ACTIVE)
         self._downloading: set = set()
+        # Concurrent snapshot_downloads race huggingface_hub's per-cache
+        # symlink-support probe (WinError 1314 on boxes without Developer
+        # Mode) — fetches must run one at a time. Queued downloads still
+        # appear in `_downloading` immediately, so status() shows them.
+        self._fetch_lock = asyncio.Lock()
         try:
             self._active.update(json.loads(self._settings.read_text()))
         except Exception:  # noqa: BLE001
@@ -395,7 +400,8 @@ class ModelManager:
         poll_task = asyncio.create_task(poll())
         ok = True
         try:
-            await loop.run_in_executor(None, fetch)
+            async with self._fetch_lock:
+                await loop.run_in_executor(None, fetch)
         except Exception:  # noqa: BLE001
             log.exception("download %s failed", model_id)
             ok = False

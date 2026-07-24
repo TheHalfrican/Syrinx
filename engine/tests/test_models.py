@@ -305,6 +305,41 @@ def test_download_passes_the_allow_patterns_and_seed_vc_cache_root(monkeypatch, 
     assert all("*.safetensors" in p for _r, _c, p in seen)
 
 
+def test_concurrent_downloads_fetch_one_at_a_time(monkeypatch):
+    """huggingface_hub's per-cache symlink-support probe races under
+    concurrent snapshot_downloads (WinError 1314 on boxes without Developer
+    Mode) — the fetch phase is serialized, while every requested model still
+    reports `downloading` immediately (queued, not rejected)."""
+    import threading
+    import time
+
+    active, peak = 0, 0
+    gauge = threading.Lock()
+
+    def snapshot_download(repo, cache_dir=None, allow_patterns=None):
+        nonlocal active, peak
+        with gauge:
+            active += 1
+            peak = max(peak, active)
+        time.sleep(0.05)
+        with gauge:
+            active -= 1
+
+    fake_hub(monkeypatch, snapshot_download)
+
+    async def run():
+        mgr = models.ModelManager()
+        t1 = asyncio.create_task(mgr.download("kokoro", lambda *a: None))
+        t2 = asyncio.create_task(mgr.download("whisper-turbo", lambda *a: None))
+        await asyncio.sleep(0.01)  # both past the _downloading.add
+        downloading = {r["id"] for r in mgr.status() if r["downloading"]}
+        assert {"kokoro", "whisper-turbo"} <= downloading
+        return await asyncio.gather(t1, t2)
+
+    assert asyncio.run(run()) == [True, True]
+    assert peak == 1  # never two snapshot_downloads in flight
+
+
 def test_a_failing_download_reports_error(monkeypatch):
     def snapshot_download(repo, cache_dir=None, allow_patterns=None):
         raise RuntimeError("404 from the hub")

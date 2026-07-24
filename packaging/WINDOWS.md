@@ -147,16 +147,15 @@ visible in a PowerShell window. It is re-runnable and:
   disabled by policy, launch `syrinx-app.exe` after setting `SYRINX_ENGINE_CMD`
   and `PATH` yourself.
 - First-run needs network (PyTorch index + PyPI) and ~2–7 GB (CUDA) of download.
-- **Concurrent model downloads race huggingface_hub's symlink probe** (verified
-  2026-07-24). Without Windows **Developer Mode** (or admin), `huggingface_hub`
-  can't create symlinks and probes for support at download time; two overlapping
-  `DownloadModel` calls race that probe and one dies with `WinError 1314` ("A
-  required privilege is not held by the client"). Sequential downloads always
-  succeed, and copy-mode (the non-symlink fallback) roughly doubles the cache's
-  disk footprint. Future work: serialize downloads engine-side (a per-process
-  download lock in the model-download path — lives in engine files owned by the
-  concurrent agent today). Workarounds now: enable Developer Mode, or download
-  models one at a time from the Models tab.
+- **Model downloads are serialized engine-side** (since 2026-07-24). Without
+  Windows **Developer Mode** (or admin), `huggingface_hub` can't create
+  symlinks and probes for support at download time; overlapping
+  `snapshot_download`s race that probe and one dies with `WinError 1314` ("A
+  required privilege is not held by the client"). The engine therefore runs
+  fetches one at a time behind an asyncio lock (`ModelManager._fetch_lock`) —
+  queued models still show as downloading immediately. Copy-mode (the
+  non-symlink fallback) roughly doubles the cache's disk footprint; enabling
+  Developer Mode restores symlink dedup.
 
 ## A future CI release job would run
 
