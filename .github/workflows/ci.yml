@@ -106,7 +106,7 @@ jobs:
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy soundfile dbus-next pytest pytest-cov ruff
+          python -m pip install numpy soundfile dbus-next websockets platformdirs pytest pytest-cov ruff
           python -m pip install -e engine --no-deps
 
       # Lint only — no formatter gate anywhere in this pipeline (deliberate).
