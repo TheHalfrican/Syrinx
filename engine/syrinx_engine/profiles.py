@@ -105,38 +105,41 @@ class ProfileStore:
         c.execute("PRAGMA foreign_keys=ON")
         return c
 
-    # --- avatar path portability (mirrors HistoryStore._rel/_abs, phase 1.4) --
+    # --- profile-media path portability (mirrors HistoryStore._rel/_abs, 1.4) -
     #
-    # Avatars are stored RELATIVE to the data dir (as_posix) so a data snapshot
-    # moved between machines/OSes still resolves. Legacy rows hold an absolute
-    # path from the machine that created them; on read we resolve it, and if it
-    # no longer exists we re-root its ``profiles/<id>/<file>`` tail under the
-    # current data dir — a one-time lazy migration for restored snapshots.
+    # Avatar photos AND reference-sample WAVs both live under
+    # ``profiles/<id>/`` and are stored RELATIVE to the data dir (as_posix) so a
+    # data snapshot moved between machines/OSes still resolves. Legacy rows hold
+    # an absolute path from the machine that created them; on read we resolve it,
+    # and if it no longer exists we re-root its ``profiles/<id>/<file>`` tail
+    # under the current data dir — a one-time lazy migration for restored
+    # snapshots (touching the row rewrites it in the portable relative form).
 
     def _rel(self, p: str | Path) -> str:
         # forward slashes so the stored path stays portable across OSes
         # (Linux: as_posix() == the old absolute-relative value once joined).
         return Path(p).relative_to(self._dir).as_posix()
 
-    def _reroot(self, stored: str, profile_id: str) -> Path | None:
+    def _reroot(self, stored: str, profile_id: str | None) -> Path | None:
         """Re-root a foreign absolute path onto this data dir by matching the
         ``profiles/<id>/<file>`` (or trailing ``profiles/...``) suffix."""
         norm = stored.replace("\\", "/")
-        marker = f"profiles/{profile_id}/"
-        i = norm.find(marker)
+        i = -1
+        if profile_id:
+            i = norm.find(f"profiles/{profile_id}/")
         if i == -1:
             i = norm.rfind("profiles/")
         return (self._dir / norm[i:]) if i != -1 else None
 
-    def _resolve_avatar(self, stored: str, profile_id: str) -> str:
-        """Map a stored avatar path to an absolute path on THIS machine.
+    def _resolve_media(self, stored: str, profile_id: str | None = None) -> str:
+        """Map a stored avatar/sample path to an absolute path on THIS machine.
 
         Blank stays blank. A path that exists as-is (Linux-native today, or a
         Windows-absolute row) is returned verbatim; a relative row resolves
         under the data dir; a stale foreign-absolute row is re-rooted. When
         nothing is on disk we still return the most likely intended location
-        so the row is stable — the app renders a blank avatar when the file
-        can't be opened."""
+        so the row is stable — the app renders a blank avatar / surfaces a
+        clean 'file gone' error when it can't be opened."""
         if not stored:
             return ""
         # `self._dir / stored`: a relative row lands under the data dir; an
@@ -237,7 +240,7 @@ class ProfileStore:
             preset_engine=row["preset_engine"],
             preset_voice_id=row["preset_voice_id"],
             created_at=row["created_at"] or 0.0,
-            avatar_path=self._resolve_avatar(row["avatar_path"] or "", row["id"]),
+            avatar_path=self._resolve_media(row["avatar_path"] or "", row["id"]),
             avatar_mode=row["avatar_mode"] or "circle",
             avatar_sx=row["avatar_sx"] or 0,
             avatar_sy=row["avatar_sy"] or 0,
@@ -252,7 +255,11 @@ class ProfileStore:
             if not row:
                 return None
             samples = [
-                Sample(s["id"], s["audio_path"], s["reference_text"])
+                Sample(
+                    s["id"],
+                    self._resolve_media(s["audio_path"], profile_id),
+                    s["reference_text"],
+                )
                 for s in c.execute(
                     "SELECT * FROM samples WHERE profile_id=?", (profile_id,)
                 ).fetchall()
@@ -399,11 +406,13 @@ class ProfileStore:
         dest_dir.mkdir(parents=True, exist_ok=True)
         dest = dest_dir / f"{sid}.wav"
         shutil.copyfile(src_audio, dest)
+        # store RELATIVE to the data dir (portable across OSes), like avatars
         with self._conn() as c:
             c.execute(
                 "INSERT INTO samples(id,profile_id,audio_path,reference_text) VALUES(?,?,?,?)",
-                (sid, profile_id, str(dest), reference_text),
+                (sid, profile_id, self._rel(dest), reference_text),
             )
+        # hand back the absolute path — callers (cloning engines) open it directly
         return Sample(sid, str(dest), reference_text)
 
     def sample_counts(self) -> dict:
@@ -416,9 +425,9 @@ class ProfileStore:
     def sample_path(self, sample_id: str) -> str:
         with self._conn() as c:
             row = c.execute(
-                "SELECT audio_path FROM samples WHERE id=?", (sample_id,)
+                "SELECT audio_path, profile_id FROM samples WHERE id=?", (sample_id,)
             ).fetchone()
-            return row[0] if row else ""
+            return self._resolve_media(row["audio_path"], row["profile_id"]) if row else ""
 
     def set_sample_text(self, sample_id: str, reference_text: str) -> None:
         with self._conn() as c:
@@ -428,7 +437,11 @@ class ProfileStore:
 
     def delete_sample(self, sample_id: str) -> None:
         with self._conn() as c:
-            row = c.execute("SELECT audio_path FROM samples WHERE id=?", (sample_id,)).fetchone()
+            row = c.execute(
+                "SELECT audio_path, profile_id FROM samples WHERE id=?", (sample_id,)
+            ).fetchone()
             c.execute("DELETE FROM samples WHERE id=?", (sample_id,))
         if row:
-            Path(row["audio_path"]).unlink(missing_ok=True)
+            Path(self._resolve_media(row["audio_path"], row["profile_id"])).unlink(
+                missing_ok=True
+            )

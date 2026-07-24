@@ -114,6 +114,50 @@ def test_add_sample_to_an_unknown_profile_raises(make_wav):
         ProfileStore().add_sample("nope", str(make_wav("ref.wav")), "")
 
 
+def test_new_samples_are_stored_relative_but_read_back_absolute(isolated_env, make_wav):
+    """Portable rows: the DB holds a data-dir-relative posix path, while get()
+    and sample_path() hand cloning engines an absolute path that exists here."""
+    store = ProfileStore()
+    pid = store.create("Goku", "cloned")
+    s = store.add_sample(pid, str(make_wav("ref.wav")), "words")
+    with sqlite3.connect(isolated_env / "syrinx.db") as c:
+        raw = c.execute("SELECT audio_path FROM samples WHERE id=?", (s.id,)).fetchone()[0]
+    assert raw == f"profiles/{pid}/{s.id}.wav"  # relative, forward slashes
+    got = store.get(pid).samples[0].audio_path
+    assert Path(got).is_absolute() and Path(got).exists()
+    assert Path(store.sample_path(s.id)).exists()
+
+
+def test_a_foreign_absolute_sample_row_is_rerooted_on_read(isolated_env, make_wav):
+    """The Goku case: a restored snapshot leaves a /home/... sample path in the
+    DB, but the copied WAV under profiles/<id>/ came along — resolve re-roots it
+    so the cloning engine can open it (no more 'Error opening ...')."""
+    store = ProfileStore()
+    pid = store.create("Goku", "cloned")
+    s = store.add_sample(pid, str(make_wav("ref.wav")), "")
+    foreign = f"/home/someone/.local/share/syrinx/profiles/{pid}/{s.id}.wav"
+    with sqlite3.connect(isolated_env / "syrinx.db") as c:
+        c.execute("UPDATE samples SET audio_path=? WHERE id=?", (foreign, s.id))
+    got = store.get(pid).samples[0].audio_path
+    assert Path(got).exists()
+    assert got.replace("\\", "/").endswith(f"profiles/{pid}/{s.id}.wav")
+    assert Path(store.sample_path(s.id)).exists()
+
+
+def test_delete_sample_resolves_a_foreign_absolute_row(isolated_env, make_wav):
+    """Deleting a legacy absolute row still removes the real re-rooted file."""
+    store = ProfileStore()
+    pid = store.create("Goku", "cloned")
+    s = store.add_sample(pid, str(make_wav("ref.wav")), "")
+    real = Path(store.get(pid).samples[0].audio_path)
+    assert real.exists()
+    foreign = f"/home/someone/.local/share/syrinx/profiles/{pid}/{s.id}.wav"
+    with sqlite3.connect(isolated_env / "syrinx.db") as c:
+        c.execute("UPDATE samples SET audio_path=? WHERE id=?", (foreign, s.id))
+    store.delete_sample(s.id)
+    assert not real.exists()
+
+
 def test_deleting_a_profile_takes_its_sample_directory(make_wav):
     store = ProfileStore()
     pid = store.create("Piccolo", "cloned")
