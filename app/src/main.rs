@@ -94,7 +94,7 @@ enum Cmd {
     VcToggleRecord { system: bool },
     VcPickFile,
     VcConvert { index: usize, engine_index: usize, label: String, transcript: String, mode: String, semitones: i32 },
-    VcSaveClip { name: String, transcript: String },
+    VcSaveClip { name: String, transcript: String, kind: String },
     VcDeleteClip { id: String },
     VcArmClip { id: String },
     VcAudition { id: String },
@@ -828,7 +828,8 @@ fn main() -> anyhow::Result<()> {
             let ui = ui_weak.unwrap();
             let name = ui.get_vc_clip_name().to_string();
             let transcript = ui.get_vc_transcript().to_string();
-            let _ = tx.send(Cmd::VcSaveClip { name, transcript });
+            let kind = ui.get_vc_mode().to_string();  // "speech" | "music" at save time
+            let _ = tx.send(Cmd::VcSaveClip { name, transcript, kind });
         });
     }
     {
@@ -2317,19 +2318,25 @@ async fn refresh_vc_clips(
     let j = proxy.list_source_clips().await.unwrap_or_else(|_| "[]".into());
     let arr: Vec<serde_json::Value> = serde_json::from_str(&j).unwrap_or_default();
     let mut data = Vec::new();
-    let mut items: Vec<SourceClipItem> = Vec::new();
+    // split by kind — the rail shows only the clips for the active vc-mode
+    let mut speech: Vec<SourceClipItem> = Vec::new();
+    let mut music: Vec<SourceClipItem> = Vec::new();
     for c in &arr {
         let g = |k: &str| c.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let (id, name, path, meta) = (g("id"), g("name"), g("path"), g("meta"));
-        items.push(SourceClipItem {
+        let is_music = g("kind") == "music";
+        let item = SourceClipItem {
             id: id.clone().into(),
             name: name.clone().into(),
             meta: meta.into(),
-        });
+            music: is_music,
+        };
+        if is_music { music.push(item); } else { speech.push(item); }
         data.push((id, name, path, g("transcript")));
     }
     ui.upgrade_in_event_loop(move |ui| {
-        ui.set_vc_clips(ModelRc::from(Rc::new(VecModel::from(items))));
+        ui.set_vc_clips_speech(ModelRc::from(Rc::new(VecModel::from(speech))));
+        ui.set_vc_clips_music(ModelRc::from(Rc::new(VecModel::from(music))));
     }).ok();
     data
 }
@@ -2649,12 +2656,13 @@ async fn run_session(
                         ui.upgrade_in_event_loop(move |ui| ui.set_vc_transcript(partial.into())).ok();
                     }
                 }
-                EngineEvent::TranscribeResult { req_id, text } => {
+                EngineEvent::TranscribeResult { req_id, text, error } => {
                     if req_id == pending_vc_tr && pending_vc_tr != 0 && req_id != pending_tr {
                         pending_vc_tr = 0;
                         // clip armed/saved before whisper finished — cache it
+                        // (never cache a failure: leave the row empty to retry)
                         if !vc_tr_clip.is_empty() {
-                            if !text.trim().is_empty() {
+                            if !error && !text.trim().is_empty() {
                                 if let Err(e) =
                                     proxy.set_source_clip_transcript(&vc_tr_clip, &text).await
                                 {
@@ -2670,13 +2678,18 @@ async fn run_session(
                         }
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_vc_transcribing(false);
+                            // error=true → whisper failed; the preview shows a
+                            // failure note instead of the "no speech" copy
+                            ui.set_vc_transcript_failed(error);
                             ui.set_vc_transcript(text.into());
                         }).ok();
                     } else if req_id == pending_tr && pending_tr != 0 {
                         pending_tr = 0;
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_tr_busy(false);
-                            if text.trim().is_empty() {
+                            if error {
+                                ui.set_tr_status("transcription failed — check engine logs".into());
+                            } else if text.trim().is_empty() {
                                 ui.set_tr_status("no speech detected".into());
                             } else {
                                 ui.set_tr_status("".into());
@@ -3082,6 +3095,10 @@ async fn run_session(
                                         ui.set_vc_transcribing(true);
                                         ui.set_trim_open(false);
                                     }).ok();
+                                    // the in-place rewrite changed the clip's
+                                    // duration — re-read the rail so its meta
+                                    // (m:ss) reflects the trim
+                                    vc_clips_data = refresh_vc_clips(&ui, &proxy).await;
                                 }
                                 "cv" => {
                                     cv_sample = Some(p.clone());
@@ -4079,9 +4096,9 @@ async fn run_session(
                         }
                     }
                 }
-                Some(Cmd::VcSaveClip { name, transcript }) => {
+                Some(Cmd::VcSaveClip { name, transcript, kind }) => {
                     if let Some(src) = vc_source.clone() {
-                        match proxy.save_source_clip(&src, &name, &transcript).await {
+                        match proxy.save_source_clip(&src, &name, &transcript, &kind).await {
                             Ok(id) if !id.is_empty() => {
                                 // saved mid-transcription: route the pending
                                 // result back into this clip's cache
@@ -4161,6 +4178,7 @@ async fn run_session(
                             vc_tr_clip.clear();
                             ui.upgrade_in_event_loop(move |ui| {
                                 ui.set_vc_transcribing(false);
+                                ui.set_vc_transcript_failed(false);
                                 ui.set_vc_transcript(cached.into());
                             }).ok();
                         } else {

@@ -354,6 +354,7 @@ class SourceClipItem:
     created_at: float
     path: str  # absolute — the app arms it directly as a conversion source
     transcript: str  # cached whisper output — re-arming skips re-transcription
+    kind: str = "speech"  # "speech" | "music" — the vc-mode active at save time
 
     def to_dict(self) -> dict:
         mins, secs = divmod(int(round(self.duration)), 60)
@@ -364,6 +365,7 @@ class SourceClipItem:
             "created_at": self.created_at,
             "path": self.path,
             "transcript": self.transcript,
+            "kind": self.kind,
             # display string computed here — the app shows it verbatim
             "meta": f"{mins}:{secs:02d} · "
             + time.strftime("%b %d · %H:%M", time.localtime(self.created_at)),
@@ -400,16 +402,23 @@ class SourceClipStore:
                     filename TEXT NOT NULL,
                     duration REAL,
                     created_at REAL,
-                    transcript TEXT DEFAULT ''
+                    transcript TEXT DEFAULT '',
+                    kind TEXT NOT NULL DEFAULT 'speech'
                 );
                 """
             )
-            # migrate rows created before the transcript cache existed
+            # migrate rows created before the transcript / kind columns existed
             cols = [r[1] for r in c.execute("PRAGMA table_info(source_clips)")]
             if "transcript" not in cols:
                 c.execute("ALTER TABLE source_clips ADD COLUMN transcript TEXT DEFAULT ''")
+            if "kind" not in cols:
+                c.execute(
+                    "ALTER TABLE source_clips ADD COLUMN kind TEXT NOT NULL DEFAULT 'speech'"
+                )
 
-    def save(self, src_path: str, name: str, transcript: str = "") -> SourceClipItem:
+    def save(
+        self, src_path: str, name: str, transcript: str = "", kind: str = "speech"
+    ) -> SourceClipItem:
         cid = uuid.uuid4().hex[:12]
         now = time.time()
         ext = Path(src_path).suffix.lower() or ".wav"
@@ -418,13 +427,14 @@ class SourceClipStore:
         shutil.copy2(src_path, dest)
         duration = _audio_duration(str(dest))
         name = name.strip() or time.strftime("clip %H:%M:%S", time.localtime(now))
+        kind = kind if kind in ("speech", "music") else "speech"
         with self._conn() as c:
             c.execute(
-                "INSERT INTO source_clips(id,name,filename,duration,created_at,transcript)"
-                " VALUES(?,?,?,?,?,?)",
-                (cid, name, fname, duration, now, transcript),
+                "INSERT INTO source_clips(id,name,filename,duration,created_at,transcript,kind)"
+                " VALUES(?,?,?,?,?,?,?)",
+                (cid, name, fname, duration, now, transcript, kind),
             )
-        return SourceClipItem(cid, name, duration, now, str(dest), transcript)
+        return SourceClipItem(cid, name, duration, now, str(dest), transcript, kind)
 
     def set_transcript(self, clip_id: str, transcript: str) -> None:
         """Backfill the cache for a clip saved before transcription finished."""
@@ -432,6 +442,23 @@ class SourceClipStore:
             c.execute(
                 "UPDATE source_clips SET transcript=? WHERE id=?", (transcript, clip_id)
             )
+
+    def update_duration_for_path(self, path: str, duration: float) -> bool:
+        """Refresh the stored duration of a clip whose WAV was rewritten in
+        place (trim). *path* only matches when it resolves inside the clips
+        dir, keyed by filename; returns True when a row was updated. Mirrors
+        HistoryStore.trim's duration-follows-the-cut idiom for source clips."""
+        p = Path(path)
+        try:
+            if p.parent.resolve() != self._clips.resolve():
+                return False
+        except OSError:
+            return False
+        with self._conn() as c:
+            cur = c.execute(
+                "UPDATE source_clips SET duration=? WHERE filename=?", (duration, p.name)
+            )
+            return cur.rowcount > 0
 
     def list(self) -> list[SourceClipItem]:
         with self._conn() as c:
@@ -442,7 +469,7 @@ class SourceClipStore:
                 SourceClipItem(
                     r["id"], r["name"], r["duration"] or 0.0,
                     r["created_at"] or 0.0, str(self._clips / r["filename"]),
-                    r["transcript"] or "",
+                    r["transcript"] or "", r["kind"] or "speech",
                 )
                 for r in rows
             ]

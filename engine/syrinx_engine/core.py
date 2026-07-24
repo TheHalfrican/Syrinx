@@ -235,12 +235,16 @@ class EngineCore:
     async def TranscribeFile(self, audio_path) -> int:
         """Async transcription for long files — Transcribe blocks the D-Bus
         reply (~25 s cap). Partial text streams via TranscribeProgress; the
-        final text arrives in TranscribeResult ("" on failure)."""
+        final text arrives in TranscribeResult. The result's *error* flag
+        distinguishes a stt-stack failure (error=True, text="") from a
+        legitimately-empty transcript (error=False, text="") so the app can
+        show "transcription failed" instead of "no speech detected"."""
         req_id = self._next_tr_id
         self._next_tr_id += 1
 
         async def run() -> None:
             text = ""
+            error = False
             try:
                 text = await self._stt.transcribe_stream(
                     audio_path,
@@ -248,7 +252,8 @@ class EngineCore:
                 )
             except Exception:  # noqa: BLE001
                 log.exception("transcribe %d failed", req_id)
-            self._emit("TranscribeResult", req_id, text)
+                error = True
+            self._emit("TranscribeResult", req_id, text, error)
 
         asyncio.create_task(run())
         return req_id
@@ -794,12 +799,14 @@ class EngineCore:
 
     # --- voice-changer source clips (named recordings/imports) ----------
 
-    async def SaveSourceClip(self, path, name, transcript) -> str:
+    async def SaveSourceClip(self, path, name, transcript, kind) -> str:
         """Copy an audio file into the clip store; returns the new clip id
         ("" on failure). An empty name gets a time-based default; *transcript*
-        is cached so re-arming the clip skips re-transcription."""
+        is cached so re-arming the clip skips re-transcription. *kind*
+        ("speech"|"music") is the vc-mode active at save time — the rail filters
+        on it and badges music clips with ♫."""
         try:
-            return self._srcclips.save(path, name, transcript).id
+            return self._srcclips.save(path, name, transcript, kind).id
         except Exception:  # noqa: BLE001
             log.exception("SaveSourceClip %s failed", path)
             return ""
@@ -886,6 +893,9 @@ class EngineCore:
             if out.suffix.lower() != ".wav":
                 out = out.with_name(out.stem + "-trimmed.wav")
             sf.write(str(out), data[a:b], int(rate), subtype="PCM_16")
+            # An in-place rewrite of a saved source clip leaves its stored
+            # duration stale — refresh it (no-op for scratch/sibling paths).
+            self._srcclips.update_duration_for_path(str(out), (b - a) / float(rate))
             return str(out)
         except Exception:  # noqa: BLE001
             log.exception("TrimAudio %s failed", path)

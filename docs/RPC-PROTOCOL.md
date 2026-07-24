@@ -236,7 +236,7 @@ name. `→ null` means a void reply (`{"result":null}`).
 
 | Method | Params | Result | Semantics |
 |---|---|---|---|
-| `SaveSourceClip` | `[path: string, name: string, transcript: string]` | string (clip_id, `""` on failure) | Copy an audio file into the clip store. Empty name → time-based default. |
+| `SaveSourceClip` | `[path: string, name: string, transcript: string, kind: string]` | string (clip_id, `""` on failure) | Copy an audio file into the clip store. Empty name → time-based default. `kind` `"speech"`\|`"music"` is the vc-mode active at save time (the rail filters on it, badges `"music"` with ♫); values other than `"music"` coerce to `"speech"`. |
 | `SetSourceClipTranscript` | `[clip_id: string, transcript: string]` | → null | Backfill a clip's transcript cache. |
 | `ListSourceClips` | `[]` | string (JSON array) | Saved source clips, newest first. |
 | `DeleteSourceClip` | `[clip_id: string]` | → null | Delete a saved clip (row + file). |
@@ -350,7 +350,7 @@ D-Bus signature. Broadcast to all authenticated connections.
 | `PlaybackProgress` | `[gen_id: integer, pct: number]` | `ud` | Playback position 0..1, per audio block. |
 | `LlmResult` | `[req_id: integer, text: string]` | `us` | Result of Compose/Rewrite/Refine (`""` = failed/none). |
 | `TranscribeProgress` | `[req_id: integer, partial: string]` | `us` | Live partial transcript from `TranscribeFile`. |
-| `TranscribeResult` | `[req_id: integer, text: string]` | `us` | Final transcript from `TranscribeFile` (`""` on failure). |
+| `TranscribeResult` | `[req_id: integer, text: string, error: boolean]` | `usb` | Final transcript from `TranscribeFile`. `error` `true` = the stt stack raised (with `text` `""`); this is **distinct** from a legitimately-empty transcript (`error` `false`, `text` `""`) so the app can show "transcription failed" vs. "no speech detected". |
 | `ModelProgress` | `[model_id: string, pct: number, status: string]` | `sds` | Download progress; `status` `"downloading"`\|`"done"`\|`"error"`. |
 | `SpeakStarted` | `[gen_id: integer]` | `u` | A generation's playback lifecycle began. |
 | `SpeakEnded` | `[gen_id: integer]` | `u` | A generation's playback lifecycle ended. |
@@ -494,7 +494,7 @@ identical to the D-Bus path.
 ← {"jsonrpc":"2.0","result":3,"id":12}
 ← {"jsonrpc":"2.0","method":"TranscribeProgress","params":[3,"So today we"]}
 ← {"jsonrpc":"2.0","method":"TranscribeProgress","params":[3,"So today we will cover"]}
-← {"jsonrpc":"2.0","method":"TranscribeResult","params":[3,"So today we will cover attention."]}
+← {"jsonrpc":"2.0","method":"TranscribeResult","params":[3,"So today we will cover attention.",false]}
 ```
 
 ---
@@ -531,7 +531,7 @@ pub enum EngineEvent {
     PlaybackProgress   { gen_id: u32, pct: f64 },
     LlmResult          { req_id: u32, text: String },
     TranscribeProgress { req_id: u32, partial: String },
-    TranscribeResult   { req_id: u32, text: String },
+    TranscribeResult   { req_id: u32, text: String, error: bool },
     ModelProgress      { model_id: String, pct: f64, status: String },
     SpeakStarted       { gen_id: u32 },
     SpeakEnded         { gen_id: u32 },

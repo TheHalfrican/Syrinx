@@ -18,7 +18,7 @@ pub enum EngineEvent {
     PlaybackProgress { gen_id: u32, pct: f64 },
     LlmResult { req_id: u32, text: String },
     TranscribeProgress { req_id: u32, partial: String },
-    TranscribeResult { req_id: u32, text: String },
+    TranscribeResult { req_id: u32, text: String, error: bool },
     ModelProgress { model_id: String, pct: f64, status: String },
     SpeakStarted { gen_id: u32 },
     SpeakEnded { gen_id: u32 },

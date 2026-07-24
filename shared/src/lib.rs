@@ -126,7 +126,8 @@ pub trait Engine {
     /// Copy an audio file into the voice-changer clip store; returns the new
     /// clip id ("" on failure). An empty name gets a time-based default;
     /// `transcript` is cached so re-arming the clip skips re-transcription.
-    fn save_source_clip(&self, path: &str, name: &str, transcript: &str) -> zbus::Result<String>;
+    /// `kind` ("speech"|"music") is the vc-mode active at save time.
+    fn save_source_clip(&self, path: &str, name: &str, transcript: &str, kind: &str) -> zbus::Result<String>;
 
     /// Backfill a saved clip's transcript cache (for clips saved before
     /// transcription finished).
@@ -335,9 +336,10 @@ pub trait Engine {
     #[zbus(signal)]
     fn transcribe_progress(&self, req_id: u32, partial: String) -> zbus::Result<()>;
 
-    /// Final transcript for a TranscribeFile request ("" on failure).
+    /// Final transcript for a TranscribeFile request. `error` = the stt stack
+    /// raised (text=""), distinct from a legitimately-empty transcript.
     #[zbus(signal)]
-    fn transcribe_result(&self, req_id: u32, text: String) -> zbus::Result<()>;
+    fn transcribe_result(&self, req_id: u32, text: String, error: bool) -> zbus::Result<()>;
 
     /// Model download progress: pct 0..1, status "downloading"|"done"|"error".
     #[zbus(signal)]

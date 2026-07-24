@@ -113,7 +113,7 @@ engine_methods! {
     fn convert_voice(audio_path: &str, profile_id: &str, engine: &str, label: &str, transcript: &str, mode: &str, semitones: i32) -> u32 => "ConvertVoice";
 
     // --- voice-changer source clips --------------------------------------
-    fn save_source_clip(path: &str, name: &str, transcript: &str) -> String => "SaveSourceClip";
+    fn save_source_clip(path: &str, name: &str, transcript: &str, kind: &str) -> String => "SaveSourceClip";
     fn set_source_clip_transcript(clip_id: &str, transcript: &str) -> () => "SetSourceClipTranscript";
     fn list_source_clips() -> String => "ListSourceClips";
     fn delete_source_clip(clip_id: &str) -> () => "DeleteSourceClip";

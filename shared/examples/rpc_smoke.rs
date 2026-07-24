@@ -52,8 +52,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .map_err(|_| "timed out waiting for TranscribeResult")?
             .ok_or("event stream closed")?;
         match ev {
-            EngineEvent::TranscribeResult { req_id, text } if req_id == req => {
-                println!("TranscribeResult -> req {req_id}, text {text:?}");
+            EngineEvent::TranscribeResult { req_id, text, error } if req_id == req => {
+                println!("TranscribeResult -> req {req_id}, text {text:?}, error {error}");
                 break;
             }
             other => println!("  (event: {other:?})"),

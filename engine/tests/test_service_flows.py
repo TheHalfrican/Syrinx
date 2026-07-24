@@ -356,13 +356,22 @@ def test_transcribe_returns_the_text(iface, make_wav):
 def test_transcribe_file_streams_partials_then_the_result(iface, signals, make_wav):
     req = drive(iface, "TranscribeFile", str(make_wav("a.wav")))
     assert signals["TranscribeProgress"] == [(req, "partial")]
-    assert signals["TranscribeResult"] == [(req, "transcribed words")]
+    # error flag is False for a real (or legitimately-empty) transcript
+    assert signals["TranscribeResult"] == [(req, "transcribed words", False)]
 
 
-def test_a_transcription_failure_yields_an_empty_result(iface, signals, make_wav):
+def test_a_transcription_failure_is_flagged_distinct_from_empty(iface, signals, make_wav):
+    # a stt-stack exception surfaces as error=True (with text=""), so the app
+    # can show "transcription failed" instead of the "no speech" copy
     iface._stt.fail = True
     req = drive(iface, "TranscribeFile", str(make_wav("a.wav")))
-    assert signals["TranscribeResult"] == [(req, "")]
+    assert signals["TranscribeResult"] == [(req, "", True)]
+
+
+def test_a_legitimately_empty_transcript_is_not_flagged_an_error(iface, signals, make_wav):
+    iface._stt.text = ""  # whisper heard silence — no exception
+    req = drive(iface, "TranscribeFile", str(make_wav("a.wav")))
+    assert signals["TranscribeResult"] == [(req, "", False)]
 
 
 def test_add_sample_auto_transcribes_when_no_text_is_given(iface, make_wav):
@@ -515,7 +524,7 @@ def test_every_signal_marshals_its_payload():
     assert e.PlaybackProgress(1, 0.5) == [1, 0.5]
     assert e.LlmResult(3, "text") == [3, "text"]
     assert e.TranscribeProgress(4, "partial") == [4, "partial"]
-    assert e.TranscribeResult(4, "final") == [4, "final"]
+    assert e.TranscribeResult(4, "final", False) == [4, "final", False]
     assert e.ModelProgress("kokoro", 0.5, "downloading") == ["kokoro", 0.5, "downloading"]
     assert e.SpeakStarted(9) == 9
     assert e.SpeakEnded(9) == 9

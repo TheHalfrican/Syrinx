@@ -383,11 +383,12 @@ def test_capture_lifecycle(iface):
 
 def test_source_clip_lifecycle(iface, make_wav, tmp_path):
     path = make_wav("rec.wav", secs=0.5)
-    cid = call(iface, "SaveSourceClip", str(path), "Take 1", "hello there")
+    cid = call(iface, "SaveSourceClip", str(path), "Take 1", "hello there", "speech")
     rows = json.loads(call(iface, "ListSourceClips"))
     assert [r["id"] for r in rows] == [cid]
     assert rows[0]["name"] == "Take 1"
     assert rows[0]["transcript"] == "hello there"
+    assert rows[0]["kind"] == "speech"
     assert Path(rows[0]["path"]).exists()
 
     call(iface, "SetSourceClipTranscript", cid, "corrected")
@@ -397,8 +398,31 @@ def test_source_clip_lifecycle(iface, make_wav, tmp_path):
     assert json.loads(call(iface, "ListSourceClips")) == []
 
 
+def test_save_source_clip_carries_the_music_kind(iface, make_wav):
+    cid = call(iface, "SaveSourceClip", str(make_wav("song.wav", secs=0.5)), "Cover", "", "music")
+    row = json.loads(call(iface, "ListSourceClips"))[0]
+    assert row["id"] == cid and row["kind"] == "music"
+
+
+def test_save_source_clip_coerces_an_unknown_kind_to_speech(iface, make_wav):
+    call(iface, "SaveSourceClip", str(make_wav("x.wav", secs=0.5)), "n", "", "bogus")
+    assert json.loads(call(iface, "ListSourceClips"))[0]["kind"] == "speech"
+
+
+def test_trim_audio_updates_a_saved_clips_stored_duration(iface, make_wav):
+    """The reported bug: trimming a saved clip rewrote the WAV but left the
+    source_clips.duration column stale. TrimAudio now refreshes it."""
+    cid = call(iface, "SaveSourceClip", str(make_wav("rec.wav", secs=3.0)), "Take", "", "speech")
+    stored = json.loads(call(iface, "ListSourceClips"))[0]["path"]
+    out = call(iface, "TrimAudio", stored, 0.5, 2.0)
+    assert out == stored  # in-place
+    row = json.loads(call(iface, "ListSourceClips"))[0]
+    assert row["id"] == cid
+    assert row["duration"] == pytest.approx(1.5, abs=1e-3)
+
+
 def test_save_source_clip_of_an_unreadable_path_is_empty(iface, tmp_path):
-    assert call(iface, "SaveSourceClip", str(tmp_path / "nope.wav"), "n", "") == ""
+    assert call(iface, "SaveSourceClip", str(tmp_path / "nope.wav"), "n", "", "speech") == ""
 
 
 # --- voice profiles ------------------------------------------------------

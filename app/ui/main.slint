@@ -12,7 +12,7 @@ export struct VoiceItem {
 }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
 export struct CaptureItem { id: string, text: string, date: string }
-export struct SourceClipItem { id: string, name: string, meta: string }
+export struct SourceClipItem { id: string, name: string, meta: string, music: bool }
 export struct LibItem {
     id: string, title: string, meta: string, text: string,
     starred: bool, tags: string,  // tags = comma-joined, editable as typed
@@ -771,13 +771,17 @@ export component AppWindow inherits Window {
     in property <[string]> vc-music-engine-names: ["Seed-VC (singing)", "Vevo2 (singing)"];
     in-out property <int> vc-music-engine-index: 0;
     in-out property <int> vc-octave-index: 2;    // 0..4 → −2..+2 octaves (♫ register shift)
-    in property <[SourceClipItem]> vc-clips;   // saved source clips (rail)
+    // saved source clips (rail), split by kind — the rail shows only the
+    // clips matching the active vc-mode (music mode → music clips, etc.)
+    in property <[SourceClipItem]> vc-clips-speech;
+    in property <[SourceClipItem]> vc-clips-music;
     // conversion results (right rail), split by mode — the ♫ title marker
     // decides which list a row lands in
     in property <[HistItem]> vc-history-speech;
     in property <[HistItem]> vc-history-music;
     in property <string> vc-transcript;        // auto-transcribed source words
     in property <bool> vc-transcribing;
+    in property <bool> vc-transcript-failed;   // whisper raised (vs. genuine silence)
     in property <string> vc-armed-id: "";      // saved clip armed as source ("" = scratch/import)
     in property <bool> vc-armed-saved: false;  // hides "Save clip" when already stored
     in property <string> vc-audition-id: "";   // clip id or "scratch" while auditioning
@@ -1816,7 +1820,7 @@ export component AppWindow inherits Window {
                                 vertical-stretch: 1;
                                 VerticalLayout {
                                     spacing: 8px;
-                                    for c in vc-clips : Rectangle {
+                                    for c in (vc-mode == "music" ? vc-clips-music : vc-clips-speech) : Rectangle {
                                         // fixed height so the ScrollView scrolls
                                         height: 58px;
                                         border-width: Theme.name == "win95" ? 0px : 1px;
@@ -1833,6 +1837,11 @@ export component AppWindow inherits Window {
                                             padding: 10px; spacing: 4px;
                                             HorizontalLayout {
                                                 spacing: 6px;
+                                                // ♫ marks a music clip (mirrors the history rail marker)
+                                                if c.music : Text {
+                                                    text: "♫"; font-size: 11.5px; font-weight: 700;
+                                                    color: Theme.acc; vertical-alignment: center;
+                                                }
                                                 Text {
                                                     text: c.name; font-size: 11.5px; font-weight: 700; color: Theme.fg;
                                                     overflow: elide; horizontal-stretch: 1; vertical-alignment: center;
@@ -1858,8 +1867,9 @@ export component AppWindow inherits Window {
                                             Text { text: c.meta; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; }
                                         }
                                     }
-                                    if vc-clips.length == 0 : Text {
-                                        text: "— no saved clips yet —"; font-size: 10.5px; font-family: Theme.mono;
+                                    if (vc-mode == "music" ? vc-clips-music.length : vc-clips-speech.length) == 0 : Text {
+                                        text: vc-mode == "music" ? "— no music clips yet —" : "— no speech clips yet —";
+                                        font-size: 10.5px; font-family: Theme.mono;
                                         color: Theme.dim; horizontal-alignment: center;
                                     }
                                 }
@@ -2013,9 +2023,14 @@ export component AppWindow inherits Window {
                                 }
                                 if vc-transcript == "" && !vc-transcribing : Text {
                                     x: 12px; y: 8px; width: parent.width - 24px;
-                                    text: vc-has-source ? "No speech detected in this source."
+                                    text: vc-has-source
+                                        ? (vc-transcript-failed
+                                            ? "Transcription failed — check engine logs."
+                                            : "No speech detected in this source.")
                                         : "The source's words appear here — recorded, imported or picked from the rail.";
-                                    font-size: 11.5px; color: Theme.dim; opacity: 0.6;
+                                    font-size: 11.5px;
+                                    color: vc-has-source && vc-transcript-failed ? #cc3b3b : Theme.dim;
+                                    opacity: 0.6;
                                     wrap: word-wrap; font-family: Theme.font;
                                 }
                                 vtsv := ScrollView {

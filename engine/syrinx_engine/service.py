@@ -305,11 +305,12 @@ class EngineInterface(ServiceInterface):
     # --- voice-changer source clips (named recordings/imports) ----------
 
     @method()
-    async def SaveSourceClip(self, path: "s", name: "s", transcript: "s") -> "s":  # noqa: F821
+    async def SaveSourceClip(self, path: "s", name: "s", transcript: "s", kind: "s") -> "s":  # noqa: F821
         """Copy an audio file into the clip store; returns the new clip id
         ("" on failure). An empty name gets a time-based default; *transcript*
-        is cached so re-arming the clip skips re-transcription."""
-        return await self._core.SaveSourceClip(path, name, transcript)
+        is cached so re-arming the clip skips re-transcription. *kind*
+        ("speech"|"music") is the vc-mode active at save time."""
+        return await self._core.SaveSourceClip(path, name, transcript, kind)
 
     @method()
     async def SetSourceClipTranscript(self, clip_id: "s", transcript: "s") -> None:  # noqa: F821
@@ -425,8 +426,10 @@ class EngineInterface(ServiceInterface):
         return [req_id, partial]
 
     @signal()
-    def TranscribeResult(self, req_id, text) -> "us":  # noqa: F821
-        return [req_id, text]
+    def TranscribeResult(self, req_id, text, error) -> "usb":  # noqa: F821
+        # error=True → the stt stack raised (text=""); distinct from a
+        # legitimately-empty transcript (error=False, text="").
+        return [req_id, text, error]
 
     @signal()
     def ModelProgress(self, model_id, pct, status) -> "sds":  # noqa: F821

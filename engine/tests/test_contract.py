@@ -105,7 +105,22 @@ async def exercise_transcribe_file_signal_flow(a):
     partials = [p for n, p in a.notifications if n == "TranscribeProgress"]
     results = [p for n, p in a.notifications if n == "TranscribeResult"]
     assert partials == [[req, "so today"]]
-    assert results == [[req, "so today we begin"]]
+    # third field is the error flag — False for a real transcript
+    assert results == [[req, "so today we begin", False]]
+
+
+async def exercise_transcribe_file_failure_is_flagged(a):
+    class BoomSTT:
+        async def transcribe_stream(self, path, on_partial=None):
+            raise RuntimeError("whisper exploded")
+
+    a.core._stt = BoomSTT()
+    req = await a.call("TranscribeFile", "/x.wav")
+    await a.wait_for("TranscribeResult")
+    results = [p for n, p in a.notifications if n == "TranscribeResult"]
+    # error=True with empty text — distinct from a legitimately-empty result,
+    # and identical across both transports
+    assert results == [[req, "", True]]
 
 
 async def exercise_recording_round_trip(a):
@@ -132,6 +147,7 @@ EXERCISES = [
     exercise_void_method_returns_null,
     exercise_download_signal_flow,
     exercise_transcribe_file_signal_flow,
+    exercise_transcribe_file_failure_is_flagged,
     exercise_recording_round_trip,
 ]
 
@@ -256,7 +272,7 @@ def _sweep_args(iface):
         "ListCaptures": (),
         "UpdateCapture": (cap, "edited"),
         "DeleteCapture": ("nope",),
-        "SaveSourceClip": ("/x.wav", "n", ""),
+        "SaveSourceClip": ("/x.wav", "n", "", "speech"),
         "SetSourceClipTranscript": ("nope", "t"),
         "ListSourceClips": (),
         "DeleteSourceClip": ("nope",),

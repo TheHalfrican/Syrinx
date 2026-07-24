@@ -311,7 +311,34 @@ def test_a_pre_transcript_source_clips_table_is_migrated(isolated_env):
         c.execute("INSERT INTO source_clips VALUES('old','Take','old.wav',2.0,1000.0)")
     rows = SourceClipStore().list()
     assert [r.id for r in rows] == ["old"]
+    # both the transcript and the later kind column are lazily added; the
+    # pre-existing row picks up their defaults
     assert rows[0].transcript == ""
+    assert rows[0].kind == "speech"
+
+
+def test_source_clip_kind_is_stored_and_defaults_to_speech(make_wav):
+    store = SourceClipStore()
+    a = store.save(str(make_wav("a.wav", secs=0.2)), "Speech clip")
+    b = store.save(str(make_wav("b.wav", secs=0.2)), "Cover", kind="music")
+    by_id = {r.id: r for r in store.list()}
+    assert by_id[a.id].kind == "speech"  # default
+    assert by_id[b.id].kind == "music"
+
+
+def test_update_duration_for_path_refreshes_a_stored_clip(make_wav):
+    store = SourceClipStore()
+    item = store.save(str(make_wav("rec.wav", secs=2.0)), "Take")
+    assert store.update_duration_for_path(item.path, 1.5) is True
+    assert store.list()[0].duration == pytest.approx(1.5)
+
+
+def test_update_duration_for_path_ignores_paths_outside_the_clip_store(make_wav, tmp_path):
+    store = SourceClipStore()
+    store.save(str(make_wav("rec.wav", secs=2.0)), "Take")
+    # a scratch/sibling path (not in clips/) matches nothing → no-op, False
+    assert store.update_duration_for_path(str(tmp_path / "elsewhere.wav"), 0.5) is False
+    assert store.list()[0].duration == pytest.approx(2.0)
 
 
 def test_source_clip_to_dict_has_a_rendered_meta_line(make_wav):

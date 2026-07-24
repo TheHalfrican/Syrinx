@@ -197,6 +197,7 @@ pub(crate) fn notification_to_event(v: &Value) -> Option<EngineEvent> {
     let u32_at = |a: &[Value], i: usize| a.get(i).and_then(Value::as_u64).map(|n| n as u32);
     let f64_at = |a: &[Value], i: usize| a.get(i).and_then(Value::as_f64);
     let str_at = |a: &[Value], i: usize| a.get(i).and_then(Value::as_str).map(str::to_string);
+    let bool_at = |a: &[Value], i: usize| a.get(i).and_then(Value::as_bool);
 
     match method {
         "GenerationProgress" => {
@@ -235,7 +236,11 @@ pub(crate) fn notification_to_event(v: &Value) -> Option<EngineEvent> {
         }
         "TranscribeResult" => {
             let a = arr()?;
-            Some(EngineEvent::TranscribeResult { req_id: u32_at(a, 0)?, text: str_at(a, 1)? })
+            Some(EngineEvent::TranscribeResult {
+                req_id: u32_at(a, 0)?,
+                text: str_at(a, 1)?,
+                error: bool_at(a, 2)?,
+            })
         }
         "ModelProgress" => {
             let a = arr()?;

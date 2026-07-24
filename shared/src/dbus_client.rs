@@ -57,7 +57,7 @@ impl DbusClient {
                     }
                     Some(sig) = tres.next() => {
                         if let Ok(a) = sig.args() {
-                            let _ = tx.send(EngineEvent::TranscribeResult { req_id: a.req_id, text: a.text });
+                            let _ = tx.send(EngineEvent::TranscribeResult { req_id: a.req_id, text: a.text, error: a.error });
                         }
                     }
                     Some(sig) = ended.next() => {
