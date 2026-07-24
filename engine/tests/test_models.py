@@ -7,6 +7,7 @@ _hf_cache() at a tmp dir and the tests fabricate repo layouts inside it.
 import asyncio
 import json
 import sys
+import threading
 import types
 
 import pytest
@@ -368,3 +369,158 @@ def test_downloading_shows_up_in_status(monkeypatch):
     mgr = models.ModelManager()
     mgr._downloading.add("kokoro")
     assert {r["id"] for r in mgr.status() if r["downloading"]} == {"kokoro"}
+
+
+# --- honest download totals ---------------------------------------------
+
+
+class FakeSibling:
+    def __init__(self, rfilename, size):
+        self.rfilename = rfilename
+        self.size = size
+
+
+def fake_hf_api(monkeypatch, files_by_repo, *, boom=False):
+    """Install a fake huggingface_hub.HfApi whose model_info returns the given
+    siblings per repo. ``boom`` makes model_info raise (metadata unavailable)."""
+    class FakeApi:
+        def model_info(self, repo, files_metadata=False):
+            if boom:
+                raise RuntimeError("rate limited")
+            sibs = [FakeSibling(name, size) for name, size in files_by_repo[repo]]
+            return types.SimpleNamespace(siblings=sibs)
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub",
+                        types.SimpleNamespace(HfApi=FakeApi))
+
+
+def test_expected_bytes_sums_metadata_across_repos(monkeypatch):
+    m = models.spec("tada-1b")  # two repos, patterns=None (whole repo)
+    fake_hf_api(monkeypatch, {
+        m.repos[0]: [("model.safetensors", 1000), ("config.json", 24)],
+        m.repos[1]: [("codec.pt", 500)],
+    })
+    assert models._expected_bytes(m) == 1524
+
+
+def test_expected_bytes_respects_allow_patterns(monkeypatch):
+    """Only files that snapshot_download's allow_patterns would fetch count —
+    including a directory glob (fnmatch's ``*`` spans ``/``)."""
+    m = models.spec("vevo-timbre")  # patterns like "tokenizer/vq8192/*"
+    fake_hf_api(monkeypatch, {m.repos[0]: [
+        ("tokenizer/vq8192/model.safetensors", 100),
+        ("tokenizer/vq8192/nested/extra.bin", 40),
+        ("acoustic_modeling/Vq8192ToMels/w.pt", 30),
+        ("acoustic_modeling/Vocoder/g.pt", 20),
+        ("README.md", 999),               # excluded — no pattern admits it
+        ("acoustic_modeling/AR/huge.safetensors", 9999),  # excluded dir
+    ]})
+    assert models._expected_bytes(m) == 190
+
+
+def test_expected_bytes_none_when_patterns_is_none_takes_everything(monkeypatch):
+    m = models.spec("kokoro")  # patterns=None
+    fake_hf_api(monkeypatch, {m.repos[0]: [("a.bin", 7), ("b/c.json", 3)]})
+    assert models._expected_bytes(m) == 10
+
+
+def test_expected_bytes_falls_back_on_metadata_failure(monkeypatch):
+    m = models.spec("kokoro")
+    fake_hf_api(monkeypatch, {}, boom=True)
+    assert models._expected_bytes(m) is None
+
+
+def test_expected_bytes_falls_back_on_missing_size(monkeypatch):
+    """A matched file with no size metadata means we can't trust the sum."""
+    m = models.spec("kokoro")
+    fake_hf_api(monkeypatch, {m.repos[0]: [("a.bin", 100), ("b.bin", None)]})
+    assert models._expected_bytes(m) is None
+
+
+def test_expected_bytes_none_without_huggingface_hub(monkeypatch):
+    monkeypatch.setitem(sys.modules, "huggingface_hub", None)
+    assert models._expected_bytes(models.spec("kokoro")) is None
+
+
+def test_pattern_allows_matches_snapshot_download_semantics():
+    assert models._pattern_allows("anything.bin", None) is True
+    assert models._pattern_allows("a/deep/x.safetensors", ["*.safetensors"]) is True
+    assert models._pattern_allows("x.bin", ["*.safetensors"]) is False
+    # a directory glob spans nested dirs, and a trailing "/" gets an implicit "*"
+    assert models._pattern_allows("t/vq/deep/f.pt", ["t/vq/*"]) is True
+    assert models._pattern_allows("t/vq/f.pt", ["t/vq/"]) is True
+    assert models._pattern_allows("other/f.pt", ["t/vq/*"]) is False
+
+
+def test_download_uses_the_real_metadata_total(monkeypatch, hf_cache):
+    """The poll bar normalizes against the fetched metadata total, not size_mb —
+    100 on-disk bytes against a 200-byte metadata total reads ~0.5, where size_mb
+    (350 MB) would read ~0. Hold the fetch open so the poller samples mid-download."""
+    release = threading.Event()
+
+    def snapshot_download(repo, cache_dir=None, allow_patterns=None):
+        fake_repo(hf_cache, repo, blobs=("a.bin",))  # 100 bytes on disk
+        release.wait(2.0)
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(
+        snapshot_download=snapshot_download,
+        HfApi=type("A", (), {"model_info": lambda self, r, files_metadata=False:
+                             types.SimpleNamespace(siblings=[FakeSibling("m.bin", 200)])})))
+    events = []
+
+    def on_progress(*a):
+        events.append(a)
+        if a[2] == "downloading" and a[1] > 0:
+            release.set()  # a nonzero fraction means the bytes are on disk
+
+    ok = asyncio.run(models.ModelManager().download("kokoro", on_progress))
+    assert ok is True
+    downloading = [e for e in events if e[2] == "downloading"]
+    assert any(e[1] == pytest.approx(0.5) for e in downloading)
+
+
+def test_download_finalizing_when_bytes_reach_the_total(monkeypatch, hf_cache):
+    """Bytes on disk >= expected total while the fetch is still running emits
+    "finalizing" with the fraction capped at 0.999, then "done"."""
+    release = threading.Event()
+
+    def snapshot_download(repo, cache_dir=None, allow_patterns=None):
+        fake_repo(hf_cache, repo, blobs=("a.bin",))  # 100 bytes >= 50-byte total
+        release.wait(2.0)  # hold the fetch open so the poller sees finalizing
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(
+        snapshot_download=snapshot_download,
+        HfApi=type("A", (), {"model_info": lambda self, r, files_metadata=False:
+                             types.SimpleNamespace(siblings=[FakeSibling("m.bin", 50)])})))
+
+    events = []
+
+    def on_progress(*a):
+        events.append(a)
+        if a[2] == "finalizing":
+            release.set()  # let the fetch complete once we've observed finalizing
+
+    ok = asyncio.run(models.ModelManager().download("kokoro", on_progress))
+    assert ok is True
+    finalizing = [e for e in events if e[2] == "finalizing"]
+    assert finalizing and all(e[1] == pytest.approx(0.999) for e in finalizing)
+    assert events[-1] == ("kokoro", 1.0, "done")
+
+
+def test_download_falls_back_to_size_mb_when_metadata_fails(monkeypatch, hf_cache):
+    """A metadata failure must not break the download — it uses the size_mb
+    estimate and still completes."""
+    def snapshot_download(repo, cache_dir=None, allow_patterns=None):
+        fake_repo(hf_cache, repo)
+
+    class BoomApi:
+        def model_info(self, repo, files_metadata=False):
+            raise RuntimeError("offline")
+
+    monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(
+        snapshot_download=snapshot_download, HfApi=BoomApi))
+    events = []
+    ok = asyncio.run(models.ModelManager().download("kokoro", lambda *a: events.append(a)))
+    assert ok is True
+    assert events[0][2] == "downloading"
+    assert events[-1] == ("kokoro", 1.0, "done")

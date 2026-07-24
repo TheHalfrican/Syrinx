@@ -351,7 +351,7 @@ D-Bus signature. Broadcast to all authenticated connections.
 | `LlmResult` | `[req_id: integer, text: string]` | `us` | Result of Compose/Rewrite/Refine (`""` = failed/none). |
 | `TranscribeProgress` | `[req_id: integer, partial: string]` | `us` | Live partial transcript from `TranscribeFile`. |
 | `TranscribeResult` | `[req_id: integer, text: string, error: boolean]` | `usb` | Final transcript from `TranscribeFile`. `error` `true` = the stt stack raised (with `text` `""`); this is **distinct** from a legitimately-empty transcript (`error` `false`, `text` `""`) so the app can show "transcription failed" vs. "no speech detected". |
-| `ModelProgress` | `[model_id: string, pct: number, status: string]` | `sds` | Download progress; `status` `"downloading"`\|`"done"`\|`"error"`. |
+| `ModelProgress` | `[model_id: string, pct: number, status: string]` | `sds` | Download progress; `status` `"downloading"`\|`"finalizing"`\|`"done"`\|`"error"`. `"finalizing"` = on-disk bytes reached the expected total but the fetch is still working (checksums/renames/trailing files); `pct` stays capped at `0.999` until `"done"`. |
 | `SpeakStarted` | `[gen_id: integer]` | `u` | A generation's playback lifecycle began. |
 | `SpeakEnded` | `[gen_id: integer]` | `u` | A generation's playback lifecycle ended. |
 

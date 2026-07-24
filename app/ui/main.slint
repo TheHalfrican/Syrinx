@@ -29,6 +29,10 @@ export struct ModelItem {
     id: string, display: string, size-label: string, description: string,
     downloaded: bool, downloading: bool, active: bool, supported: bool,
     warning: string, progress: float,
+    // still downloading (bar stays visible) but bytes are all on disk and
+    // huggingface is verifying/renaming — show an indeterminate "finishing…"
+    // treatment instead of a determinate fill that reads as stuck at 100%
+    finalizing: bool,
 }
 
 // --- Win95 3D bevel overlay (transparent center; draws a doubled 2px edge) ---
@@ -531,8 +535,19 @@ component ModelRow inherits Rectangle {
             width: 156px;
             if m.downloading : VerticalLayout {
                 alignment: center; spacing: 5px;
-                Text { text: "downloading…"; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; horizontal-alignment: center; }
-                Rectangle {
+                Text { text: m.finalizing ? "finishing…" : "downloading…"; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; horizontal-alignment: center; }
+                // finalizing: same full-width track, but the fill becomes an
+                // indeterminate looping marquee (same idiom as the composer
+                // working-bar) so a ~100% fraction never reads as stuck
+                if m.finalizing : Rectangle {
+                    height: 6px; border-radius: 3px; background: Theme.chip-bg; clip: true;
+                    Rectangle {
+                        height: 100%; width: parent.width * 0.35;
+                        border-radius: 3px; background: Theme.gen-bg;
+                        x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                    }
+                }
+                if !m.finalizing : Rectangle {
                     height: 6px; border-radius: 3px; background: Theme.chip-bg;
                     Rectangle { x: 0; width: parent.width * m.progress; height: 100%; border-radius: 3px; background: Theme.gen-bg; }
                 }

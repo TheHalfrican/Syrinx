@@ -16,6 +16,7 @@ import os
 import shutil
 import sys
 from dataclasses import dataclass
+from fnmatch import fnmatch
 from pathlib import Path
 
 from .profiles import _data_dir
@@ -49,33 +50,33 @@ CATALOG: list = [
               350, "82M preset voices, 8 languages. CPU-realtime — great everywhere.",
               gpu_recommended=False, min_ram_gb=2.0, supported=True),
     ModelSpec("qwen-tts-1.7B", "Qwen TTS 1.7B", "voice", "qwen", "1.7B",
-              ["Qwen/Qwen3-TTS-12Hz-1.7B-Base"], 3500,
+              ["Qwen/Qwen3-TTS-12Hz-1.7B-Base"], 4350,
               "Multilingual zero-shot voice cloning (10 langs). GPU strongly recommended.",
               gpu_recommended=True, min_ram_gb=8.0, supported=True),
     ModelSpec("qwen-tts-0.6B", "Qwen TTS 0.6B", "voice", "qwen", "0.6B",
-              ["Qwen/Qwen3-TTS-12Hz-0.6B-Base"], 1200,
+              ["Qwen/Qwen3-TTS-12Hz-0.6B-Base"], 2400,
               "Lightweight Qwen voice cloning for lower-end hardware.",
               gpu_recommended=True, min_ram_gb=4.0, supported=True),
     ModelSpec("qwen-custom-voice-1.7B", "Qwen CustomVoice 1.7B", "voice", "qwen_custom_voice", "1.7B",
-              ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"], 3500,
+              ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"], 4300,
               "9 preset voices + natural-language style control (instruct).",
               gpu_recommended=True, min_ram_gb=8.0, supported=True),
     ModelSpec("qwen-custom-voice-0.6B", "Qwen CustomVoice 0.6B", "voice", "qwen_custom_voice", "0.6B",
-              ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"], 1200,
+              ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"], 2400,
               "Same 9 presets + instruct, lighter and faster.",
               gpu_recommended=True, min_ram_gb=4.0, supported=True),
     # needs the real k2 wheel matching the venv's torch (k2-fsa.github.io/k2/cpu.html);
     # the PyPI "k2" package is a stub and the vocoder segfaults without the real one.
-    ModelSpec("luxtts", "LuxTTS", "voice", "luxtts", "", ["YatharthS/LuxTTS"], 300,
+    ModelSpec("luxtts", "LuxTTS", "voice", "luxtts", "", ["YatharthS/LuxTTS"], 1150,
               "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly cloning, English.",
               gpu_recommended=False, min_ram_gb=2.0, supported=True),
     # chatterbox-tts installs --no-deps (stale pins); sub-deps in engine[chatterbox]
     ModelSpec("chatterbox", "Chatterbox (Multilingual)", "voice", "chatterbox", "",
-              ["ResembleAI/chatterbox"], 3200,
+              ["ResembleAI/chatterbox"], 13200,
               "23 languages with emotion exaggeration. GPU recommended.",
               gpu_recommended=True, min_ram_gb=8.0, supported=True),
     ModelSpec("chatterbox-turbo", "Chatterbox Turbo", "voice", "chatterbox_turbo", "",
-              ["ResembleAI/chatterbox-turbo"], 1500,
+              ["ResembleAI/chatterbox-turbo"], 3850,
               "350M English model with [laugh]/[cough] tags.",
               gpu_recommended=True, min_ram_gb=4.0, supported=True),
     # hume-tada installs --no-deps (stale torch pin); the Llama tokenizer
@@ -83,57 +84,57 @@ CATALOG: list = [
     # listing the repo here would drag in 2.5 GB of unused Llama weights and
     # break cached-detection (tokenizer-only repos have no weight files).
     ModelSpec("tada-1b", "TADA 1B", "voice", "tada", "1B",
-              ["HumeAI/tada-1b", "HumeAI/tada-codec"], 4000,
+              ["HumeAI/tada-1b", "HumeAI/tada-codec"], 14000,
               "Llama-3.2-1B speech-LM, 700s+ coherent audio. English.",
               gpu_recommended=True, min_ram_gb=8.0, supported=True),
     ModelSpec("tada-3b-ml", "TADA 3B Multilingual", "voice", "tada", "3B",
-              ["HumeAI/tada-3b-ml", "HumeAI/tada-codec"], 8000,
+              ["HumeAI/tada-3b-ml", "HumeAI/tada-codec"], 18700,
               "Llama-3.2-3B speech-LM, 10 languages. Heavy.",
               gpu_recommended=True, min_ram_gb=16.0, supported=True),
     # ---- Transcription (faster-whisper / CTranslate2) ----
     ModelSpec("whisper-base", "Whisper Base", "stt", "whisper", "base.en",
-              ["Systran/faster-whisper-base.en"], 150,
+              ["Systran/faster-whisper-base.en"], 140,
               "74M params. Fast, moderate accuracy. English.",
               gpu_recommended=False, min_ram_gb=2.0, supported=True),
     ModelSpec("whisper-small", "Whisper Small", "stt", "whisper", "small",
-              ["Systran/faster-whisper-small"], 490,
+              ["Systran/faster-whisper-small"], 460,
               "244M params. Balanced speed/accuracy, multilingual.",
               gpu_recommended=False, min_ram_gb=2.0, supported=True),
     ModelSpec("whisper-medium", "Whisper Medium", "stt", "whisper", "medium",
-              ["Systran/faster-whisper-medium"], 1500,
+              ["Systran/faster-whisper-medium"], 1450,
               "769M params. Higher accuracy, multilingual.",
               gpu_recommended=False, min_ram_gb=4.0, supported=True),
     ModelSpec("whisper-large", "Whisper Large v3", "stt", "whisper", "large-v3",
-              ["Systran/faster-whisper-large-v3"], 3000,
+              ["Systran/faster-whisper-large-v3"], 2950,
               "1.5B params. Best accuracy, multilingual.",
               gpu_recommended=True, min_ram_gb=6.0, supported=True),
     ModelSpec("whisper-turbo", "Whisper Turbo", "stt", "whisper", "large-v3-turbo",
-              ["deepdml/faster-whisper-large-v3-turbo-ct2"], 1600,
+              ["deepdml/faster-whisper-large-v3-turbo-ct2"], 1550,
               "Pruned large-v3: near-large accuracy, much faster.",
               gpu_recommended=False, min_ram_gb=4.0, supported=True),
     # ---- Language models (compose / rewrite) ----
     ModelSpec("qwen3-0.6b", "Qwen3 0.6B", "llm", "qwen_llm", "0.6B", ["Qwen/Qwen3-0.6B"],
-              1400, "Very fast on CPU. Good for short compose/rewrite.",
+              1450, "Very fast on CPU. Good for short compose/rewrite.",
               gpu_recommended=False, min_ram_gb=3.0, supported=True),
     ModelSpec("qwen3-1.7b", "Qwen3 1.7B", "llm", "qwen_llm", "1.7B", ["Qwen/Qwen3-1.7B"],
-              3500, "Balanced quality. Usable on CPU, snappy on GPU.",
+              3900, "Balanced quality. Usable on CPU, snappy on GPU.",
               gpu_recommended=False, min_ram_gb=6.0, supported=True),
     ModelSpec("qwen3-4b", "Qwen3 4B", "llm", "qwen_llm", "4B", ["Qwen/Qwen3-4B"],
-              8000, "Highest-quality local rewrites. GPU recommended.",
+              7700, "Highest-quality local rewrites. GPU recommended.",
               gpu_recommended=True, min_ram_gb=12.0, supported=True),
 
     # ---- Voice conversion (the ⇄ Voice Converter tab) ----
     # No "active" concept: the converter's model dropdown picks per conversion,
     # so these rows only download / report / delete weights.
     ModelSpec("chatterbox-vc", "Chatterbox VC", "vc", "chatterbox_vc", "",
-              ["ResembleAI/chatterbox"], 2150,
+              ["ResembleAI/chatterbox"], 1000,
               "Style-preserved conversion — the S3 half of Chatterbox. Shares its "
               "weights with Chatterbox (Multilingual).",
               gpu_recommended=False, min_ram_gb=4.0, supported=True,
               patterns=["s3gen.safetensors", "conds.pt"]),
     ModelSpec("seed-vc", "Seed-VC", "vc", "seed_vc", "",
               ["Plachta/Seed-VC", "funasr/campplus",
-               "nvidia/bigvgan_v2_22khz_80band_256x", "openai/whisper-small"], 1850,
+               "nvidia/bigvgan_v2_22khz_80band_256x", "openai/whisper-small"], 9250,
               "Diffusion conversion, speech + singing (f0). Isolated venv: run "
               "engine/setup-seedvc.sh once.",
               gpu_recommended=True, min_ram_gb=6.0, supported=True,
@@ -141,7 +142,7 @@ CATALOG: list = [
               patterns=["*.safetensors", "*.bin", "*.pt", "*.pth", "*.json",
                         "*.txt", "*.yml", "*.yaml", "*.model"]),
     ModelSpec("vevo-timbre", "Vevo-Timbre", "vc", "vevo_timbre", "",
-              ["amphion/Vevo"], 2750,
+              ["amphion/Vevo"], 2650,
               "Amphion's timbre-only converter — keeps the source delivery most "
               "literally. Isolated venv: run engine/setup-vevo.sh once. "
               "Non-commercial weights.",
@@ -151,7 +152,7 @@ CATALOG: list = [
     # FM-only subset of RMSnow/Vevo2 — keep patterns in sync with
     # vevo_worker.py's VEVO2_PATTERNS (the 6+ GB AR stacks never load)
     ModelSpec("vevo2-singing", "Vevo2 (singing)", "vc", "vevo_timbre", "",
-              ["RMSnow/Vevo2"], 2970,
+              ["RMSnow/Vevo2"], 2830,
               "Amphion's Vevo2 singing converter — the alternative ♫ engine "
               "(Seed-VC articulates lyrics better and stays the default); "
               "first conversion also fetches whisper-medium (~1.5 GB). "
@@ -308,6 +309,43 @@ def is_cached(m: "ModelSpec") -> bool:
     return all(is_repo_cached(r, _cache_root(m, r)) for r in m.repos)
 
 
+# --- honest download totals -------------------------------------------------
+# size_mb is a stale catalog estimate; the poll bar needs the real byte total.
+
+
+def _pattern_allows(path: str, patterns) -> bool:
+    """fnmatch a repo file against allow_patterns exactly as snapshot_download's
+    filter does: None = whole repo, a trailing "/" gets an implicit "*", and a
+    match on any one pattern admits the file (fnmatch's "*" spans "/")."""
+    if patterns is None:
+        return True
+    return any(fnmatch(path, p + "*" if p.endswith("/") else p) for p in patterns)
+
+
+def _expected_bytes(m: "ModelSpec") -> "int | None":
+    """Real download size: sum HF file metadata across m.repos, keeping only the
+    files m.patterns would fetch. None on ANY failure (offline, gated, rate-limit,
+    missing sizes) so the caller falls back to size_mb — metadata must never break
+    a download. Blocking (network); call off-loop."""
+    try:
+        from huggingface_hub import HfApi
+
+        api = HfApi()
+        total = 0
+        for repo in m.repos:
+            info = api.model_info(repo, files_metadata=True)
+            for s in info.siblings or []:
+                if not _pattern_allows(s.rfilename, m.patterns):
+                    continue
+                if s.size is None:
+                    return None  # incomplete metadata — don't trust a partial sum
+                total += s.size
+        return total or None
+    except Exception:  # noqa: BLE001
+        log.debug("expected-bytes metadata unavailable for %s", m.id, exc_info=True)
+        return None
+
+
 # --- manager: download / delete / active selection --------------------------
 
 _DEFAULT_ACTIVE = {"voice": "kokoro", "stt": "whisper-base", "llm": "qwen3-1.7b"}
@@ -373,14 +411,21 @@ class ModelManager:
         if not m or m.id in self._downloading:
             return False
         self._downloading.add(m.id)
-        total = max(1, m.size_mb) * 1024 * 1024
         loop = asyncio.get_running_loop()
+        # Prefer the real HF metadata total over the stale size_mb estimate, but
+        # never let a metadata failure block the fetch — fall back to size_mb.
+        total = await loop.run_in_executor(None, _expected_bytes, m)
+        if not total:
+            total = max(1, m.size_mb) * 1024 * 1024
         done = asyncio.Event()
 
         async def poll() -> None:
             while not done.is_set():
                 got = sum(_repo_bytes(r, _cache_root(m, r)) for r in m.repos)
-                on_progress(model_id, min(0.999, got / total), "downloading")
+                # bytes on disk cover the expected total but snapshot_download is
+                # still working (checksums / renames / trailing files): finalizing.
+                stage = "finalizing" if got >= total else "downloading"
+                on_progress(model_id, min(0.999, got / total), stage)
                 try:
                     await asyncio.wait_for(done.wait(), timeout=0.5)
                 except asyncio.TimeoutError:

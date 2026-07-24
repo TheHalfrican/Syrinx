@@ -1666,6 +1666,7 @@ fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, 
             supported: b("supported"),
             warning: s("warning").into(),
             progress: 0.0,
+            finalizing: false,
         };
         match m.get("category").and_then(|v| v.as_str()).unwrap_or("") {
             "voice" => voice.push(item),
@@ -1984,8 +1985,32 @@ fn update_composer_langs(
     codes
 }
 
+/// How a `ModelProgress` status string maps to the Models-tab row treatment.
+/// Split out from the event handler so the stage→display decision is
+/// unit-testable without a running UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ModelProgressUi {
+    /// Determinate fill + "downloading…". Also the graceful fallback for any
+    /// unknown/future stage string (never panic, never drop the row).
+    Downloading,
+    /// Indeterminate shimmer + "finishing…": bytes are on disk, huggingface is
+    /// verifying/renaming, so the ~0.999 fraction must not read as stuck.
+    Finalizing,
+    /// Terminal ("done"/"error") — refetch the model list.
+    Terminal,
+}
+
+fn model_progress_ui(status: &str) -> ModelProgressUi {
+    match status {
+        "finalizing" => ModelProgressUi::Finalizing,
+        "done" | "error" => ModelProgressUi::Terminal,
+        // "downloading" and any unknown/future stage degrade to the bar
+        _ => ModelProgressUi::Downloading,
+    }
+}
+
 /// Update a single model row's download progress in place (no refetch).
-fn set_model_progress(ui: &slint::Weak<AppWindow>, id: String, pct: f32, downloading: bool) {
+fn set_model_progress(ui: &slint::Weak<AppWindow>, id: String, pct: f32, downloading: bool, finalizing: bool) {
     ui.upgrade_in_event_loop(move |ui| {
         for model in [ui.get_voice_models(), ui.get_stt_models(), ui.get_llm_models(), ui.get_vc_conv_models()] {
             for i in 0..model.row_count() {
@@ -1993,6 +2018,7 @@ fn set_model_progress(ui: &slint::Weak<AppWindow>, id: String, pct: f32, downloa
                     if it.id.as_str() == id {
                         it.progress = pct;
                         it.downloading = downloading;
+                        it.finalizing = finalizing;
                         model.set_row_data(i, it);
                         return;
                     }
@@ -2720,9 +2746,10 @@ async fn run_session(
                     }).ok();
                 }
                 EngineEvent::ModelProgress { model_id, pct, status } => {
-                    match status.as_str() {
-                        "downloading" => set_model_progress(&ui, model_id, pct as f32, true),
-                        _ => { // done / error
+                    match model_progress_ui(&status) {
+                        ModelProgressUi::Downloading => set_model_progress(&ui, model_id, pct as f32, true, false),
+                        ModelProgressUi::Finalizing => set_model_progress(&ui, model_id, pct as f32, true, true),
+                        ModelProgressUi::Terminal => { // done / error
                             let r = refresh_models(&ui, &proxy).await;
                             voice_models = r.0;
                             active_engine = r.1;
@@ -3494,7 +3521,7 @@ async fn run_session(
                 }
                 Some(Cmd::DownloadModel { id }) => {
                     match proxy.download_model(&id).await {
-                        Ok(true) => set_model_progress(&ui, id, 0.0, true),
+                        Ok(true) => set_model_progress(&ui, id, 0.0, true, false),
                         _ => tracing::error!("download_model failed: {id}"),
                     }
                 }
@@ -4909,6 +4936,25 @@ mod tests {
         assert_eq!(stt[0].size_label, "1.5 GB");
         assert_eq!(llm[0].size_label, "4.0 GB");
         assert_eq!(vc[0].id, "seed_vc");
+    }
+
+    // --- model_progress_ui ----------------------------------------------
+
+    #[test]
+    fn model_progress_ui_maps_known_stages() {
+        assert_eq!(model_progress_ui("downloading"), ModelProgressUi::Downloading);
+        assert_eq!(model_progress_ui("finalizing"), ModelProgressUi::Finalizing);
+        assert_eq!(model_progress_ui("done"), ModelProgressUi::Terminal);
+        assert_eq!(model_progress_ui("error"), ModelProgressUi::Terminal);
+    }
+
+    #[test]
+    fn model_progress_ui_unknown_stage_degrades_to_downloading() {
+        // any future/unrecognized stage string must keep the row on the bar,
+        // never panic or drop it
+        for s in ["", "verifying", "queued", "FINALIZING", "unknown"] {
+            assert_eq!(model_progress_ui(s), ModelProgressUi::Downloading);
+        }
     }
 
     #[test]
