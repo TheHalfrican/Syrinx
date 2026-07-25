@@ -194,6 +194,56 @@ def test_warmup_flips_model_loaded(iface):
     asyncio.run(iface.warmup())
     assert iface._model_loaded is True
     assert iface._tts.loaded is True
+    assert iface._model_load_error == ""  # clean warmup leaves no error
+
+
+@pytest.mark.parametrize("which", ["_tts", "_stt"])
+def test_a_warmup_load_failure_lands_on_model_load_error(iface, which):
+    """A load that raises used to vanish (fire-and-forget task, traceback only
+    at GC) leaving ModelLoaded false with no reason. It now stores the message
+    and broadcasts it through the ModelLoaded props seam."""
+    async def _boom():
+        raise RuntimeError("weights not found")
+
+    setattr(getattr(iface, which), "load", _boom)
+    props = []
+    iface._emit_props = lambda changed: props.append(changed)
+
+    asyncio.run(iface.warmup())  # must NOT raise
+
+    assert iface._model_loaded is False
+    assert iface._model_load_error == "weights not found"
+    assert props == [{"ModelLoadError": "weights not found"}]
+
+
+def test_a_warmup_oom_reads_as_the_friendly_vram_text(iface):
+    class OutOfMemoryError(RuntimeError):
+        pass
+
+    async def _boom():
+        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB…")
+
+    iface._tts.load = _boom
+    asyncio.run(iface.warmup())
+
+    # same _failure_text mapping Speak/ConvertVoice use, naming the component
+    assert iface._model_load_error == (
+        "out of GPU memory loading the voice model (qwen)"
+        " — try a smaller model size in the Models tab"
+    )
+
+
+def test_a_failed_warmup_stops_before_the_second_load(iface):
+    async def _boom():
+        raise RuntimeError("no tts")
+
+    iface._tts.load = _boom
+    stt_loaded = []
+    iface._stt.load = lambda: stt_loaded.append(1)  # would raise if awaited
+
+    asyncio.run(iface.warmup())
+
+    assert stt_loaded == []  # returned at the first failure
 
 
 def test_list_voices_marshals_id_name_pairs(iface):
@@ -524,16 +574,30 @@ def test_compose_rewrite_and_refine_deliver_via_llm_result(iface, signals):
     assert drive(iface, "ComposeProfile", pid, "a topic") == 1
     assert drive(iface, "RewriteProfile", pid, "some text") == 2
     assert drive(iface, "RefineTranscript", "um so like the thing") == 3
+    # third field is the error flag — False for a real result
     assert signals["LlmResult"] == [
-        (1, "compose output"), (2, "rewrite output"), (3, "refine output"),
+        (1, "compose output", False), (2, "rewrite output", False),
+        (3, "refine output", False),
     ]
 
 
-def test_an_llm_failure_delivers_an_empty_string(iface, signals):
+def test_an_llm_failure_is_flagged_distinct_from_empty(iface, signals):
+    # an LLM-stack exception surfaces as error=True (with text=""), so the app
+    # can show a failure instead of silently keeping the original text
     iface._llm.fail = True
     pid = profile(iface, "Chatty", personality="loud")
     req = drive(iface, "ComposeProfile", pid, "a topic")
-    assert signals["LlmResult"] == [(req, "")]
+    assert signals["LlmResult"] == [(req, "", True)]
+
+
+def test_a_legitimately_empty_llm_result_is_not_flagged_an_error(iface, signals):
+    async def _nothing(*a):
+        return ""
+
+    iface._llm.compose = _nothing  # the model produced nothing — no exception
+    pid = profile(iface, "Chatty", personality="loud")
+    req = drive(iface, "ComposeProfile", pid, "a topic")
+    assert signals["LlmResult"] == [(req, "", False)]
 
 
 # --- playback surfaces ---------------------------------------------------
@@ -657,7 +721,7 @@ def test_every_signal_marshals_its_payload():
     assert e.AudioLevel(1, 0.25) == [1, 0.25]
     assert e.PlaybackInfo(1, "cid", "Title", 2.0, "[]") == [1, "cid", "Title", 2.0, "[]"]
     assert e.PlaybackProgress(1, 0.5) == [1, 0.5]
-    assert e.LlmResult(3, "text") == [3, "text"]
+    assert e.LlmResult(3, "text", False) == [3, "text", False]
     assert e.TranscribeProgress(4, "partial") == [4, "partial"]
     assert e.TranscribeResult(4, "final", False) == [4, "final", False]
     assert e.ModelProgress("kokoro", 0.5, "downloading") == ["kokoro", 0.5, "downloading"]

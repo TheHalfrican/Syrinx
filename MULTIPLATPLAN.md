@@ -594,6 +594,32 @@ generation), and CT2-on-ROCm would crash STT (torch.cuda true under
 HIP but CT2 has no ROCm backend — force STT to CPU when a mac/AMD
 session ever validates rocm). 376 pytest @ 95.59%.
 
+**2026-07-25 — the three error-visibility holes closed (two Opus agents,
+disjoint ownership, zero conflicts).** (1) LlmResult us→usb with an error
+flag, mirroring the TranscribeResult precedent end to end: compose/
+rewrite/refine failures now show ⚠ "…failed — check engine logs" instead
+of silently delivering ""; Windows dictation falls back to the raw
+transcript IMMEDIATELY on a flagged failure instead of waiting out its
+180s timeout. (2) New ModelLoadError property (s, "" = healthy) + Get
+transport method: warmup() load failures — previously "Task exception
+was never retrieved" at GC with ModelLoaded stuck false and TOTAL
+silence (the splash premise was wrong: booting drops unconditionally
+after the first round-trip; nothing ever consumed ModelLoaded) — now
+land in the composer's existing ⚠ banner, OOM-friendly via
+_failure_text, and dbus_client gained its first property-change
+subscription so Linux isn't blind. Drift guards bumped deliberately;
+a new contract assertion pins PROPERTY_GETTERS == Get{props} so the
+sets can't drift. (3) stt.py vetoes CT2-CUDA under ROCm
+(torch.version.hip, same tell as detect_device) — torch backends keep
+the AMD GPU, whisper drops to cpu/int8 instead of dying at load.
+Verified: 387 pytest @ 95.57%, cargo 5+1/57 + clippy clean + linux
+cross-check, live rpc_smoke printed GetModelLoadError -> "" from a real
+scratch-dir engine. Follow-ups parked: dictate/src/main.rs (Linux-only)
+still reads only a.text — mirror the immediate-fallback + compile-check
+it next Linux session; RPC-PROTOCOL §0/§11 method-count drift (doc says
+66, contract pins 70) needs a deliberate re-baseline; SetActiveModel
+stays lazy BY DESIGN (OOM surfaces at first generation, now readably).
+
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,
    detect absence gracefully) behind the same `system-capture-supported`

@@ -16,7 +16,7 @@ from dbus_next.service import ServiceInterface
 
 from syrinx_engine.core import EngineCore
 from syrinx_engine.service import EngineInterface
-from syrinx_engine.rpc import engine_method_names, TRANSPORT_METHODS
+from syrinx_engine.rpc import engine_method_names, PROPERTY_GETTERS, TRANSPORT_METHODS
 
 from _contract import DbusAdapter, RpcAdapter, EngineCallError
 
@@ -123,6 +123,20 @@ async def exercise_transcribe_file_failure_is_flagged(a):
     assert results == [[req, "", True]]
 
 
+async def exercise_llm_failure_is_flagged(a):
+    class BoomLLM:
+        async def refine(self, text):
+            raise RuntimeError("llm exploded")
+
+    a.core._llm = BoomLLM()
+    req = await a.call("RefineTranscript", "um so like the thing")
+    await a.wait_for("LlmResult")
+    results = [p for n, p in a.notifications if n == "LlmResult"]
+    # error=True with empty text — distinct from a model that produced nothing,
+    # and identical across both transports
+    assert results == [[req, "", True]]
+
+
 async def exercise_recording_round_trip(a):
     # §14: enumerate → start → stop returns a real WAV path; unknown ids are ""
     # / no-op. sounddevice is stubbed (fake_sd) so this runs identically on both
@@ -148,6 +162,7 @@ EXERCISES = [
     exercise_download_signal_flow,
     exercise_transcribe_file_signal_flow,
     exercise_transcribe_file_failure_is_flagged,
+    exercise_llm_failure_is_flagged,
     exercise_recording_round_trip,
 ]
 
@@ -194,7 +209,9 @@ def test_signal_surface_is_the_documented_set():
 def test_properties_map_to_getters():
     iface = EngineInterface()
     props = {p.name for p in ServiceInterface._get_properties(iface)}
-    assert props == {"ModelLoaded", "Backend"}
+    assert props == {"ModelLoaded", "ModelLoadError", "Backend"}
+    # every property has an RPC getter (spec §5); the RPC side adds no others
+    assert set(PROPERTY_GETTERS) == {f"Get{n}" for n in props}
 
 
 # --- D-Bus shim delegation sweep -----------------------------------------

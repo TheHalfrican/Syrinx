@@ -228,7 +228,11 @@ pub(crate) fn notification_to_event(v: &Value) -> Option<EngineEvent> {
         }
         "LlmResult" => {
             let a = arr()?;
-            Some(EngineEvent::LlmResult { req_id: u32_at(a, 0)?, text: str_at(a, 1)? })
+            Some(EngineEvent::LlmResult {
+                req_id: u32_at(a, 0)?,
+                text: str_at(a, 1)?,
+                error: bool_at(a, 2)?,
+            })
         }
         "TranscribeProgress" => {
             let a = arr()?;
@@ -332,6 +336,40 @@ mod tests {
             }
             other => panic!("wrong decode: {other:?}"),
         }
+        // the failed-warmup half of §5 rides the same notification
+        let v = json!({"jsonrpc": "2.0", "method": "PropertiesChanged",
+                       "params": {"ModelLoadError": "tada weights missing"}});
+        match notification_to_event(&v) {
+            Some(EngineEvent::PropertiesChanged { changed }) => {
+                assert_eq!(changed.get("ModelLoadError"), Some(&json!("tada weights missing")));
+            }
+            other => panic!("wrong decode: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn decodes_the_result_error_flags() {
+        // LlmResult / TranscribeResult both carry a trailing bool that must not
+        // collapse into "empty text" — a missing flag is a decode failure, not
+        // a default (the engine always sends it).
+        let v = json!({"jsonrpc": "2.0", "method": "LlmResult", "params": [3, "", true]});
+        match notification_to_event(&v) {
+            Some(EngineEvent::LlmResult { req_id, text, error }) => {
+                assert_eq!((req_id, text.as_str(), error), (3, "", true));
+            }
+            other => panic!("wrong decode: {other:?}"),
+        }
+        let v = json!({"jsonrpc": "2.0", "method": "TranscribeResult", "params": [4, "hi", false]});
+        match notification_to_event(&v) {
+            Some(EngineEvent::TranscribeResult { req_id, text, error }) => {
+                assert_eq!((req_id, text.as_str(), error), (4, "hi", false));
+            }
+            other => panic!("wrong decode: {other:?}"),
+        }
+        assert!(notification_to_event(
+            &json!({"jsonrpc": "2.0", "method": "LlmResult", "params": [3, ""]})
+        )
+        .is_none());
     }
 
     #[test]

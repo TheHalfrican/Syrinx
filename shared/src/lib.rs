@@ -310,6 +310,11 @@ pub trait Engine {
     #[zbus(property)]
     fn model_loaded(&self) -> zbus::Result<bool>;
 
+    /// Why warmup's model load failed ("" = no error). Non-empty means
+    /// `model_loaded` stays false until the engine restarts.
+    #[zbus(property)]
+    fn model_load_error(&self) -> zbus::Result<String>;
+
     #[zbus(property)]
     fn backend(&self) -> zbus::Result<String>;
 
@@ -334,9 +339,11 @@ pub trait Engine {
     #[zbus(signal)]
     fn playback_progress(&self, gen_id: u32, pct: f64) -> zbus::Result<()>;
 
-    /// Result of a Compose/Rewrite request (empty text = failed / no personality).
+    /// Result of a Compose/Rewrite/Refine request. `error` = the LLM stack
+    /// raised (text=""), distinct from a model that legitimately returned
+    /// nothing (and from the `0` req_id that means "no personality").
     #[zbus(signal)]
-    fn llm_result(&self, req_id: u32, text: String) -> zbus::Result<()>;
+    fn llm_result(&self, req_id: u32, text: String, error: bool) -> zbus::Result<()>;
 
     /// Live partial transcript while TranscribeFile decodes.
     #[zbus(signal)]

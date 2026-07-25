@@ -252,8 +252,14 @@ async fn refine(eng: &mut Engine, raw: &str) -> String {
 
     let refined = tokio::time::timeout(REFINE_TIMEOUT, async {
         while let Some(ev) = eng.events.recv().await {
-            if let EngineEvent::LlmResult { req_id: rid, text } = ev {
+            if let EngineEvent::LlmResult { req_id: rid, text, error } = ev {
                 if rid == req_id {
+                    // error=true carries text="" — stop waiting and say why
+                    // rather than letting it read as an empty refinement
+                    if error {
+                        tracing::warn!("dictation: refinement failed — using raw transcript");
+                        return String::new();
+                    }
                     return text;
                 }
             }

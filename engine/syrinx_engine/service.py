@@ -426,8 +426,10 @@ class EngineInterface(ServiceInterface):
         return [gen_id, pct]
 
     @signal()
-    def LlmResult(self, req_id, text) -> "us":  # noqa: F821
-        return [req_id, text]
+    def LlmResult(self, req_id, text, error) -> "usb":  # noqa: F821
+        # error=True → the LLM stack raised (text=""); distinct from a model
+        # that legitimately produced nothing (error=False, text="").
+        return [req_id, text, error]
 
     @signal()
     def TranscribeProgress(self, req_id, partial) -> "us":  # noqa: F821
@@ -456,6 +458,12 @@ class EngineInterface(ServiceInterface):
     @dbus_property(access=PropertyAccess.READ)
     def ModelLoaded(self) -> "b":  # noqa: F821
         return self._core._model_loaded
+
+    @dbus_property(access=PropertyAccess.READ)
+    def ModelLoadError(self) -> "s":  # noqa: F821
+        """Why warmup's model load failed ("" = no error). Non-empty means
+        ModelLoaded will stay false until the engine is restarted."""
+        return self._core._model_load_error
 
     @dbus_property(access=PropertyAccess.READ)
     def Backend(self) -> "s":  # noqa: F821

@@ -12,7 +12,8 @@ The seam is two injectable callables, defaulting to no-ops:
   is the PascalCase signal name; ``args`` are positional, in the same order and
   types as the D-Bus signature.
 * ``self._emit_props(changed)`` — the ``PropertiesChanged`` event; ``changed``
-  is a ``{PascalCaseName: value}`` dict (only ``{"ModelLoaded": True}`` today).
+  is a ``{PascalCaseName: value}`` dict (``{"ModelLoaded": True}`` on a good
+  warmup, ``{"ModelLoadError": "…"}`` on a failed one).
 
 Nothing in this module was rewritten during the extraction: method bodies,
 log messages, and (load-bearing) exception text are byte-for-byte what the
@@ -133,6 +134,7 @@ class EngineCore:
         if (s := self._models.active_spec("voice")):
             self._tts.set_voice_engine(s.engine, s.size)
         self._model_loaded = False
+        self._model_load_error = ""  # "" = no error; set when warmup's loads raise
         self._next_gen_id = 1
         self._next_llm_id = 1
         self._next_tr_id = 1
@@ -149,9 +151,25 @@ class EngineCore:
         return self._tts.backend  # "cuda" | "rocm" | "cpu"
 
     async def warmup(self) -> None:
-        """Load models in the background, then flip ModelLoaded."""
-        await self._tts.load()
-        await self._stt.load()
+        """Load models in the background, then flip ModelLoaded.
+
+        A load that raises used to vanish: the task was fire-and-forget, so the
+        traceback only surfaced at GC and ModelLoaded stayed false forever with
+        nothing saying why. The failure now lands on the ModelLoadError property
+        (broadcast through the same PropertiesChanged seam ModelLoaded uses) and
+        warmup returns with ModelLoaded still false — the engine stays up, so
+        history/settings/models keep working while the app shows the reason."""
+        for what, load in (
+            (f"the voice model ({self._tts.clone_engine})", self._tts.load),
+            ("whisper", self._stt.load),
+        ):
+            try:
+                await load()
+            except Exception as e:  # noqa: BLE001
+                log.exception("warmup: loading %s failed", what)
+                self._model_load_error = _failure_text(e, what)
+                self._emit_props({"ModelLoadError": self._model_load_error})
+                return
         # Cold-boot guard: a qwen clone setup's FIRST generation imports the
         # qwen_tts / transformers stack, and on a fresh engine that first import
         # can transiently lose a race on transformers' lazy init and fail with
@@ -577,12 +595,16 @@ class EngineCore:
 
     def _start_llm(self, kind: str, personality: str, text: str) -> int:
         """Run compose/rewrite/refine off the D-Bus call (LLM load + inference
-        is slow); deliver the result via the LlmResult signal, keyed by req_id."""
+        is slow); deliver the result via the LlmResult signal, keyed by req_id.
+        The result's *error* flag distinguishes an LLM-stack failure
+        (error=True, text="") from a model that legitimately returned nothing
+        (error=False, text="") — mirrors TranscribeResult."""
         req_id = self._next_llm_id
         self._next_llm_id += 1
 
         async def run() -> None:
             out = ""
+            error = False
             try:
                 if kind == "compose":
                     out = await self._llm.compose(personality, text)
@@ -590,9 +612,12 @@ class EngineCore:
                     out = await self._llm.refine(text)
                 else:
                     out = await self._llm.rewrite(personality, text)
-            except Exception:  # noqa: BLE001
-                log.exception("llm %s failed", kind)
-            self._emit("LlmResult", req_id, out)
+            except Exception as e:  # noqa: BLE001
+                # the signal carries only the bool; _failure_text keeps the log
+                # readable when the cause is a CUDA OOM allocator dump
+                log.exception("llm %s failed: %s", kind, _failure_text(e, "the LLM"))
+                error = True
+            self._emit("LlmResult", req_id, out, error)
 
         asyncio.create_task(run())
         return req_id

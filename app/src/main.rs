@@ -2542,6 +2542,11 @@ async fn run_session(
     let mut events = proxy.events();
 
     let backend = proxy.backend().await.unwrap_or_else(|_| "cpu".into());
+    // Warmup may already have failed before this session connected (a fast
+    // failure — a missing weight file — beats the first round-trip); the
+    // property carries the reason, the PropertiesChanged arm below catches the
+    // slower ones. Empty = healthy, so this is a no-op on every normal launch.
+    let load_error = proxy.model_load_error().await.unwrap_or_default();
     let raw = proxy.list_voices().await.unwrap_or_default();
     let profiles_json = proxy.list_profiles().await.unwrap_or_else(|_| "[]".into());
     let GridData { grid, kokoro_names, kokoro_ids, default_selected } =
@@ -2559,6 +2564,9 @@ async fn run_session(
     {
         ui.upgrade_in_event_loop(move |ui| {
             ui.set_backend(backend.into());
+            if !load_error.is_empty() {
+                ui.set_gen_error(load_error.into());
+            }
             ui.set_kokoro_names(ModelRc::from(Rc::new(VecModel::from(kokoro_names))));
             ui.set_kokoro_ids(ModelRc::from(Rc::new(VecModel::from(kokoro_ids))));
             ui.set_voices(ModelRc::from(Rc::new(VecModel::from(to_voice_items(grid)))));
@@ -2787,15 +2795,21 @@ async fn run_session(
                         }
                     }
                 }
-                EngineEvent::LlmResult { req_id, text } => {
+                EngineEvent::LlmResult { req_id, text, error } => {
                     // transcription-view refine result routes to tr-text
                     if req_id == pending_tr_refine && pending_tr_refine != 0 {
                         pending_tr_refine = 0;
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_tr_busy(false);
-                            ui.set_tr_status("".into());
-                            if !text.trim().is_empty() {
-                                ui.set_tr_text(text.into());
+                            // error=true → the LLM raised; say so instead of
+                            // clearing the status and leaving the raw text
+                            if error {
+                                ui.set_tr_status("refine failed — check engine logs".into());
+                            } else {
+                                ui.set_tr_status("".into());
+                                if !text.trim().is_empty() {
+                                    ui.set_tr_text(text.into());
+                                }
                             }
                         }).ok();
                     } else if req_id == pending_llm && pending_llm != 0 {
@@ -2803,7 +2817,11 @@ async fn run_session(
                         let ui_text = text.clone();
                         ui.upgrade_in_event_loop(move |ui| {
                             ui.set_llm_busy(false);
-                            if !ui_text.trim().is_empty() {
+                            // an empty result is legitimate (nothing to paste);
+                            // a raised one gets the composer's ⚠ banner
+                            if error {
+                                ui.set_gen_error("the personality LLM failed — check engine logs".into());
+                            } else if !ui_text.trim().is_empty() {
                                 ui.set_text(ui_text.into());
                             }
                         }).ok();
@@ -2896,8 +2914,21 @@ async fn run_session(
                         }
                     }
                 }
-                // SpeakStarted / PropertiesChanged: the app consumes neither
-                // (the D-Bus path never subscribed to them either).
+                EngineEvent::PropertiesChanged { changed } => {
+                    // ModelLoaded is not consumed (the splash drops on the
+                    // first round-trip, not on warmup); ModelLoadError is —
+                    // a failed warmup otherwise leaves the models silently
+                    // absent until the first generation blows up.
+                    if let Some(msg) = changed.get("ModelLoadError").and_then(|v| v.as_str()) {
+                        if !msg.is_empty() {
+                            tracing::error!("engine warmup failed: {msg}");
+                            let msg = msg.to_string();
+                            ui.upgrade_in_event_loop(move |ui| ui.set_gen_error(msg.into())).ok();
+                        }
+                    }
+                }
+                // SpeakStarted: the app consumes it on neither transport (the
+                // D-Bus path never subscribed to it either).
                 _ => {}
         } };
     }

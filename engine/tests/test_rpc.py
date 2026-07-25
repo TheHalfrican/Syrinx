@@ -94,6 +94,7 @@ def test_authenticate_then_call_getters(tmp_path):
                 assert (await _send(ws, "GetProtocolVersion", [], 1))["result"] == 1
                 assert (await _send(ws, "GetBackend", [], 2))["result"] in ("cpu", "cuda", "rocm")
                 assert (await _send(ws, "GetModelLoaded", [], 3))["result"] is False
+                assert (await _send(ws, "GetModelLoadError", [], 4))["result"] == ""
         finally:
             await handle.aclose()
     run(go())
@@ -275,6 +276,35 @@ def test_warmup_broadcasts_properties_changed(tmp_path):
             assert msg == {"jsonrpc": "2.0", "method": "PropertiesChanged",
                            "params": {"ModelLoaded": True}}
             assert (await _send(ws, "GetModelLoaded", [], 9))["result"] is True
+            assert (await _send(ws, "GetModelLoadError", [], 10))["result"] == ""
+            await ws.close()
+        finally:
+            await handle.aclose()
+    run(go())
+
+
+def test_a_failed_warmup_broadcasts_model_load_error(tmp_path):
+    """The other half of §5: a load that raises leaves ModelLoaded false and
+    puts the reason on ModelLoadError, over the same notification."""
+    async def go():
+        class BoomTTS:
+            backend = "cpu"
+            clone_engine = "tada"
+
+            async def load(self):
+                raise RuntimeError("tada weights missing")
+
+        core = EngineCore()
+        core._tts = BoomTTS()
+        core, handle, disc = await _server(tmp_path, core=core)
+        try:
+            ws = await _authed(disc)
+            await core.warmup()
+            msg = json.loads(await asyncio.wait_for(ws.recv(), 5))
+            assert msg == {"jsonrpc": "2.0", "method": "PropertiesChanged",
+                           "params": {"ModelLoadError": "tada weights missing"}}
+            assert (await _send(ws, "GetModelLoadError", [], 9))["result"] == "tada weights missing"
+            assert (await _send(ws, "GetModelLoaded", [], 10))["result"] is False
             await ws.close()
         finally:
             await handle.aclose()

@@ -16,7 +16,7 @@ pub enum EngineEvent {
     AudioLevel { gen_id: u32, rms: f64 },
     PlaybackInfo { gen_id: u32, clip_id: String, title: String, duration: f64, bars: String },
     PlaybackProgress { gen_id: u32, pct: f64 },
-    LlmResult { req_id: u32, text: String },
+    LlmResult { req_id: u32, text: String, error: bool },
     TranscribeProgress { req_id: u32, partial: String },
     TranscribeResult { req_id: u32, text: String, error: bool },
     ModelProgress { model_id: String, pct: f64, status: String },
@@ -24,7 +24,8 @@ pub enum EngineEvent {
     SpeakEnded { gen_id: u32 },
 
     /// Mirrors the D-Bus `PropertiesChanged` / the RPC `PropertiesChanged`
-    /// notification. In practice only carries `{"ModelLoaded": true}` today.
+    /// notification. In practice carries `{"ModelLoaded": true}` after a good
+    /// warmup, or `{"ModelLoadError": "…"}` when a model load raised.
     /// Keys are PascalCase property names; values are decoded as-is.
     PropertiesChanged { changed: BTreeMap<String, Value> },
 }

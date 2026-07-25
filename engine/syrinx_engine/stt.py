@@ -135,7 +135,13 @@ class Transcriber:
         try:
             import torch
 
-            cuda = torch.cuda.is_available()
+            # CTranslate2 has no ROCm backend — CUDA here means *NVIDIA* CUDA.
+            # torch.cuda lies under HIP (a ROCm build reports is_available()
+            # True for an AMD card), so the same tell detect_device() uses —
+            # torch.version.hip — has to veto it or WhisperModel(device="cuda")
+            # dies at load on an AMD box. Torch backends still get the GPU
+            # there; STT alone drops to CPU.
+            cuda = torch.cuda.is_available() and not getattr(torch.version, "hip", None)
         except Exception:  # noqa: BLE001
             cuda = False
 

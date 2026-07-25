@@ -21,7 +21,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let backend = client.backend().await?;
     let loaded = client.model_loaded().await?;
-    println!("GetBackend -> {backend:?}   GetModelLoaded -> {loaded}");
+    let load_error = client.model_load_error().await?;
+    println!("GetBackend -> {backend:?}   GetModelLoaded -> {loaded}   GetModelLoadError -> {load_error:?}");
 
     let history = client.list_history().await?;
     println!("ListHistory -> {} bytes of JSON", history.len());

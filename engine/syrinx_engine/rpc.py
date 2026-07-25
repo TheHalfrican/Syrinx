@@ -52,7 +52,12 @@ NOT_AUTHENTICATED = -32002
 CLOSE_POLICY_VIOLATION = 1008
 
 # Transport-only methods with no D-Bus / core analog (spec §0, §5, §9).
-TRANSPORT_METHODS = ("Authenticate", "GetModelLoaded", "GetBackend", "GetProtocolVersion")
+TRANSPORT_METHODS = (
+    "Authenticate", "GetModelLoaded", "GetModelLoadError", "GetBackend", "GetProtocolVersion",
+)
+# The property getters among them — dispatched from the core's state, not the
+# method table (spec §5). Kept next to TRANSPORT_METHODS so the two can't drift.
+PROPERTY_GETTERS = ("GetModelLoaded", "GetModelLoadError", "GetBackend")
 
 
 def engine_method_names(core) -> "list[str]":
@@ -149,9 +154,8 @@ class RpcServer:
         self._arity = {
             n: len(inspect.signature(fn).parameters) for n, fn in self._methods.items()
         }
-        self._arity.update(
-            {"GetModelLoaded": 0, "GetBackend": 0, "GetProtocolVersion": 0}
-        )
+        self._arity.update({n: 0 for n in PROPERTY_GETTERS})
+        self._arity["GetProtocolVersion"] = 0
 
     # --- notifications (called synchronously from the core's emit seam) ----
 
@@ -251,7 +255,7 @@ class RpcServer:
         if not isinstance(params, list):
             send_q.put_nowait(_error(msg_id, INVALID_PARAMS, "params must be an array"))
             return
-        if method not in self._methods and method not in ("GetModelLoaded", "GetBackend", "GetProtocolVersion"):
+        if method not in self._methods and method not in PROPERTY_GETTERS + ("GetProtocolVersion",):
             send_q.put_nowait(_error(msg_id, METHOD_NOT_FOUND, f"method not found: {method}"))
             return
         if len(params) != self._arity.get(method, -1):
@@ -265,6 +269,8 @@ class RpcServer:
                 result = self._protocol
             elif method == "GetModelLoaded":
                 result = self._core._model_loaded
+            elif method == "GetModelLoadError":
+                result = self._core._model_load_error
             elif method == "GetBackend":
                 result = self._core.backend_name
             else:

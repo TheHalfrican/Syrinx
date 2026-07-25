@@ -23,10 +23,10 @@ document, not one implementation.
 
 | | Count | Source of truth |
 |---|---|---|
-| Methods | **66** | 66 `@method()` in `service.py`; 66 `fn` (of 78) in `lib.rs` |
-| Read-only properties | **2** | `ModelLoaded`, `Backend` → become `GetModelLoaded` / `GetBackend` + `PropertiesChanged` |
+| Methods | **66** | 66 `@method()` in `service.py`; 66 `fn` (of 79) in `lib.rs` |
+| Read-only properties | **3** | `ModelLoaded`, `ModelLoadError`, `Backend` → become `GetModelLoaded` / `GetModelLoadError` / `GetBackend` + `PropertiesChanged` |
 | Signals | **10** | 10 `@signal()` → become server→client notifications |
-| Transport-only RPC methods | **4** | `Authenticate`, `GetModelLoaded`, `GetBackend`, `GetProtocolVersion` (no D-Bus analog; properties/handshake are native there) |
+| Transport-only RPC methods | **5** | `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`, `GetProtocolVersion` (no D-Bus analog; properties/handshake are native there) |
 
 `lib.rs` and `service.py` are **in sync** — every method name, arity, and
 signature matches (verified for this spec; see §11). If a future change makes
@@ -225,6 +225,12 @@ name. `→ null` means a void reply (`{"result":null}`).
 | `RewriteProfile` | `[voice_id: string, text: string]` | integer (req_id) | Rewrite `text` in the voice's personality; `0` if none/empty. Result via `LlmResult`. |
 | `RefineTranscript` | `[text: string]` | integer (req_id) | Clean a dictation transcript; `0` if empty. Result via `LlmResult`. |
 
+`LlmResult` carries an `error` flag (§6): `true` = the LLM stack raised (with
+`text` `""`), distinct both from a model that legitimately returned nothing
+(`error` `false`, `text` `""`) and from the `0` req_id these methods return when
+there is no personality / nothing to do. Clients MUST treat `error` `true` as a
+visible failure rather than an empty result.
+
 ### 4.4 Async transcription & voice conversion (→ signals)
 
 | Method | Params | Result | Semantics |
@@ -312,7 +318,7 @@ name. `→ null` means a void reply (`{"result":null}`).
 
 ## 5. Properties → RPC methods + `PropertiesChanged`
 
-The two D-Bus read-only properties become explicit getters, plus a notification
+The three D-Bus read-only properties become explicit getters, plus a notification
 mirroring the D-Bus `org.freedesktop.DBus.Properties.PropertiesChanged` that the
 engine emits after warmup (`emit_properties_changed({"ModelLoaded": True})` in
 `service.py`).
@@ -320,7 +326,16 @@ engine emits after warmup (`emit_properties_changed({"ModelLoaded": True})` in
 | RPC method | Params | Result | D-Bus origin |
 |---|---|---|---|
 | `GetModelLoaded` | `[]` | boolean | `ModelLoaded` property |
+| `GetModelLoadError` | `[]` | string (`""` = no error) | `ModelLoadError` property |
 | `GetBackend` | `[]` | string (`"cuda"`\|`"rocm"`\|`"cpu"`) | `Backend` property |
+
+`ModelLoadError` is warmup's failure channel: when a model load raises, the
+engine stores the reason, emits `PropertiesChanged {"ModelLoadError": "…"}`, and
+leaves `ModelLoaded` **false** — the process stays up (history, settings and the
+Models tab keep working) so the user can fix the cause. `""` means healthy; the
+value never clears within a run, so a restart is how it goes away. A client
+SHOULD read it once after auth (a fast failure can beat the first round-trip)
+*and* honor the notification.
 
 **`PropertiesChanged` notification** (server → client). Unlike the signals in §6,
 its `params` is a **by-name object** of changed property → new value (mirroring
@@ -331,9 +346,11 @@ D-Bus semantics), not a positional array:
 ```
 
 Property names inside the object are the **PascalCase** D-Bus names
-(`ModelLoaded`, `Backend`). Today the engine only ever emits
-`{"ModelLoaded": true}` (once, at end of warmup), but the notification is defined
-generally so a future `Backend` change would carry `{"Backend":"cuda"}`.
+(`ModelLoaded`, `ModelLoadError`, `Backend`). Today the engine emits exactly one
+of `{"ModelLoaded": true}` (once, at end of a good warmup) or
+`{"ModelLoadError": "<reason>"}` (once, when a load raised), but the notification
+is defined generally so a future `Backend` change would carry
+`{"Backend":"cuda"}`.
 
 ---
 
@@ -349,7 +366,7 @@ D-Bus signature. Broadcast to all authenticated connections.
 | `AudioLevel` | `[gen_id: integer, rms: number]` | `ud` | Live output RMS during playback. |
 | `PlaybackInfo` | `[gen_id: integer, clip_id: string, title: string, duration: number, bars: string]` | `ussds` | Playback of a clip started; `bars` is a JSON array string. |
 | `PlaybackProgress` | `[gen_id: integer, pct: number]` | `ud` | Playback position 0..1, per audio block. |
-| `LlmResult` | `[req_id: integer, text: string]` | `us` | Result of Compose/Rewrite/Refine (`""` = failed/none). |
+| `LlmResult` | `[req_id: integer, text: string, error: boolean]` | `usb` | Result of Compose/Rewrite/Refine. `error` `true` = the LLM stack raised (with `text` `""`); this is **distinct** from a model that legitimately produced nothing (`error` `false`, `text` `""`), so the app can show "the personality LLM failed" instead of silently keeping the original text. |
 | `TranscribeProgress` | `[req_id: integer, partial: string]` | `us` | Live partial transcript from `TranscribeFile`. |
 | `TranscribeResult` | `[req_id: integer, text: string, error: boolean]` | `usb` | Final transcript from `TranscribeFile`. `error` `true` = the stt stack raised (with `text` `""`); this is **distinct** from a legitimately-empty transcript (`error` `false`, `text` `""`) so the app can show "transcription failed" vs. "no speech detected". |
 | `ModelProgress` | `[model_id: string, pct: number, status: string]` | `sds` | Download progress; `status` `"downloading"`\|`"finalizing"`\|`"done"`\|`"error"`. `"finalizing"` = on-disk bytes reached the expected total but the fetch is still working (checksums/renames/trailing files); `pct` stays capped at `0.999` until `"done"`. |
@@ -427,6 +444,10 @@ There is no bus-name to claim, so readiness is defined by the handshake:
    warmup completes. A client SHOULD call `GetModelLoaded` once right after auth
    (to catch the case where warmup finished before it connected) and otherwise
    wait for the notification.
+3. **Warmup failed** = `GetModelLoadError` returns a non-empty string, or the
+   client received `PropertiesChanged {"ModelLoadError": "…"}`. `ModelLoaded`
+   then never becomes `true` for this engine process, so a client that only
+   waits on (2) would wait forever; it MUST surface the reason instead.
 
 ### 7.4 Timeouts — do not impose one
 
@@ -452,8 +473,12 @@ prefer the async variants and `Cancel`, not a timeout.
 ← {"jsonrpc":"2.0","result":"cuda","id":1}
 → {"jsonrpc":"2.0","method":"GetModelLoaded","params":[],"id":2}
 ← {"jsonrpc":"2.0","result":false,"id":2}
+→ {"jsonrpc":"2.0","method":"GetModelLoadError","params":[],"id":3}
+← {"jsonrpc":"2.0","result":"","id":3}
 … later, warmup finishes …
 ← {"jsonrpc":"2.0","method":"PropertiesChanged","params":{"ModelLoaded":true}}
+… or, had a model load raised …
+← {"jsonrpc":"2.0","method":"PropertiesChanged","params":{"ModelLoadError":"out of GPU memory loading the voice model (tada) — try a smaller model size in the Models tab"}}
 ```
 
 ### 8.2 `Speak` round-trip (request → response → follow-up notifications)
@@ -530,7 +555,7 @@ pub enum EngineEvent {
     AudioLevel         { gen_id: u32, rms: f64 },
     PlaybackInfo       { gen_id: u32, clip_id: String, title: String, duration: f64, bars: String },
     PlaybackProgress   { gen_id: u32, pct: f64 },
-    LlmResult          { req_id: u32, text: String },
+    LlmResult          { req_id: u32, text: String, error: bool },
     TranscribeProgress { req_id: u32, partial: String },
     TranscribeResult   { req_id: u32, text: String, error: bool },
     ModelProgress      { model_id: String, pct: f64, status: String },
@@ -538,7 +563,8 @@ pub enum EngineEvent {
     SpeakEnded         { gen_id: u32 },
 
     /// Mirrors the D-Bus PropertiesChanged / the RPC `PropertiesChanged`
-    /// notification. In practice only carries `{"ModelLoaded": true}` today.
+    /// notification. In practice carries `{"ModelLoaded": true}` after a good
+    /// warmup, or `{"ModelLoadError": "…"}` when a model load raised.
     PropertiesChanged  { changed: std::collections::BTreeMap<String, serde_json::Value> },
 }
 ```
@@ -547,8 +573,8 @@ Notes for the Rust client:
 - `bars` and the various `*_json` returns stay `String` (they carry JSON the app
   parses downstream), matching `lib.rs`.
 - `PropertiesChanged.changed` keys are the PascalCase property names
-  (`ModelLoaded`, `Backend`); values are decoded as `serde_json::Value` (a bool
-  for `ModelLoaded`, a string for `Backend`).
+  (`ModelLoaded`, `ModelLoadError`, `Backend`); values are decoded as
+  `serde_json::Value` (a bool for `ModelLoaded`, a string for the other two).
 - The unified `EngineClient` error type must expose the `-32000` `error.message`
   text verbatim through `Display` (see §7.2) so `app/src/main.rs`'s substring
   checks keep working.
@@ -557,8 +583,8 @@ Notes for the Rust client:
 
 ## 11. Appendix B — Completeness check
 
-- `service.py`: **66** `@method()`, **10** `@signal()`, **2** `@dbus_property`.
-- `lib.rs`: **78** `fn` = **66** methods + **10** signals + **2** properties.
+- `service.py`: **66** `@method()`, **10** `@signal()`, **3** `@dbus_property`.
+- `lib.rs`: **79** `fn` = **66** methods + **10** signals + **3** properties.
 - §4's method table lists all **66** methods (4.1–4.10:
   4+11+3+3+5+8+16+4+4+8 = **66**); §6 lists all **10** signals; §5 covers both
   properties.
@@ -566,8 +592,8 @@ Notes for the Rust client:
   `service.py`, snake_case-of-the-same in `lib.rs`), arities, and signatures
   correspond one-to-one. (The design brief's "68 methods / ~50 methods" figures
   are approximate; the exact current count is **66**.)
-- `Authenticate`, `GetModelLoaded`, `GetBackend`, `GetProtocolVersion` are
-  RPC-transport-only additions with no D-Bus method analog (D-Bus uses native
+- `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`,
+  `GetProtocolVersion` are RPC-transport-only additions with no D-Bus method analog (D-Bus uses native
   properties and has no app-level auth or version handshake).
 
 ---
