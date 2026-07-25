@@ -20,14 +20,16 @@ unmodified upstream font. Full text: https://dejavu-fonts.github.io/License.html
 
 ## SyrinxFallback.ttf — SIL Open Font License 1.1
 
-A ~2 KB purpose-built font containing exactly the four glyphs DejaVu Sans lacks:
+A ~3.5 KB purpose-built font containing exactly the glyphs DejaVu Sans lacks:
 
 - U+23F8 ⏸ DOUBLE VERTICAL BAR  — from Noto Sans Symbols 2
 - U+23FB ⏻ POWER SYMBOL          — from Noto Sans Symbols 2
 - U+29C9 ⧉ TWO JOINED SQUARES    — from Noto Sans Math
 - U+FF0B ＋ FULLWIDTH PLUS SIGN   — from Noto Sans JP
+- U+2316 ⌖ POSITION INDICATOR    — from Noto Sans Symbols 2
+- U+1F5D1 🗑 WASTEBASKET          — from Noto Sans Symbols 2
 
-Built by subsetting each source to the single needed codepoint and merging
+Built by subsetting each source to the needed codepoints and merging
 (fontTools). All three sources are Google Noto fonts under the SIL Open Font
 License 1.1 (https://openfontlicense.org), which permits subsetting, merging,
 and redistribution (including bundling in software). The merged font is

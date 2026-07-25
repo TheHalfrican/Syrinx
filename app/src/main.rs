@@ -1051,7 +1051,7 @@ fn os_native_scale() -> f64 {
 }
 
 /// Bundle DejaVu Sans (broad symbol coverage) plus a tiny merged Noto subset
-/// (⏸ ⏻ ⧉ ＋ — the four glyphs DejaVu lacks) as *fallback* fonts. On Linux
+/// (⏸ ⏻ ⧉ ＋ ⌖ 🗑 — the glyphs DejaVu lacks) as *fallback* fonts. On Linux
 /// fontconfig already resolves these symbols to DejaVu; the femtovg text stack
 /// on Windows/mac does not fall back to system fonts, so the glyphs render as
 /// tofu. Registering as fallback only (not as the default family) means the
