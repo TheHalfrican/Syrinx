@@ -1337,11 +1337,22 @@ fn profile_err_msg(e: &EngineError) -> String {
     }
 }
 
-/// Temp WAV path for in-modal recording (runtime dir → RAM, cleaned on logout).
-fn cv_wav_path() -> String {
-    std::env::var("XDG_RUNTIME_DIR")
-        .map(|d| format!("{d}/syrinx-cv-record.wav"))
-        .unwrap_or_else(|_| "/tmp/syrinx-cv-record.wav".into())
+/// Scratch WAV path for app-side capture. On Linux the runtime dir is a tmpfs
+/// (RAM, cleaned on logout) with `/tmp` as the fallback; elsewhere `XDG_RUNTIME_DIR`
+/// is unset and `/tmp` is not a real directory, so the platform temp dir is the
+/// only path `File::create` can open. The directory is never created — both
+/// branches resolve to one the OS already guarantees.
+fn scratch_wav(name: &str) -> String {
+    #[cfg(target_os = "linux")]
+    {
+        std::env::var("XDG_RUNTIME_DIR")
+            .map(|d| format!("{d}/{name}"))
+            .unwrap_or_else(|_| format!("/tmp/{name}"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        std::env::temp_dir().join(name).to_string_lossy().to_string()
+    }
 }
 
 /// The default sink's `.monitor` source — a passive tap for system audio (the
@@ -2595,18 +2606,14 @@ async fn run_session(
     // transcription view state
     let mut tr_rec: Option<Capture> = None;
     let mut tr_elapsed: u32 = 0;
-    let tr_wav = std::env::var("XDG_RUNTIME_DIR")
-        .map(|d| format!("{d}/syrinx-transcribe.wav"))
-        .unwrap_or_else(|_| "/tmp/syrinx-transcribe.wav".into());
+    let tr_wav = scratch_wav("syrinx-transcribe.wav");
     const TR_REC_MAX: u32 = 600; // 10 min safety cap
     let mut pending_tr: u32 = 0;
     let mut pending_tr_refine: u32 = 0;
     // voice-changer (⇄) view state
     let mut vc_rec: Option<Capture> = None;
     let mut vc_elapsed: u32 = 0;
-    let vc_wav = std::env::var("XDG_RUNTIME_DIR")
-        .map(|d| format!("{d}/syrinx-convert.wav"))
-        .unwrap_or_else(|_| "/tmp/syrinx-convert.wav".into());
+    let vc_wav = scratch_wav("syrinx-convert.wav");
     const VC_REC_MAX: u32 = 180; // matches the engine's SYRINX_VC_MAX_SECS default
     let mut vc_source: Option<String> = None;       // armed source path
     let mut vc_voice_ids: Vec<String> = Vec::new(); // parallel to the dropdown names
@@ -2637,7 +2644,7 @@ async fn run_session(
     let mut lib_filters: (String, i32, i32, bool, i32) = (String::new(), 0, 0, false, 0);
     // create-voice modal state
     let mut cv_rec: Option<Capture> = None;
-    let cv_wav = cv_wav_path();
+    let cv_wav = scratch_wav("syrinx-cv-record.wav");
     let mut cv_sample: Option<String> = None;
     let mut rec_interval = tokio::time::interval(std::time::Duration::from_secs(1));
     // The interval is only polled while a recording is live; with the default
@@ -3321,7 +3328,12 @@ async fn run_session(
                                 ui.set_cv_sample_label("● recording… 0s / 30s".into());
                             }).ok();
                         }
-                        Err(e) => tracing::error!("record failed: {e}"),
+                        Err(e) => {
+                            tracing::error!("record failed: {e}");
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_cv_sample_label("⚠ recording failed — try again".into());
+                            }).ok();
+                        }
                     }
                 }
                 Some(Cmd::CvStopRecord) => {
@@ -3909,7 +3921,12 @@ async fn run_session(
                                         ui.set_tr_status("● recording 0:00".into());
                                     }).ok();
                                 }
-                                Err(e) => tracing::error!("record failed: {e}"),
+                                Err(e) => {
+                                    tracing::error!("record failed: {e}");
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_tr_status("⚠ recording failed — try again".into());
+                                    }).ok();
+                                }
                             }
                         }
                     }
@@ -4083,7 +4100,12 @@ async fn run_session(
                                         ui.set_vc_status("● recording 0:00 / 3:00".into());
                                     }).ok();
                                 }
-                                Err(e) => tracing::error!("record failed: {e}"),
+                                Err(e) => {
+                                    tracing::error!("record failed: {e}");
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_vc_status("⚠ recording failed — try again".into());
+                                    }).ok();
+                                }
                             }
                         }
                     }
@@ -4866,6 +4888,21 @@ mod tests {
     fn fmt_dur_clamps_junk_to_zero() {
         assert_eq!(fmt_dur(-3.0), "0:00");
         assert_eq!(fmt_dur(f64::NAN), "0:00"); // max() prefers the non-NaN operand
+    }
+
+    // --- scratch_wav -----------------------------------------------------
+
+    #[test]
+    fn scratch_wav_lands_in_a_directory_that_exists_on_this_platform() {
+        let p = scratch_wav("syrinx-scratch-wav-test.wav");
+        let path = std::path::Path::new(&p);
+        assert_eq!(path.file_name().unwrap(), "syrinx-scratch-wav-test.wav");
+        let parent = path.parent().expect("scratch path has a parent dir");
+        assert!(parent.is_dir(), "{} is not a directory", parent.display());
+        // the real regression: capture's WavWriter does File::create here, and a
+        // path under a nonexistent dir (Windows had /tmp) fails the whole start
+        std::fs::File::create(path).expect("scratch wav path is creatable");
+        std::fs::remove_file(path).ok();
     }
 
     // --- is_vc_engine ----------------------------------------------------

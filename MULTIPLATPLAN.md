@@ -530,6 +530,28 @@ pre-shifts the SOURCE so profile timbre stays authentic; e2e: requested
 +3 measured 2.60 st at the converter output). Developer Mode is now ON
 on this box (symlink layout for future downloads).
 
+**2026-07-25 — ◉ system capture was dead on arrival on Windows: the
+scratch WAV path was still Linux-shaped.** First real click of any
+◉ Record-system button (TR, ⇄ VC, create-voice System chip) did nothing —
+all three app-side capture WAVs were built as `XDG_RUNTIME_DIR` →
+`/tmp/syrinx-*.wav`, which on Windows resolves to a nonexistent `C:\tmp`,
+so `WavWriter::create` → `Loopback::start` failed instantly; only the
+loopback path was hit (mic capture's WAV is owned by the engine). The
+failure was invisible: all three `capture_start` Err arms logged
+`tracing::error!` only, and the release exe is consoleless. Fix: one
+`scratch_wav(name)` helper (Linux arm byte-identical XDG→/tmp; elsewhere
+`std::env::temp_dir()`), and every Err arm now also surfaces
+"⚠ recording failed — try again" on the view's status line. Regression
+test pins scratch paths to a directory that exists on the current
+platform. **How it slipped:** phase-3 loopback was proven via the smoke
+test (which writes to `temp_dir`) and the app-level e2e that day drove
+the dictation chord, not the ◉ button — a "verified" module can still be
+handed an impossible path by its caller; e2e the button, not the layer.
+**Gotcha earned:** `cargo test -p syrinx-app --lib` fails ("no library
+targets") — the app is a bin-only crate; use `--bins`. Verified: 57
+tests green (+1), live smoke 3.000s @ 48kHz rms 0.072 captured into the
+real temp dir, release exe rebuilt.
+
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,
    detect absence gracefully) behind the same `system-capture-supported`
