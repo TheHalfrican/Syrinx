@@ -43,6 +43,16 @@ log = logging.getLogger("syrinx.engine.service")
 PITCH_SHIFT_LIMIT = 6
 
 
+def _failure_text(e: Exception, model: str) -> str:
+    """The generation-error text the app shows. A CUDA OOM otherwise arrives as
+    torch's allocator dump (truncated to 200 chars mid-number), which tells the
+    user nothing they can act on. Matched by class name — core.py must stay
+    importable on a torch-free box."""
+    if type(e).__name__ == "OutOfMemoryError":
+        return f"out of GPU memory loading {model} — try a smaller model size in the Models tab"
+    return str(e)[:200]
+
+
 def _pitch_scratch_dir():
     """Engine-owned scratch for pre-shifted conversion sources — mirrors
     recording.py's ``$SYRINX_DATA_DIR/<subdir>`` layout."""
@@ -218,7 +228,8 @@ class EngineCore:
             except Exception as e:  # noqa: BLE001
                 log.exception("Speak %d failed", gen_id)
                 # surface the failure to the app instead of a silent vanish
-                self._emit("GenerationProgress", gen_id, f"error: {str(e)[:200]}", 0.0)
+                what = self._voice_meta(voice_id)[0] or "the voice model"
+                self._emit("GenerationProgress", gen_id, f"error: {_failure_text(e, what)}", 0.0)
             finally:
                 self._emit("SpeakEnded", gen_id)
                 self._tasks.pop(gen_id, None)
@@ -420,7 +431,8 @@ class EngineCore:
                 pass
             except Exception as e:  # noqa: BLE001
                 log.exception("ConvertVoice %d failed", gen_id)
-                self._emit("GenerationProgress", gen_id, f"error: {str(e)[:200]}", 0.0)
+                what = engine or "the conversion model"
+                self._emit("GenerationProgress", gen_id, f"error: {_failure_text(e, what)}", 0.0)
             finally:
                 self._emit("SpeakEnded", gen_id)
                 self._tasks.pop(gen_id, None)

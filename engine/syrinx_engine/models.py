@@ -38,11 +38,20 @@ class ModelSpec:
     min_ram_gb: float = 2.0
     supported: bool = True  # has a working backend in Syrinx today
     patterns: list = None  # snapshot_download allow_patterns (None = whole repo)
+    min_vram_gb: float = 0.0  # 0 = CPU-viable / no VRAM headroom needed
 
 
 # --- the catalog ------------------------------------------------------------
 # Repos are the ones Syrinx actually loads (e.g. faster-whisper CT2 builds, not
 # openai/whisper). `supported=False` = catalogued but no backend wired yet.
+#
+# min_vram_gb is advisory only (a warning row, never a gate). Derivation: sum
+# the weight files the backend actually loads — the ONE variant it picks, not
+# every checkpoint in the repo — at the precision it loads them (TADA casts its
+# fp32 checkpoints to bf16; CT2 whisper is fp16 and its disk size is its VRAM
+# size), add ~30% for activations/KV, round up to a half GB. Cross-engine
+# extras count: seed-vc's whisper-small + bigvgan, Vevo2's ~1.4 GB whisper-med.
+# 0 means "never warn" — kokoro and whisper-base are genuinely fine anywhere.
 
 CATALOG: list = [
     # ---- Voice (TTS / cloning) ----
@@ -52,33 +61,33 @@ CATALOG: list = [
     ModelSpec("qwen-tts-1.7B", "Qwen TTS 1.7B", "voice", "qwen", "1.7B",
               ["Qwen/Qwen3-TTS-12Hz-1.7B-Base"], 4350,
               "Multilingual zero-shot voice cloning (10 langs). GPU strongly recommended.",
-              gpu_recommended=True, min_ram_gb=8.0, supported=True),
+              gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=5.5),
     ModelSpec("qwen-tts-0.6B", "Qwen TTS 0.6B", "voice", "qwen", "0.6B",
               ["Qwen/Qwen3-TTS-12Hz-0.6B-Base"], 2400,
               "Lightweight Qwen voice cloning for lower-end hardware.",
-              gpu_recommended=True, min_ram_gb=4.0, supported=True),
+              gpu_recommended=True, min_ram_gb=4.0, supported=True, min_vram_gb=3.5),
     ModelSpec("qwen-custom-voice-1.7B", "Qwen CustomVoice 1.7B", "voice", "qwen_custom_voice", "1.7B",
               ["Qwen/Qwen3-TTS-12Hz-1.7B-CustomVoice"], 4300,
               "9 preset voices + natural-language style control (instruct).",
-              gpu_recommended=True, min_ram_gb=8.0, supported=True),
+              gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=5.5),
     ModelSpec("qwen-custom-voice-0.6B", "Qwen CustomVoice 0.6B", "voice", "qwen_custom_voice", "0.6B",
               ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"], 2400,
               "Same 9 presets + instruct, lighter and faster.",
-              gpu_recommended=True, min_ram_gb=4.0, supported=True),
+              gpu_recommended=True, min_ram_gb=4.0, supported=True, min_vram_gb=3.5),
     # needs the real k2 wheel matching the venv's torch (k2-fsa.github.io/k2/cpu.html);
     # the PyPI "k2" package is a stub and the vocoder segfaults without the real one.
     ModelSpec("luxtts", "LuxTTS", "voice", "luxtts", "", ["YatharthS/LuxTTS"], 1150,
               "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly cloning, English.",
-              gpu_recommended=False, min_ram_gb=2.0, supported=True),
+              gpu_recommended=False, min_ram_gb=2.0, supported=True, min_vram_gb=1.5),
     # chatterbox-tts installs --no-deps (stale pins); sub-deps in engine[chatterbox]
     ModelSpec("chatterbox", "Chatterbox (Multilingual)", "voice", "chatterbox", "",
               ["ResembleAI/chatterbox"], 13200,
               "23 languages with emotion exaggeration. GPU recommended.",
-              gpu_recommended=True, min_ram_gb=8.0, supported=True),
+              gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=4.0),
     ModelSpec("chatterbox-turbo", "Chatterbox Turbo", "voice", "chatterbox_turbo", "",
               ["ResembleAI/chatterbox-turbo"], 3850,
               "350M English model with [laugh]/[cough] tags.",
-              gpu_recommended=True, min_ram_gb=4.0, supported=True),
+              gpu_recommended=True, min_ram_gb=4.0, supported=True, min_vram_gb=4.0),
     # hume-tada installs --no-deps (stale torch pin); the Llama tokenizer
     # (ungated unsloth mirror, ~2 MB) is fetched by the backend at load time —
     # listing the repo here would drag in 2.5 GB of unused Llama weights and
@@ -86,11 +95,11 @@ CATALOG: list = [
     ModelSpec("tada-1b", "TADA 1B", "voice", "tada", "1B",
               ["HumeAI/tada-1b", "HumeAI/tada-codec"], 14000,
               "Llama-3.2-1B speech-LM, 700s+ coherent audio. English.",
-              gpu_recommended=True, min_ram_gb=8.0, supported=True),
+              gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=5.0),
     ModelSpec("tada-3b-ml", "TADA 3B Multilingual", "voice", "tada", "3B",
               ["HumeAI/tada-3b-ml", "HumeAI/tada-codec"], 18700,
               "Llama-3.2-3B speech-LM, 10 languages. Heavy.",
-              gpu_recommended=True, min_ram_gb=16.0, supported=True),
+              gpu_recommended=True, min_ram_gb=16.0, supported=True, min_vram_gb=8.0),
     # ---- Transcription (faster-whisper / CTranslate2) ----
     ModelSpec("whisper-base", "Whisper Base", "stt", "whisper", "base.en",
               ["Systran/faster-whisper-base.en"], 140,
@@ -99,29 +108,29 @@ CATALOG: list = [
     ModelSpec("whisper-small", "Whisper Small", "stt", "whisper", "small",
               ["Systran/faster-whisper-small"], 460,
               "244M params. Balanced speed/accuracy, multilingual.",
-              gpu_recommended=False, min_ram_gb=2.0, supported=True),
+              gpu_recommended=False, min_ram_gb=2.0, supported=True, min_vram_gb=1.0),
     ModelSpec("whisper-medium", "Whisper Medium", "stt", "whisper", "medium",
               ["Systran/faster-whisper-medium"], 1450,
               "769M params. Higher accuracy, multilingual.",
-              gpu_recommended=False, min_ram_gb=4.0, supported=True),
+              gpu_recommended=False, min_ram_gb=4.0, supported=True, min_vram_gb=2.0),
     ModelSpec("whisper-large", "Whisper Large v3", "stt", "whisper", "large-v3",
               ["Systran/faster-whisper-large-v3"], 2950,
               "1.5B params. Best accuracy, multilingual.",
-              gpu_recommended=True, min_ram_gb=6.0, supported=True),
+              gpu_recommended=True, min_ram_gb=6.0, supported=True, min_vram_gb=4.0),
     ModelSpec("whisper-turbo", "Whisper Turbo", "stt", "whisper", "large-v3-turbo",
               ["deepdml/faster-whisper-large-v3-turbo-ct2"], 1550,
               "Pruned large-v3: near-large accuracy, much faster.",
-              gpu_recommended=False, min_ram_gb=4.0, supported=True),
+              gpu_recommended=False, min_ram_gb=4.0, supported=True, min_vram_gb=2.0),
     # ---- Language models (compose / rewrite) ----
     ModelSpec("qwen3-0.6b", "Qwen3 0.6B", "llm", "qwen_llm", "0.6B", ["Qwen/Qwen3-0.6B"],
               1450, "Very fast on CPU. Good for short compose/rewrite.",
-              gpu_recommended=False, min_ram_gb=3.0, supported=True),
+              gpu_recommended=False, min_ram_gb=3.0, supported=True, min_vram_gb=2.0),
     ModelSpec("qwen3-1.7b", "Qwen3 1.7B", "llm", "qwen_llm", "1.7B", ["Qwen/Qwen3-1.7B"],
               3900, "Balanced quality. Usable on CPU, snappy on GPU.",
-              gpu_recommended=False, min_ram_gb=6.0, supported=True),
+              gpu_recommended=False, min_ram_gb=6.0, supported=True, min_vram_gb=5.0),
     ModelSpec("qwen3-4b", "Qwen3 4B", "llm", "qwen_llm", "4B", ["Qwen/Qwen3-4B"],
               7700, "Highest-quality local rewrites. GPU recommended.",
-              gpu_recommended=True, min_ram_gb=12.0, supported=True),
+              gpu_recommended=True, min_ram_gb=12.0, supported=True, min_vram_gb=10.0),
 
     # ---- Voice conversion (the ⇄ Voice Converter tab) ----
     # No "active" concept: the converter's model dropdown picks per conversion,
@@ -130,14 +139,14 @@ CATALOG: list = [
               ["ResembleAI/chatterbox"], 1000,
               "Style-preserved conversion — the S3 half of Chatterbox. Shares its "
               "weights with Chatterbox (Multilingual).",
-              gpu_recommended=False, min_ram_gb=4.0, supported=True,
+              gpu_recommended=False, min_ram_gb=4.0, supported=True, min_vram_gb=1.5,
               patterns=["s3gen.safetensors", "conds.pt"]),
     ModelSpec("seed-vc", "Seed-VC", "vc", "seed_vc", "",
               ["Plachta/Seed-VC", "funasr/campplus",
                "nvidia/bigvgan_v2_22khz_80band_256x", "openai/whisper-small"], 9250,
               "Diffusion conversion, speech + singing (f0). Isolated venv: run "
               "engine/setup-seedvc.sh once.",
-              gpu_recommended=True, min_ram_gb=6.0, supported=True,
+              gpu_recommended=True, min_ram_gb=6.0, supported=True, min_vram_gb=3.0,
               # skip the tf/flax duplicates of whisper-small
               patterns=["*.safetensors", "*.bin", "*.pt", "*.pth", "*.json",
                         "*.txt", "*.yml", "*.yaml", "*.model"]),
@@ -146,7 +155,7 @@ CATALOG: list = [
               "Amphion's timbre-only converter — keeps the source delivery most "
               "literally. Isolated venv: run engine/setup-vevo.sh once. "
               "Non-commercial weights.",
-              gpu_recommended=True, min_ram_gb=8.0, supported=True,
+              gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=3.5,
               patterns=["tokenizer/vq8192/*", "acoustic_modeling/Vq8192ToMels/*",
                         "acoustic_modeling/Vocoder/*"]),
     # FM-only subset of RMSnow/Vevo2 — keep patterns in sync with
@@ -158,7 +167,7 @@ CATALOG: list = [
               "first conversion also fetches whisper-medium (~1.5 GB). "
               "Isolated venv: run engine/setup-vevo.sh once. "
               "Non-commercial weights.",
-              gpu_recommended=True, min_ram_gb=8.0, supported=True,
+              gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=5.5,
               patterns=["tokenizer/contentstyle_fvq16384_12.5hz/*",
                         "acoustic_modeling/fm_emilia101k_singnet7k_repa/*",
                         "vocoder/*"]),
@@ -214,15 +223,18 @@ def detect_hardware() -> dict:
     ram_gb = _total_ram_gb()
     gpu = False
     gpu_name = ""
+    vram_gb = 0.0
     try:
         import torch
 
         if torch.cuda.is_available():
             gpu = True
             gpu_name = torch.cuda.get_device_name(0)
+            vram_gb = round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)
     except Exception:  # noqa: BLE001
         pass
-    return {"cores": cores, "ram_gb": ram_gb, "gpu": gpu, "gpu_name": gpu_name}
+    return {"cores": cores, "ram_gb": ram_gb, "gpu": gpu, "gpu_name": gpu_name,
+            "vram_gb": vram_gb}
 
 
 def hardware_warning(m: "ModelSpec", hw: dict) -> str:
@@ -232,6 +244,13 @@ def hardware_warning(m: "ModelSpec", hw: dict) -> str:
         warns.append("no GPU detected — will be slow on CPU")
     if hw["ram_gb"] and hw["ram_gb"] < m.min_ram_gb:
         warns.append(f"needs ~{m.min_ram_gb:g} GB RAM (have {hw['ram_gb']:g})")
+    # GPU boxes only: on a CPU-only box the gpu_recommended clause already says
+    # everything, and a VRAM figure would be noise. vram_gb 0 = unknown.
+    if hw["gpu"] and m.min_vram_gb and hw.get("vram_gb") and hw["vram_gb"] < m.min_vram_gb:
+        warns.append(
+            f"needs ~{m.min_vram_gb:g} GB VRAM (have {hw['vram_gb']:g}) — "
+            "expect very slow or failed loads"
+        )
     return "; ".join(warns)
 
 
@@ -407,7 +426,8 @@ class ModelManager:
                 "id": m.id, "display": m.display, "category": m.category,
                 "engine": m.engine, "size": m.size, "size_mb": m.size_mb,
                 "description": m.description, "gpu_recommended": m.gpu_recommended,
-                "min_ram_gb": m.min_ram_gb, "supported": m.supported,
+                "min_ram_gb": m.min_ram_gb, "min_vram_gb": m.min_vram_gb,
+                "supported": m.supported,
                 "downloaded": is_cached(m),
                 "downloading": m.id in self._downloading,
                 "active": self._active.get(m.category) == m.id,

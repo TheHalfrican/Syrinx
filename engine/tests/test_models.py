@@ -14,7 +14,8 @@ import pytest
 
 from syrinx_engine import models
 
-FAKE_HW = {"cores": 8, "ram_gb": 32.0, "gpu": True, "gpu_name": "Test GPU"}
+FAKE_HW = {"cores": 8, "ram_gb": 32.0, "gpu": True, "gpu_name": "Test GPU",
+           "vram_gb": 24.0}
 
 
 def fake_repo(base, repo, *, weights=("model.safetensors",), blobs=("a.bin",),
@@ -116,7 +117,7 @@ def test_multi_repo_models_need_every_repo(monkeypatch, hf_cache):
 def test_hardware_warning_reports_gpu_and_ram_shortfalls():
     m = models.spec("qwen-tts-1.7B")
     assert models.hardware_warning(m, FAKE_HW) == ""
-    weak = {"cores": 4, "ram_gb": 4.0, "gpu": False, "gpu_name": ""}
+    weak = {"cores": 4, "ram_gb": 4.0, "gpu": False, "gpu_name": "", "vram_gb": 0.0}
     warn = models.hardware_warning(m, weak)
     assert "no GPU detected" in warn and "GB RAM" in warn
 
@@ -124,7 +125,61 @@ def test_hardware_warning_reports_gpu_and_ram_shortfalls():
 def test_detect_hardware_reports_cores():
     hw = models.detect_hardware()
     assert hw["cores"] >= 1
-    assert set(hw) == {"cores", "ram_gb", "gpu", "gpu_name"}
+    assert set(hw) == {"cores", "ram_gb", "gpu", "gpu_name", "vram_gb"}
+
+
+# --- VRAM warnings (advisory only — nothing gates on them) ----------------
+
+
+def gpu_hw(vram_gb, ram_gb=32.0):
+    return {"cores": 8, "ram_gb": ram_gb, "gpu": True, "gpu_name": "Test GPU",
+            "vram_gb": vram_gb}
+
+
+def test_a_small_card_warns_about_the_models_vram_appetite():
+    m = models.spec("tada-3b-ml")  # 8 GB
+    warn = models.hardware_warning(m, gpu_hw(4.0))
+    assert warn == "needs ~8 GB VRAM (have 4) — expect very slow or failed loads"
+
+
+def test_enough_vram_stays_quiet():
+    m = models.spec("tada-3b-ml")
+    assert models.hardware_warning(m, gpu_hw(8.0)) == ""   # exactly at the bar
+    assert models.hardware_warning(m, gpu_hw(24.0)) == ""
+
+
+def test_a_zero_min_vram_model_never_warns():
+    assert models.spec("kokoro").min_vram_gb == 0.0
+    assert models.spec("whisper-base").min_vram_gb == 0.0
+    assert models.hardware_warning(models.spec("kokoro"), gpu_hw(0.5)) == ""
+
+
+def test_no_gpu_box_gets_no_vram_clause():
+    """A CPU-only box hears "no GPU"; a VRAM figure there would be noise."""
+    m = models.spec("tada-3b-ml")
+    cpu = {"cores": 4, "ram_gb": 32.0, "gpu": False, "gpu_name": "", "vram_gb": 0.0}
+    assert models.hardware_warning(m, cpu) == "no GPU detected — will be slow on CPU"
+
+
+def test_unknown_vram_gets_no_clause():
+    """A GPU torch couldn't measure (vram_gb 0) must not warn on a guess."""
+    m = models.spec("tada-3b-ml")
+    assert models.hardware_warning(m, gpu_hw(0.0)) == ""
+
+
+def test_vram_and_ram_warnings_compose():
+    m = models.spec("tada-3b-ml")  # 16 GB RAM, 8 GB VRAM
+    warn = models.hardware_warning(m, gpu_hw(4.0, ram_gb=8.0))
+    assert warn == ("needs ~16 GB RAM (have 8); "
+                    "needs ~8 GB VRAM (have 4) — expect very slow or failed loads")
+
+
+def test_min_vram_gb_rides_along_in_status(monkeypatch):
+    monkeypatch.setattr(models, "detect_hardware", lambda: FAKE_HW)
+    by_id = {r["id"]: r for r in models.ModelManager().status()}
+    assert by_id["kokoro"]["min_vram_gb"] == 0.0
+    assert by_id["qwen3-4b"]["min_vram_gb"] == 10.0
+    assert all("min_vram_gb" in r for r in models.ModelManager().status())
 
 
 # --- isolated-venv warnings ---------------------------------------------
@@ -262,17 +317,36 @@ def test_detect_hardware_falls_back_to_zero_without_a_ram_source(monkeypatch):
 
 def test_detect_hardware_reports_a_cuda_gpu(monkeypatch):
     torch = types.SimpleNamespace(cuda=types.SimpleNamespace(
-        is_available=lambda: True, get_device_name=lambda i: "NVIDIA GeForce RTX 4090"))
+        is_available=lambda: True, get_device_name=lambda i: "NVIDIA GeForce RTX 4090",
+        get_device_properties=lambda i: types.SimpleNamespace(
+            total_memory=24 * 1024**3)))
     monkeypatch.setitem(sys.modules, "torch", torch)
     hw = models.detect_hardware()
     assert hw["gpu"] is True
     assert hw["gpu_name"] == "NVIDIA GeForce RTX 4090"
+    assert hw["vram_gb"] == 24.0
+
+
+def test_detect_hardware_keeps_the_gpu_when_vram_cannot_be_read(monkeypatch):
+    """A driver that refuses get_device_properties must not erase the GPU —
+    vram_gb 0 just means "unknown", and no VRAM warning fires."""
+    def boom(_i):
+        raise RuntimeError("no properties")
+
+    torch = types.SimpleNamespace(cuda=types.SimpleNamespace(
+        is_available=lambda: True, get_device_name=lambda i: "Mystery GPU",
+        get_device_properties=boom))
+    monkeypatch.setitem(sys.modules, "torch", torch)
+    hw = models.detect_hardware()
+    assert hw["gpu"] is True and hw["gpu_name"] == "Mystery GPU"
+    assert hw["vram_gb"] == 0.0
 
 
 def test_detect_hardware_without_torch_reports_no_gpu(monkeypatch):
     monkeypatch.setitem(sys.modules, "torch", None)
     hw = models.detect_hardware()
     assert hw["gpu"] is False and hw["gpu_name"] == ""
+    assert hw["vram_gb"] == 0.0
 
 
 # --- download ------------------------------------------------------------

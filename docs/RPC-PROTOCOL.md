@@ -300,7 +300,7 @@ name. `→ null` means a void reply (`{"result":null}`).
 | Method | Params | Result | Semantics |
 |---|---|---|---|
 | `ListModels` | `[]` | string (JSON array) | Model catalog (id, display, category, size, status…). |
-| `Hardware` | `[]` | string (JSON) | Detected hardware (cores, ram_gb, gpu, gpu_name). |
+| `Hardware` | `[]` | string (JSON) | Detected hardware (cores, ram_gb, gpu, gpu_name, vram_gb). `vram_gb` is 0 when there's no CUDA GPU or torch is absent. |
 | `DownloadModel` | `[model_id: string]` | boolean | Start a download (progress via `ModelProgress`); `false` if unknown id. |
 | `DeleteModel` | `[model_id: string]` | → null | Delete a downloaded model's files. |
 | `SetActiveModel` | `[model_id: string]` | string (category) | Make a model active for its category; returns the category. |

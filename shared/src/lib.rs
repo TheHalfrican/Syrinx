@@ -267,7 +267,7 @@ pub trait Engine {
     /// The model catalog as a JSON array (id, display, category, size, status…).
     fn list_models(&self) -> zbus::Result<String>;
 
-    /// Detected hardware as JSON (cores, ram_gb, gpu, gpu_name).
+    /// Detected hardware as JSON (cores, ram_gb, gpu, gpu_name, vram_gb).
     fn hardware(&self) -> zbus::Result<String>;
 
     /// Start downloading a model; progress arrives via `ModelProgress`.

@@ -242,6 +242,27 @@ def test_a_synthesis_failure_is_surfaced_as_a_progress_error(iface, signals):
     assert signals["SpeakEnded"]  # the generation still closes out
 
 
+# Stands in for torch.cuda.OutOfMemoryError — core.py matches the class NAME so
+# it never has to import torch on a torch-free box (which CI is).
+class OutOfMemoryError(RuntimeError):
+    pass
+
+
+def test_a_gpu_oom_becomes_an_actionable_message(iface, signals, monkeypatch):
+    """torch's allocator dump (truncated at 200 chars) tells the user nothing
+    they can act on; the Models tab does."""
+    async def boom(*_a, **_kw):
+        raise OutOfMemoryError(
+            "CUDA out of memory. Tried to allocate 2.00 GiB. GPU 0 has a total "
+            "capacity of 4.00 GiB of which 12.00 MiB is free.")
+
+    monkeypatch.setattr(iface._tts, "synthesize", boom)
+    drive(iface, "Speak", "hi", "builtin:kokoro:af_heart")
+    errors = [s for _g, s, _p in signals["GenerationProgress"] if s.startswith("error:")]
+    assert errors == ["error: out of GPU memory loading kokoro — "
+                      "try a smaller model size in the Models tab"]
+
+
 def test_speak_through_a_profile_records_its_engine_and_language(iface):
     pid = profile(iface, "Nail", language="fr", default_engine="luxtts")
     drive(iface, "Speak", "bonjour", pid)
@@ -319,6 +340,22 @@ def test_music_mode_on_an_engine_without_it_is_refused(iface, make_wav, signals)
     drive(iface, "ConvertVoice", str(make_wav("song.wav")), pid, "", "", "", "music", 0)
     errors = [s for _g, s, _p in signals["GenerationProgress"] if s.startswith("error:")]
     assert "does not support music mode" in errors[0]
+
+
+def test_a_gpu_oom_during_conversion_names_the_conversion_engine(
+    iface, make_wav, signals, monkeypatch
+):
+    pid = cloned_with_sample(iface, make_wav)
+
+    async def boom():
+        raise OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB.")
+
+    monkeypatch.setattr(iface._tts.vc, "load", boom)
+    drive(iface, "ConvertVoice", str(make_wav("src.wav")), pid, "seed_vc", "", "",
+          "speech", 0)
+    errors = [s for _g, s, _p in signals["GenerationProgress"] if s.startswith("error:")]
+    assert errors == ["error: out of GPU memory loading seed_vc — "
+                      "try a smaller model size in the Models tab"]
 
 
 # --- speech pitch fine-tune (pre-shift) ----------------------------------

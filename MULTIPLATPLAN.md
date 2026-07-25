@@ -572,6 +572,28 @@ declared after it. ⚠ Next Linux session: check 🗑 U+1F5D1 rendering —
 fontconfig will likely hand it to Noto Color Emoji (color, ignores
 Theme.dim); if so, switch labels to the U+FE0E text-presentation form.
 
+**2026-07-25 — VRAM-aware model warnings (the 750 Ti defense).** The
+Models tab warned on "no GPU" and low system RAM but was blind to VRAM —
+a 4 GB card picking tada-3b got no warning, then either a raw CUDA OOM
+or (worse, Windows) the driver's silent sysmem spill: the machine crawls
+instead of failing. Now: detect_hardware() reports vram_gb; every
+catalog row carries an advisory min_vram_gb (measured from the weight
+files each backend ACTUALLY loads — the one variant it picks, at load
+precision, ×1.3 headroom — from local snapshots where cached, HfApi
+sums elsewhere; cross-engine extras like seed-vc's whisper-small and
+Vevo2's whisper-medium counted); hardware_warning() composes "needs ~X
+GB VRAM (have Y)" into the existing chip, only when a GPU exists and
+VRAM is known (0 = unknown → silent, never warn on a guess). CUDA OOM
+during Speak/ConvertVoice now surfaces as "out of GPU memory loading
+<engine> — try a smaller model size" instead of a truncated allocator
+dump. Advisory only — nothing gates. Known holes recorded, not fixed:
+warmup() load failures still vanish (fire-and-forget task, no error
+channel), LLM failures still deliver "" (LlmResult has no message
+field), SetActiveModel never loads (lazy — OOM fires at first
+generation), and CT2-on-ROCm would crash STT (torch.cuda true under
+HIP but CT2 has no ROCm backend — force STT to CPU when a mac/AMD
+session ever validates rocm). 376 pytest @ 95.59%.
+
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,
    detect absence gracefully) behind the same `system-capture-supported`
