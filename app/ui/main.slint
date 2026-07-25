@@ -79,6 +79,7 @@ component NavIcon inherits Rectangle {
 // --- themed button (variant: generate = accent) ---
 component TBtn inherits Rectangle {
     in property <string> label;
+    in property <string> tip;         // hover tooltip ('95 pale-yellow on win95); "" = none
     in property <bool> generate;
     callback clicked;
     property <bool> win95: Theme.name == "win95";
@@ -101,6 +102,33 @@ component TBtn inherits Rectangle {
         }
     }
     if win95 : Bevel { width: 100%; height: 100%; sunken: ta2.pressed; }
+    // tooltip — right-aligned above the button so a panel edge can't cut it;
+    // fades in after a hover delay (state below), hides instantly. The x/y
+    // bindings also keep it out of the button's implicit layout info, so a
+    // long tip can't widen a button that sizes itself to its label.
+    tipbox := Rectangle {
+        x: root.width - self.width;
+        y: -self.height - 5px;
+        height: 20px;
+        width: ttl.preferred-width + 14px;
+        opacity: 0;
+        background: win95 ? #ffffe1 : #10151be6;
+        border-width: 1px; border-color: win95 ? #000000 : #ffffff33;
+        border-radius: win95 ? 0px : 4px;
+        ttl := Text {
+            x: 7px; height: 100%;
+            text: tip; font-size: 10px; font-family: Theme.font;
+            color: win95 ? #000000 : #ffffff;
+            vertical-alignment: center;
+        }
+    }
+    states [
+        tip-shown when ta2.has-hover && tip != "" : {
+            tipbox.opacity: 1;
+            in { animate tipbox.opacity { duration: 100ms; delay: 1200ms; } }
+            out { animate tipbox.opacity { duration: 80ms; } }
+        }
+    ]
 }
 
 component Chip inherits Rectangle {
@@ -232,7 +260,7 @@ component VoiceCard inherits Rectangle {
                 // Voicebox-style card actions: export / edit / delete
                 IconBtn { size: 24px; glyph-size: 11px; glyph: "⇩"; tip: "Export voice"; clicked => { root.export-clicked(); } }
                 IconBtn { size: 24px; glyph-size: 11px; glyph: "✎"; tip: "Edit voice"; clicked => { root.edit-clicked(); } }
-                IconBtn { size: 24px; glyph-size: 11px; glyph: "✕"; tip: "Delete voice"; clicked => { root.delete-clicked(); } }
+                IconBtn { size: 24px; glyph-size: 11px; glyph: "🗑"; tip: "Delete voice"; clicked => { root.delete-clicked(); } }
             }
         }
         // RIGHT: panel avatar behind a divider
@@ -554,9 +582,18 @@ component ModelRow inherits Rectangle {
             }
             if !m.downloading : HorizontalLayout {
                 alignment: end; spacing: 6px;
-                if m.downloaded && m.supported && !m.active && selectable : TBtn { label: "Use"; clicked => { root.activate(); } }
-                if m.downloaded : TBtn { label: "Delete"; clicked => { root.del(); } }
-                if !m.downloaded && m.supported : TBtn { label: "Download"; generate: true; clicked => { root.download(); } }
+                if m.downloaded && m.supported && !m.active && selectable : TBtn {
+                    label: "Use"; tip: "Make this the active model";
+                    clicked => { root.activate(); }
+                }
+                if m.downloaded : TBtn {
+                    label: "Delete"; tip: "Remove the downloaded weights from disk";
+                    clicked => { root.del(); }
+                }
+                if !m.downloaded && m.supported : TBtn {
+                    label: "Download"; tip: "Fetch the weights (" + m.size-label + ")"; generate: true;
+                    clicked => { root.download(); }
+                }
                 if !m.downloaded && !m.supported : Text { text: "no backend yet"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
             }
         }
@@ -803,7 +840,12 @@ export component AppWindow inherits Window {
     in property <string> vc-audition-id: "";   // clip id or "scratch" while auditioning
     in-out property <string> vc-clip-name;     // save-as name input
     in-out property <string> vc-result-name;   // history label for the conversion
-    // --- delete-voice confirm ---
+    // --- shared "are you sure?" delete confirm ---
+    // Pure Slint state: a delete affordance arms del-kind (+ the target's id
+    // and human name), the modal picks the wording and fires the real
+    // callback. Rust never touches these. Empty del-kind = no dialog.
+    // kinds: voice | hist | capture | clip | model | fx
+    in-out property <string> del-kind: "";
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
     // --- apply-effects-to-history dialog ---
@@ -1146,8 +1188,14 @@ export component AppWindow inherits Window {
                                 spacing: 10px;
                                 Text { text: "VOICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; vertical-alignment: center; }
                                 Rectangle {}
-                                TBtn { label: narrow ? "Import" : "Import voice"; clicked => { root.import-voice(); } }
-                                TBtn { label: narrow ? "✦ Create" : "✦ Create voice"; generate: true; clicked => {
+                                TBtn {
+                                    label: narrow ? "Import" : "Import voice";
+                                    tip: "Load a voice package (.zip) exported from Syrinx";
+                                    clicked => { root.import-voice(); }
+                                }
+                                TBtn { label: narrow ? "✦ Create" : "✦ Create voice";
+                                       tip: "Clone a new voice from a reference recording";
+                                       generate: true; clicked => {
                                     // clear any stale edit-mode state before a fresh create
                                     cv-edit-id = ""; cv-model-index = 0;
                                     cv-lang-index = 0; cv-language = "en";
@@ -1190,7 +1238,7 @@ export component AppWindow inherits Window {
                                             }
                                             export-clicked => { root.export-voice(v.id, v.name); }
                                             edit-clicked => { root.edit-voice(v.id); }
-                                            delete-clicked => { root.del-id = v.id; root.del-name = v.name; }
+                                            delete-clicked => { root.del-kind = "voice"; root.del-id = v.id; root.del-name = v.name; }
                                         }
                                     }
                                 }
@@ -1230,7 +1278,7 @@ export component AppWindow inherits Window {
                                             }
                                             export-clicked => { root.export-voice(v.id, v.name); }
                                             edit-clicked => { root.edit-voice(v.id); }
-                                            delete-clicked => { root.del-id = v.id; root.del-name = v.name; }
+                                            delete-clicked => { root.del-kind = "voice"; root.del-id = v.id; root.del-name = v.name; }
                                         }
                                     }
                                 }
@@ -1483,7 +1531,7 @@ export component AppWindow inherits Window {
                                                         export-audio => { root.export-audio(h.id); }
                                                         export-package => { root.export-package(h.id); }
                                                         apply-effects => { root.fx-id = h.id; root.fx-voice = h.voice; root.fx-index = 0; }
-                                                        del => { root.delete-hist(h.id); }
+                                                        del => { root.del-kind = "hist"; root.del-id = h.id; root.del-name = h.voice; }
                                                     }
                                                 }
                                                 // message text — read-only, scrollable, selectable
@@ -1615,8 +1663,10 @@ export component AppWindow inherits Window {
                                                 Rectangle {
                                                     width: 18px; height: 18px; border-radius: Theme.rad;
                                                     background: cdel.has-hover ? Theme.acc-soft : transparent;
-                                                    cdel := TouchArea { clicked => { root.tr-delete-capture(c.id); } }
-                                                    Text { text: "✕"; font-size: 11px; color: Theme.dim;
+                                                    cdel := TouchArea {
+                                                        clicked => { root.del-kind = "capture"; root.del-id = c.id; root.del-name = c.date; }
+                                                    }
+                                                    Text { text: "🗑"; font-size: 11px; color: Theme.dim;
                                                            horizontal-alignment: center; vertical-alignment: center; }
                                                 }
                                             }
@@ -1695,17 +1745,22 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 TBtn {
                                     label: tr-recording && tr-rec-mode == "mic" ? "■ Stop" : (narrow ? "● Mic" : "● Record mic");
+                                    tip: tr-recording && tr-rec-mode == "mic"
+                                        ? "Finish and transcribe" : "Capture from the microphone";
                                     generate: tr-recording && tr-rec-mode == "mic";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("mic"); } }
                                 }
                                 // system-audio capture: Linux monitor / Windows loopback
                                 if root.system-capture-supported : TBtn {
                                     label: tr-recording && tr-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
+                                    tip: tr-recording && tr-rec-mode == "system"
+                                        ? "Finish and transcribe" : "Capture whatever is playing on this machine";
                                     generate: tr-recording && tr-rec-mode == "system";
                                     clicked => { if (!tr-busy) { root.tr-toggle-record("system"); } }
                                 }
                                 TBtn {
                                     label: narrow ? "⇪ Import…" : "⇪ Import audio…";
+                                    tip: "Transcribe an audio file from disk";
                                     clicked => { if (!tr-busy && !tr-recording) { root.tr-pick-file(); } }
                                 }
                                 Rectangle {}
@@ -1803,18 +1858,24 @@ export component AppWindow inherits Window {
                                 Rectangle {}
                                 if tr-has-source : TBtn {
                                     label: "✂ Trim";
+                                    tip: "Cut the recording down and transcribe again";
                                     clicked => { if (!tr-busy && !tr-recording) { root.trim-show("tr"); } }
                                 }
                                 TBtn {
                                     label: tr-capture-id == "" ? "▤ Save capture" : "▤ Update capture";
+                                    tip: tr-capture-id == ""
+                                        ? "Keep this transcript in the captures rail"
+                                        : "Overwrite the loaded capture with these edits";
                                     clicked => { if (!tr-busy && tr-text != "") { root.tr-save-capture(); } }
                                 }
                                 TBtn {
                                     label: tr-busy ? "…" : "✎ Refine with LLM";
+                                    tip: "Clean up punctuation and names with the language model";
                                     clicked => { if (!tr-busy && tr-text != "") { root.tr-refine(); } }
                                 }
                                 TBtn {
                                     label: "✦ Use in composer"; generate: true; min-width: 150px;
+                                    tip: "Send this text to Text to Speech";
                                     clicked => {
                                         if (tr-text != "") {
                                             root.text = tr-text;
@@ -1876,8 +1937,10 @@ export component AppWindow inherits Window {
                                                 Rectangle {
                                                     width: 18px; height: 18px; border-radius: Theme.rad;
                                                     background: scdel.has-hover ? Theme.acc-soft : transparent;
-                                                    scdel := TouchArea { clicked => { root.vc-delete-clip(c.id); } }
-                                                    Text { text: "✕"; font-size: 11px; color: Theme.dim;
+                                                    scdel := TouchArea {
+                                                        clicked => { root.del-kind = "clip"; root.del-id = c.id; root.del-name = c.name; }
+                                                    }
+                                                    Text { text: "🗑"; font-size: 11px; color: Theme.dim;
                                                            horizontal-alignment: center; vertical-alignment: center; }
                                                 }
                                             }
@@ -1935,6 +1998,8 @@ export component AppWindow inherits Window {
                                 spacing: 8px;
                                 TBtn {
                                     label: vc-recording && vc-rec-mode == "mic" ? "■ Stop" : (narrow ? "● Mic" : "● Record mic");
+                                    tip: vc-recording && vc-rec-mode == "mic"
+                                        ? "Finish and arm as the source" : "Record the source from the microphone";
                                     generate: vc-recording && vc-rec-mode == "mic";
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("mic"); } }
                                 }
@@ -1942,11 +2007,14 @@ export component AppWindow inherits Window {
                                 // browser): Linux monitor / Windows loopback
                                 if root.system-capture-supported : TBtn {
                                     label: vc-recording && vc-rec-mode == "system" ? "■ Stop" : (narrow ? "◉ System" : "◉ Record system");
+                                    tip: vc-recording && vc-rec-mode == "system"
+                                        ? "Finish and arm as the source" : "Grab the audio this machine is playing";
                                     generate: vc-recording && vc-rec-mode == "system";
                                     clicked => { if (!vc-busy) { root.vc-toggle-record("system"); } }
                                 }
                                 TBtn {
                                     label: narrow ? "⇪ Import…" : "⇪ Import audio…";
+                                    tip: "Load an audio file as the source";
                                     clicked => { if (!vc-busy && !vc-recording) { root.vc-pick-file(); } }
                                 }
                                 Rectangle {}
@@ -1981,6 +2049,7 @@ export component AppWindow inherits Window {
                                 }
                                 TBtn {
                                     label: vc-audition-id == (vc-armed-id == "" ? "scratch" : vc-armed-id) ? "■ Stop" : "▶ Play";
+                                    tip: "Audition the armed source before converting";
                                     clicked => {
                                         if (vc-has-source && !vc-recording) {
                                             root.vc-audition(vc-armed-id == "" ? "scratch" : vc-armed-id);
@@ -1989,6 +2058,7 @@ export component AppWindow inherits Window {
                                 }
                                 TBtn {
                                     label: "✂ Trim";
+                                    tip: "Keep only part of the source audio";
                                     clicked => {
                                         if (vc-has-source && !vc-recording && !vc-busy && !vc-transcribing) {
                                             root.trim-show("vc");
@@ -2006,7 +2076,10 @@ export component AppWindow inherits Window {
                                 }
                                 VerticalLayout {
                                     alignment: end;
-                                    TBtn { label: "▤ Save clip"; clicked => { if (!vc-recording) { root.vc-save-clip(); } } }
+                                    TBtn {
+                                        label: "▤ Save clip"; tip: "Keep this source in the clips rail for reuse";
+                                        clicked => { if (!vc-recording) { root.vc-save-clip(); } }
+                                    }
                                 }
                             }
                             // auto-transcript of the armed source — read-only,
@@ -2121,6 +2194,7 @@ export component AppWindow inherits Window {
                                 // ⌖ auto-match: median-f0 gap source→target
                                 if vc-mode == "speech" : TBtn {
                                     label: "⌖";
+                                    tip: "Auto-match pitch to the target voice";
                                     min-width: 34px;
                                     clicked => {
                                         if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
@@ -2143,6 +2217,9 @@ export component AppWindow inherits Window {
                                 }
                                 TBtn {
                                     label: vc-busy ? "…" : (vc-mode == "music" ? "♫ Convert" : "⇄ Convert");
+                                    tip: vc-mode == "music"
+                                        ? "Re-sing the vocal in the target voice"
+                                        : "Redub the source in the target voice";
                                     generate: true; min-width: narrow ? 100px : 130px;
                                     clicked => {
                                         if (!vc-busy && !vc-recording && vc-has-source && vc-voice-names.length > 0) {
@@ -2260,8 +2337,10 @@ export component AppWindow inherits Window {
                                                 Rectangle {
                                                     width: 22px; height: 18px; border-radius: Theme.rad;
                                                     background: vhd.has-hover ? Theme.acc-soft : transparent;
-                                                    vhd := TouchArea { clicked => { root.delete-hist(h.id); } }
-                                                    Text { text: "✕"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
+                                                    vhd := TouchArea {
+                                                        clicked => { root.del-kind = "hist"; root.del-id = h.id; root.del-name = h.voice; }
+                                                    }
+                                                    Text { text: "🗑"; font-size: 11px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
                                                 }
                                                 Rectangle {}
                                             }
@@ -2321,6 +2400,7 @@ export component AppWindow inherits Window {
                             }
                             TBtn {
                                 label: lib-starred-only ? "★ Starred" : "☆ Starred";
+                                tip: lib-starred-only ? "Show every clip again" : "Show only starred clips";
                                 generate: lib-starred-only;
                                 clicked => { lib-starred-only = !lib-starred-only; root.lib-refilter(); }
                             }
@@ -2405,8 +2485,8 @@ export component AppWindow inherits Window {
                                                 }
                                             }
                                             IconBtn {
-                                                size: 22px; glyph-size: 10px; glyph: "✕"; tip: "Delete";
-                                                clicked => { root.delete-hist(r.id); }
+                                                size: 22px; glyph-size: 10px; glyph: "🗑"; tip: "Delete this clip";
+                                                clicked => { del-kind = "hist"; del-id = r.id; del-name = r.title; }
                                             }
                                             Rectangle { width: 6px; }
                                             Text {
@@ -2522,6 +2602,9 @@ export component AppWindow inherits Window {
                                         Text { text: "Refine transcript with LLM"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; horizontal-stretch: 1; }
                                         TBtn {
                                             label: st-refine ? "★ On" : "☆ Off"; generate: st-refine;
+                                            tip: st-refine
+                                                ? "Stop post-processing dictation with the LLM"
+                                                : "Let the LLM tidy dictated text automatically";
                                             clicked => { root.st-toggle-refine(); }
                                         }
                                     }
@@ -2594,6 +2677,9 @@ export component AppWindow inherits Window {
                                         Text { text: "Stop engine on quit"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; horizontal-stretch: 1; }
                                         TBtn {
                                             label: st-stop-engine ? "★ On" : "☆ Off"; generate: st-stop-engine;
+                                            tip: st-stop-engine
+                                                ? "Leave the engine running after quit (faster relaunch)"
+                                                : "Shut the engine down on quit to free VRAM";
                                             clicked => { root.st-toggle-stop-engine(); }
                                         }
                                     }
@@ -2622,7 +2708,10 @@ export component AppWindow inherits Window {
                                             vertical-alignment: center; overflow: elide;
                                             preferred-width: 0px; horizontal-stretch: 1;
                                         }
-                                        TBtn { label: "Choose…"; clicked => { root.st-pick-export-dir(); } }
+                                        TBtn {
+                                            label: "Choose…"; tip: "Pick a folder so exports skip the save dialog";
+                                            clicked => { root.st-pick-export-dir(); }
+                                        }
                                     }
                                     HorizontalLayout {
                                         spacing: 12px;
@@ -2664,8 +2753,14 @@ export component AppWindow inherits Window {
                                     }
                                 }
                                 Rectangle {}
-                                TBtn { label: "Import voice"; clicked => { root.import-voice(); } }
-                                TBtn { label: "✦ Create voice"; generate: true; clicked => {
+                                TBtn {
+                                    label: "Import voice";
+                                    tip: "Load a voice package (.zip) exported from Syrinx";
+                                    clicked => { root.import-voice(); }
+                                }
+                                TBtn { label: "✦ Create voice";
+                                       tip: "Clone a new voice from a reference recording";
+                                       generate: true; clicked => {
                                     // clear any stale edit-mode state before a fresh create
                                     cv-edit-id = ""; cv-model-index = 0;
                                     cv-lang-index = 0; cv-language = "en";
@@ -2824,11 +2919,22 @@ export component AppWindow inherits Window {
                                 }
                                 HorizontalLayout {
                                     spacing: 6px;
-                                    TBtn { label: "✎ Edit"; clicked => { root.edit-voice(vp-selected); } }
-                                    TBtn { label: "⇩ Export"; clicked => { root.export-voice(vp-selected, vi-name); } }
-                                    TBtn { label: "✕"; clicked => { root.del-id = vp-selected; root.del-name = vi-name; } }
+                                    TBtn {
+                                        label: "✎ Edit"; tip: "Change the name, sample or personality";
+                                        clicked => { root.edit-voice(vp-selected); }
+                                    }
+                                    TBtn {
+                                        label: "⇩ Export"; tip: "Save this profile as a shareable .zip";
+                                        clicked => { root.export-voice(vp-selected, vi-name); }
+                                    }
+                                    TBtn {
+                                        label: "🗑"; tip: "Delete this voice";
+                                        clicked => { root.del-kind = "voice"; root.del-id = vp-selected; root.del-name = vi-name; }
+                                    }
                                 }
-                                TBtn { label: "▷ Use in composer"; generate: true; clicked => {
+                                TBtn { label: "▷ Use in composer";
+                                       tip: "Make this the active voice in Text to Speech";
+                                       generate: true; clicked => {
                                     root.selected-voice = vp-selected;
                                     root.kokoro-active = false;
                                     root.select-voice(vp-selected);
@@ -2860,7 +2966,7 @@ export component AppWindow inherits Window {
                                     for m in voice-models : ModelRow {
                                         m: m;
                                         download => { root.download-model(m.id); }
-                                        del => { root.delete-model(m.id); }
+                                        del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
                                         activate => { root.activate-model(m.id); }
                                     }
                                 }
@@ -2869,7 +2975,7 @@ export component AppWindow inherits Window {
                                     for m in vc-conv-models : ModelRow {
                                         m: m; selectable: false;
                                         download => { root.download-model(m.id); }
-                                        del => { root.delete-model(m.id); }
+                                        del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
                                     }
                                 }
                                 if sec.cat == "stt" : VerticalLayout {
@@ -2877,7 +2983,7 @@ export component AppWindow inherits Window {
                                     for m in stt-models : ModelRow {
                                         m: m;
                                         download => { root.download-model(m.id); }
-                                        del => { root.delete-model(m.id); }
+                                        del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
                                         activate => { root.activate-model(m.id); }
                                     }
                                 }
@@ -2886,7 +2992,7 @@ export component AppWindow inherits Window {
                                     for m in llm-models : ModelRow {
                                         m: m;
                                         download => { root.download-model(m.id); }
-                                        del => { root.delete-model(m.id); }
+                                        del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
                                         activate => { root.activate-model(m.id); }
                                     }
                                 }
@@ -3010,6 +3116,10 @@ export component AppWindow inherits Window {
                                     alignment: center;
                                     TBtn {
                                         label: cv-mode == "upload" ? "Choose file…" : (cv-recording ? "■ Stop" : "● Record");
+                                        tip: cv-mode == "upload" ? "Pick the reference clip from disk"
+                                            : cv-recording ? "Finish the reference recording"
+                                            : cv-mode == "system" ? "Capture the reference from system audio"
+                                            : "Record the reference clip from the microphone";
                                         generate: cv-recording;
                                         min-width: 150px;
                                         clicked => {
@@ -3037,9 +3147,14 @@ export component AppWindow inherits Window {
                             Rectangle {}
                             if cv-sample-label != "" && !cv-recording : TBtn {
                                 label: "✂ Trim";
+                                tip: "Cut the reference clip down to the clean part";
                                 clicked => { if (!cv-transcribing) { root.trim-show("cv"); } }
                             }
-                            TBtn { label: cv-transcribing ? "Transcribing…" : "Transcribe"; clicked => { root.cv-transcribe(); } }
+                            TBtn {
+                                label: cv-transcribing ? "Transcribing…" : "Transcribe";
+                                tip: "Fill the transcript from the reference clip with whisper";
+                                clicked => { root.cv-transcribe(); }
+                            }
                         }
                         Rectangle {
                             vertical-stretch: 1;
@@ -3096,7 +3211,10 @@ export component AppWindow inherits Window {
                             }
                             VerticalLayout {
                                 alignment: center;
-                                TBtn { label: "Choose photo…"; clicked => { root.cv-pick-avatar(); } }
+                                TBtn {
+                                    label: "Choose photo…"; tip: "Pick an image, then crop it for the card";
+                                    clicked => { root.cv-pick-avatar(); }
+                                }
                             }
                             Rectangle {}
                         }
@@ -3157,6 +3275,8 @@ export component AppWindow inherits Window {
                         TBtn {
                             label: cv-edit-id != "" ? (cv-creating ? "Saving…" : "✦ Save changes")
                                  : (cv-creating ? "Creating…" : "✦ Create voice");
+                            tip: cv-edit-id != "" ? "Write these edits back to the profile"
+                                                  : "Clone the reference clip into a new profile";
                             generate: true; min-width: 150px;
                             clicked => { root.cv-create(); }
                         }
@@ -3192,49 +3312,21 @@ export component AppWindow inherits Window {
                 Rectangle {}
                 HorizontalLayout {
                     spacing: 10px;
-                    TBtn { label: "✎ Presets…"; clicked => { fx-id = ""; root.fxe-show(); } }
+                    TBtn {
+                        label: "✎ Presets…"; tip: "Build or edit effect chains";
+                        clicked => { fx-id = ""; root.fxe-show(); }
+                    }
                     Rectangle {}
                     TBtn { label: "Cancel"; clicked => { fx-id = ""; } }
                     TBtn {
-                        label: "✦ Apply"; generate: true; min-width: 110px;
+                        label: "✦ Apply"; tip: "Render a processed copy into history";
+                        generate: true; min-width: 110px;
                         clicked => {
                             if (fx-index > 0) {
                                 root.apply-fx(fx-id, fx-index);
                                 fx-id = "";
                             }
                         }
-                    }
-                }
-            }
-        }
-    }
-
-    // --- delete-voice confirm dialog ---
-    if del-id != "" : Rectangle {
-        background: #0a0f14d9;
-        TouchArea {}  // swallow clicks to the app behind
-        Rectangle {
-            width: 380px; height: 158px;
-            x: round((parent.width - self.width) / 2 / 1px) * 1px;
-            y: round((parent.height - self.height) / 2 / 1px) * 1px;
-            background: Theme.modal-bg;
-            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
-            border-radius: 0px; clip: true;
-            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
-            VerticalLayout {
-                padding: 18px; spacing: 10px;
-                Text { text: "Delete voice"; font-size: 15px; font-weight: 700; color: Theme.fg; }
-                Text {
-                    text: "Delete \"" + del-name + "\"? Its reference samples are removed too. Generated clips stay in history.";
-                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
-                }
-                Rectangle {}
-                HorizontalLayout {
-                    spacing: 10px; alignment: end;
-                    TBtn { label: "Cancel"; clicked => { del-id = ""; del-name = ""; } }
-                    TBtn {
-                        label: "Delete"; generate: true; min-width: 110px;
-                        clicked => { root.delete-voice(del-id); del-id = ""; del-name = ""; }
                     }
                 }
             }
@@ -3310,7 +3402,10 @@ export component AppWindow inherits Window {
                             }
                         }
                     }
-                    TBtn { label: "＋ New preset"; clicked => { root.fxe-new(); } }
+                    TBtn {
+                        label: "＋ New preset"; tip: "Start an empty effect chain";
+                        clicked => { root.fxe-new(); }
+                    }
                 }
                 Rectangle { width: 1px; background: Theme.brd; }
                 // RIGHT: chain editor
@@ -3414,10 +3509,17 @@ export component AppWindow inherits Window {
                         }
                         TBtn {
                             label: "▶ Preview";
+                            tip: "Hear the chain on the last generated clip";
                             clicked => { if (fxe-can-preview && fxe-chain.length > 0) { root.fxe-preview(); } }
                         }
-                        if fxe-can-delete : TBtn { label: "✕ Delete"; clicked => { root.fxe-delete(); } }
-                        TBtn { label: "▤ Save"; generate: true; clicked => { root.fxe-save(); } }
+                        if fxe-can-delete : TBtn {
+                            label: "🗑 Delete"; tip: "Remove this preset";
+                            clicked => { del-kind = "fx"; del-id = ""; del-name = fxe-name; }
+                        }
+                        TBtn {
+                            label: "▤ Save"; tip: "Store the chain as a reusable preset";
+                            generate: true; clicked => { root.fxe-save(); }
+                        }
                         TBtn { label: "Close"; clicked => { fxe-open = false; } }
                     }
                 }
@@ -3505,6 +3607,7 @@ export component AppWindow inherits Window {
                     spacing: 8px;
                     TBtn {
                         label: trim-playing ? "■ Stop" : "▶ Selection";
+                        tip: "Audition just the lit region";
                         clicked => {
                             if (trim-playing) { root.trim-preview-stop(); }
                             else { root.trim-preview(trim-start, trim-end); }
@@ -3513,7 +3616,8 @@ export component AppWindow inherits Window {
                     Rectangle {}
                     TBtn { label: "Cancel"; clicked => { root.trim-preview-stop(); trim-open = false; } }
                     TBtn {
-                        label: "✂ Apply"; generate: true;
+                        label: "✂ Apply"; tip: "Discard everything outside the selection";
+                        generate: true;
                         clicked => { root.trim-apply(trim-start, trim-end); }
                     }
                 }
@@ -3655,8 +3759,69 @@ export component AppWindow inherits Window {
                     spacing: 10px; alignment: end;
                     TBtn { label: "Cancel"; clicked => { crop-open = false; root.crop-done(false); } }
                     TBtn {
-                        label: "✦ Use photo"; generate: true; min-width: 120px;
+                        label: "✦ Use photo"; tip: "Bake this crop into the voice's avatar";
+                        generate: true; min-width: 120px;
                         clicked => { crop-open = false; root.crop-done(true); }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- delete confirm dialog (every delete affordance routes here) ---
+    // Placed after the other modals so it draws on top of them — the effects
+    // chain editor stays open behind its own preset-delete confirm.
+    if del-kind != "" : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 380px; height: 176px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text {
+                    text: del-kind == "voice" ? "Delete voice"
+                        : del-kind == "hist" ? "Delete clip"
+                        : del-kind == "capture" ? "Delete capture"
+                        : del-kind == "clip" ? "Delete source clip"
+                        : del-kind == "model" ? "Delete model"
+                        : "Delete preset";
+                    font-size: 15px; font-weight: 700; color: Theme.fg;
+                }
+                Text {
+                    text: del-kind == "voice"
+                            ? "Delete \"" + del-name + "\"? Its reference samples are removed too. Generated clips stay in history."
+                        : del-kind == "hist"
+                            ? "Delete \"" + del-name + "\"? The audio file is removed from disk and from the library."
+                        : del-kind == "capture"
+                            ? "Delete the capture from " + del-name + "? Its saved transcript is gone for good."
+                        : del-kind == "clip"
+                            ? "Delete \"" + del-name + "\"? The saved source recording is removed. Conversions made from it stay."
+                        : del-kind == "model"
+                            ? "Delete \"" + del-name + "\"? The weights leave your disk — you can download them again any time."
+                        : "Delete the \"" + del-name + "\" effect preset? Chains already applied to clips are unaffected.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { del-kind = ""; del-id = ""; del-name = ""; } }
+                    TBtn {
+                        label: "Delete"; generate: true; min-width: 110px;
+                        clicked => {
+                            if (del-kind == "voice") { root.delete-voice(del-id); }
+                            else if (del-kind == "hist") { root.delete-hist(del-id); }
+                            else if (del-kind == "capture") { root.tr-delete-capture(del-id); }
+                            else if (del-kind == "clip") { root.vc-delete-clip(del-id); }
+                            else if (del-kind == "model") { root.delete-model(del-id); }
+                            else if (del-kind == "fx") { root.fxe-delete(); }
+                            del-kind = ""; del-id = ""; del-name = "";
+                        }
                     }
                 }
             }

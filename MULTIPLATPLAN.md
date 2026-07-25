@@ -552,6 +552,26 @@ targets") — the app is a bin-only crate; use `--bins`. Verified: 57
 tests green (+1), live smoke 3.000s @ 48kHz rms 0.072 captured into the
 real temp dir, release exe rebuilt.
 
+**2026-07-25 — UI polish wave (tooltips / 🗑 deletes / universal confirm)
++ the fallback font grows two glyphs.** The ⌖ auto-match button was tofu
+on Windows — U+2316 is in neither bundled DejaVu nor the old four-glyph
+SyrinxFallback subset (Linux fontconfig had been silently covering it).
+Subset regrown to six glyphs (+⌖, +🗑) by the documented Noto recipe;
+fontTools.merge chokes on vhea/vmtx asymmetry vs the hand-stripped
+original — match the table set before merging. Then one Opus agent swept
+main.slint: TBtn gained the IconBtn delayed-tooltip idiom (44/54 sites
+tipped; label-redundant ones skipped), every delete ✕ became 🗑 (7 sites;
+non-delete ✕s untouched), and the delete-voice confirm generalized to a
+del-kind modal (voice|hist|capture|clip|model|fx) that every delete
+dispatch routes through — pure Slint, Rust untouched. Slint gotchas
+earned: children with x/y bindings are excluded from implicit layout-info
+merging (i-slint-compiler default_geometry.rs — why the tipbox idiom
+never inflates buttons), and modal stacking is declaration order (no
+z-index) — a confirm reachable from inside another modal must be
+declared after it. ⚠ Next Linux session: check 🗑 U+1F5D1 rendering —
+fontconfig will likely hand it to Noto Color Emoji (color, ignores
+Theme.dim); if so, switch labels to the U+FE0E text-presentation form.
+
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,
    detect absence gracefully) behind the same `system-capture-supported`
