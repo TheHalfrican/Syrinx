@@ -14,6 +14,7 @@ use std::collections::BTreeMap;
 pub enum EngineEvent {
     GenerationProgress { gen_id: u32, state: String, pct: f64 },
     AudioLevel { gen_id: u32, rms: f64 },
+    RecordingLevel { rec_id: String, rms: f64 },
     PlaybackInfo { gen_id: u32, clip_id: String, title: String, duration: f64, bars: String },
     PlaybackProgress { gen_id: u32, pct: f64 },
     LlmResult { req_id: u32, text: String, error: bool },

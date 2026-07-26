@@ -8,10 +8,20 @@ pinning, the PortAudio boundary is not.
 
 import json
 import os
+import struct
 import sys
 import wave
 
+import pytest
+
+from syrinx_engine import recording
 from syrinx_engine.recording import RecordingManager, list_devices
+
+
+def _block(amp, frames=480):
+    """One PCM16 mono block at a constant |amplitude| (0..1) — RMS == amp."""
+    v = int(round(amp * 32768))
+    return struct.pack("<h", v) * frames
 
 
 def _read_wav(path):
@@ -120,6 +130,46 @@ def test_unknown_id_semantics(fake_sd):
     assert mgr.stop("wrong") == ""   # a live recording, wrong id
     assert mgr.stop(rid)             # correct id finalizes
     assert mgr.stop(rid) == ""       # already-stopped id
+
+
+def test_on_level_reports_normalized_rms(fake_sd, monkeypatch):
+    # throttle off: every block reports, so the arithmetic is what's under test
+    monkeypatch.setattr(recording, "LEVEL_INTERVAL", 0.0)
+    seen = []
+    mgr = RecordingManager()
+    rid = mgr.start("", on_level=lambda r, v: seen.append((r, v)))
+    assert seen == [(rid, 0.0)]        # the stub's silent block on start
+    fake_sd.in_made[-1].feed(_block(0.5))
+    assert seen[-1][0] == rid
+    assert seen[-1][1] == pytest.approx(0.5, abs=1e-4)  # int16/32768, not raw counts
+    assert 0.0 < seen[-1][1] <= 1.0
+    mgr.cancel(rid)
+
+
+def test_on_level_is_throttled(fake_sd):
+    # the real interval: PortAudio hands us a block every few ms, and one signal
+    # per block would be a transport firehose for a ~15 Hz meter
+    seen = []
+    mgr = RecordingManager()
+    rid = mgr.start("", on_level=lambda r, v: seen.append(v))
+    st = fake_sd.in_made[-1]
+    st.feed(_block(0.5))
+    st.feed(_block(0.5))
+    assert len(seen) == 1  # start's block reported; the two back-to-back did not
+    mgr.cancel(rid)
+
+
+def test_raising_on_level_does_not_break_the_recording(fake_sd):
+    def boom(_rid, _rms):
+        raise RuntimeError("meter exploded")
+
+    mgr = RecordingManager()
+    rid = mgr.start("", on_level=boom)
+    assert rid                       # the raise happened inside start's block
+    fake_sd.in_made[-1].feed(_block(0.25))
+    path = mgr.stop(rid)
+    assert os.path.exists(path)
+    assert _read_wav(path)[2] > 0    # audio kept flowing to disk
 
 
 def test_latest_wins_cancels_previous(fake_sd):

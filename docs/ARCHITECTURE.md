@@ -81,6 +81,7 @@ and `syrinx-dictate` build against it. Summary by area:
   `SetActiveModel` (hot-switches STT / LLM / voice engine).
 
 **Signals**: `GenerationProgress` (incl. `error: …`), `AudioLevel`,
+`RecordingLevel` (live input RMS while a §14 capture runs),
 `PlaybackInfo` / `PlaybackProgress`, `LlmResult`,
 `TranscribeProgress` / `TranscribeResult`, `ModelProgress`,
 `SpeakStarted` / `SpeakEnded`.

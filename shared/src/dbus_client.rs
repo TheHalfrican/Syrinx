@@ -4,7 +4,10 @@
 //! `Connection::session()` + `EngineProxy::new()` sequence, and the *same nine*
 //! signal subscriptions the app consumed before (audio level, generation
 //! progress, transcribe progress/result, speak ended, playback info/progress,
-//! llm result, model progress), plus one property stream: `ModelLoadError`,
+//! llm result, model progress) plus `RecordingLevel` — ten — which carries the
+//! ⚙ test-mic meter (idle on Linux, where the mic path is `parecord` and the
+//! §14 recorder is never started, but the transports stay identical),
+//! plus one property stream: `ModelLoadError`,
 //! whose RPC counterpart reaches the app as a `PropertiesChanged` notification
 //! — without it a failed warmup would be invisible on Linux only. `SpeakStarted`
 //! and the `ModelLoaded` property stay unsubscribed: the app consumes neither.
@@ -25,6 +28,7 @@ impl DbusClient {
 
         // Exactly the streams the app subscribed to before, in the same order.
         let mut levels = proxy.receive_audio_level().await?;
+        let mut rlevels = proxy.receive_recording_level().await?;
         let mut gprog = proxy.receive_generation_progress().await?;
         let mut tprog = proxy.receive_transcribe_progress().await?;
         let mut tres = proxy.receive_transcribe_result().await?;
@@ -39,7 +43,7 @@ impl DbusClient {
 
         let (tx, rx) = mpsc::unbounded_channel::<EngineEvent>();
 
-        // Fan the nine signal-args streams into the one unified channel. Each
+        // Fan the ten signal-args streams into the one unified channel. Each
         // `.args()` yields owned fields, mapped 1:1 onto an EngineEvent variant.
         tokio::spawn(async move {
             loop {
@@ -47,6 +51,11 @@ impl DbusClient {
                     Some(sig) = levels.next() => {
                         if let Ok(a) = sig.args() {
                             let _ = tx.send(EngineEvent::AudioLevel { gen_id: a.gen_id, rms: a.rms });
+                        }
+                    }
+                    Some(sig) = rlevels.next() => {
+                        if let Ok(a) = sig.args() {
+                            let _ = tx.send(EngineEvent::RecordingLevel { rec_id: a.rec_id, rms: a.rms });
                         }
                     }
                     Some(sig) = gprog.next() => {

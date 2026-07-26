@@ -719,6 +719,7 @@ def test_every_signal_marshals_its_payload():
     e = EngineInterface()
     assert e.GenerationProgress(1, "synthesizing", 0.5) == [1, "synthesizing", 0.5]
     assert e.AudioLevel(1, 0.25) == [1, 0.25]
+    assert e.RecordingLevel("abc123", 0.25) == ["abc123", 0.25]
     assert e.PlaybackInfo(1, "cid", "Title", 2.0, "[]") == [1, "cid", "Title", 2.0, "[]"]
     assert e.PlaybackProgress(1, 0.5) == [1, 0.5]
     assert e.LlmResult(3, "text", False) == [3, "text", False]

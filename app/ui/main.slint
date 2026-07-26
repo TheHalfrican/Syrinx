@@ -1030,6 +1030,14 @@ export component AppWindow inherits Window {
     in-out property <int> st-mic-index: 0;
     in property <[string]> st-mon-names: ["Default sink monitor"];
     in-out property <int> st-mon-index: 0;
+    // ⚙ test-mic meter: `st-mic-testing` mirrors the toggle, `st-mic-level` is
+    // the PERCEPTUAL bar fill (Rust already took sqrt of the raw RMS), and
+    // `st-mic-test-supported` gates the whole row — Win/mac only, because the
+    // Linux mic path is parecord/pactl and the §14 engine recorder can't
+    // resolve a pactl source id. SET FROM RUST.
+    in property <bool> st-mic-testing: false;
+    in property <float> st-mic-level: 0;
+    in property <bool> st-mic-test-supported: false;
     in property <bool> st-refine: false;
     in property <bool> st-stop-engine: true;   // default-on; Rust overwrites from config
     // The ENGINE / "stop engine on quit" card is systemd-specific — hidden on
@@ -1052,6 +1060,9 @@ export component AppWindow inherits Window {
     in-out property <int> st-steps-index: 0;
     callback settings-open();        // (re)load devices + engine settings
     callback st-pick-mic(int);
+    // ◉ Test on/off. Also fired by `changed tab` to force OFF — safe because
+    // that path is guarded by st-mic-testing, so it can never toggle ON.
+    callback st-mic-test-toggle();
     callback st-pick-monitor(int);
     callback st-toggle-refine();
     callback st-toggle-stop-engine();
@@ -1067,6 +1078,15 @@ export component AppWindow inherits Window {
     callback import-voice();
 
     property <string> tab: "tts";
+    // Leaving ⚙ must stop a running mic test — an open input stream the user
+    // can no longer see is exactly the thing a "nothing is saved" affordance
+    // may not do. Intercepting the property centrally beats patching all eight
+    // NavIcon click handlers (and the two deep-link `tab = "tts"` sites).
+    changed tab => {
+        if (root.tab != "settings" && root.st-mic-testing) {
+            root.st-mic-test-toggle();
+        }
+    }
 
     // --- Aero background image (behind everything; only for the vista skin) ---
     if Theme.name == "vista" : Image {
@@ -2559,7 +2579,7 @@ export component AppWindow inherits Window {
 
                             Text { text: "AUDIO DEVICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
-                                height: 96px;
+                                height: root.st-mic-test-supported ? 130px : 96px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
                                 border-radius: Theme.rad; background: Theme.card-bg;
                                 if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
@@ -2573,6 +2593,38 @@ export component AppWindow inherits Window {
                                             model: st-mic-names;
                                             current-index <=> st-mic-index;
                                             selected(i) => { root.st-pick-mic(i); }
+                                        }
+                                    }
+                                    // live input meter — proof the picked mic is
+                                    // alive. Win/mac only (see st-mic-test-supported).
+                                    if root.st-mic-test-supported : HorizontalLayout {
+                                        spacing: 12px;
+                                        // empty label cell keeps the controls in the
+                                        // same column as the dropdowns above/below
+                                        Text { text: ""; width: 130px; }
+                                        TBtn {
+                                            label: root.st-mic-testing ? "■ Stop" : "◉ Test";
+                                            generate: root.st-mic-testing;
+                                            tip: root.st-mic-testing
+                                                ? "Stop listening — nothing was recorded"
+                                                : "Watch the bar move as you speak — nothing is saved";
+                                            clicked => { root.st-mic-test-toggle(); }
+                                        }
+                                        VerticalLayout {
+                                            horizontal-stretch: 1;
+                                            alignment: center;
+                                            Rectangle {
+                                                height: 6px; border-radius: 3px; background: Theme.chip-bg;
+                                                Rectangle {
+                                                    x: 0; y: 0; height: 100%; border-radius: 3px;
+                                                    // Rust hands over sqrt(rms) already — the bar is
+                                                    // perceptual, not linear, so quiet speech still moves it
+                                                    width: parent.width * max(0.0, min(1.0, root.st-mic-level));
+                                                    background: Theme.acc;
+                                                    // smooths the ~15 Hz emission into a continuous meter
+                                                    animate width { duration: 80ms; }
+                                                }
+                                            }
                                         }
                                     }
                                     // system-audio tap: Linux monitor / Windows render endpoint

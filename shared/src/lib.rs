@@ -324,6 +324,12 @@ pub trait Engine {
     #[zbus(signal)]
     fn audio_level(&self, gen_id: u32, rms: f64) -> zbus::Result<()>;
 
+    /// Live INPUT rms (0..1) during any active §14 recording, throttled to
+    /// ~15 Hz engine-side. `rec_id` is the `start_recording` id, so a listener
+    /// filters its own capture's meter from anyone else's.
+    #[zbus(signal)]
+    fn recording_level(&self, rec_id: String, rms: f64) -> zbus::Result<()>;
+
     /// Emitted when playback of a clip starts: id, title, seconds, JSON waveform bars.
     #[zbus(signal)]
     fn playback_info(

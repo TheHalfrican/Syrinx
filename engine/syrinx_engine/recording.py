@@ -14,9 +14,12 @@ contract, so the whole engine must import without it — the tests stub it).
 import json
 import logging
 import threading
+import time
 import uuid
 import wave
 from pathlib import Path
+
+import numpy as np
 
 from .profiles import _data_dir
 
@@ -25,6 +28,11 @@ log = logging.getLogger("syrinx.engine.recording")
 # Fallback capture rate when the device does not report a native one. 48 kHz is
 # the WASAPI/CoreAudio default and downstream (whisper / VC workers) resamples.
 DEFAULT_RATE = 48_000
+
+# Minimum seconds between two RecordingLevel emissions (~15 Hz). PortAudio hands
+# us a block every few ms at 48 kHz; a signal per block would be a D-Bus/RPC
+# firehose for a meter the eye reads at video rate.
+LEVEL_INTERVAL = 0.066
 
 # Same-named PortAudio entries are tie-broken by host API in this order.
 # Windows lists every physical device once per host API under an identical
@@ -111,6 +119,20 @@ def list_devices() -> "list[dict]":
         return []
 
 
+def _block_rms(indata) -> float:
+    """Linear RMS of one captured PCM16 block, normalized to 0..1.
+
+    ``indata`` is whatever PortAudio handed the callback (a numpy array for a
+    real stream, raw bytes for the test stub) — ``bytes()`` flattens both. The
+    int16 samples are widened to float32 first: squaring them in place would
+    wrap at 32767."""
+    samples = np.frombuffer(bytes(indata), dtype=np.int16)
+    if samples.size == 0:
+        return 0.0
+    norm = samples.astype(np.float32) / 32768.0
+    return min(1.0, float(np.sqrt(np.mean(np.square(norm)))))
+
+
 class _Recording:
     """One live capture — the open WAV writer + its PortAudio stream."""
 
@@ -155,10 +177,18 @@ class RecordingManager:
     def list_devices(self) -> str:
         return json.dumps(list_devices())
 
-    def start(self, device_id: str) -> str:
+    def start(self, device_id: str, on_level=None) -> str:
         """Open an input stream to a fresh WAV; returns a recording id ("" on
         failure). ``device_id`` is a name (from :func:`list_devices`); "" =
-        system default input."""
+        system default input.
+
+        ``on_level(rec_id, rms)`` — optional; called with the linear RMS of each
+        captured block normalized to 0..1 (int16 / 32768), throttled to one call
+        per :data:`LEVEL_INTERVAL` seconds. It runs on the **PortAudio callback
+        thread**, so the caller is responsible for hopping to wherever emission
+        must happen (``core.StartRecording`` does the loop hop, exactly as
+        ``audio.play`` does for ``AudioLevel``). A raising callback is swallowed:
+        a broken meter must never kill the capture."""
         try:
             import sounddevice as sd
         except Exception:  # noqa: BLE001
@@ -182,11 +212,24 @@ class RecordingManager:
         wav.setframerate(rate)
 
         rec = _Recording(rec_id, path, None, wav)
+        # Last level emission, monotonic seconds. 0.0 = never, so the first
+        # block always reports (the meter must move the instant capture opens).
+        last_level = [0.0]
 
         def callback(indata, _frames, _time, status) -> None:
             if status:
                 log.debug("recording %s: %s", rec_id, status)
             rec.write(indata)
+            if on_level is None:
+                return
+            now = time.monotonic()
+            if now - last_level[0] < LEVEL_INTERVAL:
+                return
+            last_level[0] = now
+            try:
+                on_level(rec_id, _block_rms(indata))
+            except Exception:  # noqa: BLE001 — a broken meter must not stop capture
+                log.exception("recording %s: level callback failed", rec_id)
 
         try:
             stream = sd.InputStream(

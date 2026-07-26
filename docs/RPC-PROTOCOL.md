@@ -23,9 +23,9 @@ document, not one implementation.
 
 | | Count | Source of truth |
 |---|---|---|
-| Methods | **66** | 66 `@method()` in `service.py`; 66 `fn` (of 79) in `lib.rs` |
+| Methods | **70** | 70 `@method()` in `service.py`; 70 `fn` (of 84) in `lib.rs` — the §4 table's 66 plus §14's 4 recording methods |
 | Read-only properties | **3** | `ModelLoaded`, `ModelLoadError`, `Backend` → become `GetModelLoaded` / `GetModelLoadError` / `GetBackend` + `PropertiesChanged` |
-| Signals | **10** | 10 `@signal()` → become server→client notifications |
+| Signals | **11** | 11 `@signal()` → become server→client notifications |
 | Transport-only RPC methods | **5** | `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`, `GetProtocolVersion` (no D-Bus analog; properties/handshake are native there) |
 
 `lib.rs` and `service.py` are **in sync** — every method name, arity, and
@@ -364,6 +364,7 @@ D-Bus signature. Broadcast to all authenticated connections.
 |---|---|---|---|
 | `GenerationProgress` | `[gen_id: integer, state: string, pct: number]` | `usd` | Generation state; `state` prefixed `"error: …"` on failure (see §7.3). |
 | `AudioLevel` | `[gen_id: integer, rms: number]` | `ud` | Live output RMS during playback. |
+| `RecordingLevel` | `[rec_id: string, rms: number]` | `sd` | Live **input** RMS during any active §14 recording — drives the ⚙ test-mic meter. `rms` is the linear RMS of the int16 block normalized to 0..1 (int16 / 32768); emitted at most once per **66 ms** (≈15 Hz) per capture, so a listener gets a meter rather than a firehose. `rec_id` is the `StartRecording` id: emission is not test-specific (dictation and create-voice captures emit it too), so a consumer filters by the id it started. |
 | `PlaybackInfo` | `[gen_id: integer, clip_id: string, title: string, duration: number, bars: string]` | `ussds` | Playback of a clip started; `bars` is a JSON array string. |
 | `PlaybackProgress` | `[gen_id: integer, pct: number]` | `ud` | Playback position 0..1, per audio block. |
 | `LlmResult` | `[req_id: integer, text: string, error: boolean]` | `usb` | Result of Compose/Rewrite/Refine. `error` `true` = the LLM stack raised (with `text` `""`); this is **distinct** from a model that legitimately produced nothing (`error` `false`, `text` `""`), so the app can show "the personality LLM failed" instead of silently keeping the original text. |
@@ -553,6 +554,7 @@ from the `lib.rs` signal argument names; types from the D-Bus signature (`u`→
 pub enum EngineEvent {
     GenerationProgress { gen_id: u32, state: String, pct: f64 },
     AudioLevel         { gen_id: u32, rms: f64 },
+    RecordingLevel     { rec_id: String, rms: f64 },
     PlaybackInfo       { gen_id: u32, clip_id: String, title: String, duration: f64, bars: String },
     PlaybackProgress   { gen_id: u32, pct: f64 },
     LlmResult          { req_id: u32, text: String, error: bool },
@@ -583,15 +585,15 @@ Notes for the Rust client:
 
 ## 11. Appendix B — Completeness check
 
-- `service.py`: **66** `@method()`, **10** `@signal()`, **3** `@dbus_property`.
-- `lib.rs`: **79** `fn` = **66** methods + **10** signals + **3** properties.
-- §4's method table lists all **66** methods (4.1–4.10:
-  4+11+3+3+5+8+16+4+4+8 = **66**); §6 lists all **10** signals; §5 covers both
-  properties.
+- `service.py`: **70** `@method()`, **11** `@signal()`, **3** `@dbus_property`.
+- `lib.rs`: **84** `fn` = **70** methods + **11** signals + **3** properties.
+- §4's method table lists **66** methods (4.1–4.10:
+  4+11+3+3+5+8+16+4+4+8 = **66**) and §14 adds the **4** recording methods for
+  the **70** total; §6 lists all **11** signals; §5 covers both properties.
 - **No `lib.rs` ↔ `service.py` mismatch** was found: names (PascalCase in
   `service.py`, snake_case-of-the-same in `lib.rs`), arities, and signatures
   correspond one-to-one. (The design brief's "68 methods / ~50 methods" figures
-  are approximate; the exact current count is **66**.)
+  are approximate; the exact current count is **70**.)
 - `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`,
   `GetProtocolVersion` are RPC-transport-only additions with no D-Bus method analog (D-Bus uses native
   properties and has no app-level auth or version handshake).
@@ -688,5 +690,16 @@ extends the §4 method table: the surface is now **70** methods. sounddevice
 | `StopRecording` | `[rec_id: str]` | string | Stop + finalize the WAV; returns its absolute path (`""` for an unknown/already-stopped id). The file lives in engine-owned scratch space and stays until consumed (AddSample/ConvertVoice/TranscribeFile all take paths). |
 | `CancelRecording` | `[rec_id: str]` | null | Stop and delete the file. Unknown id is a no-op. |
 
-No new signals (the recording UI has no live meter today; a
-`RecordingLevel` signal can be added later if the meter gets wired).
+**One signal**, `RecordingLevel` `[rec_id: string, rms: number]` / `sd` (listed
+with the rest in §6). It is emitted for the whole life of **any** capture
+started here — not just meter-driven ones — so the consumer filters by the
+`rec_id` `StartRecording` handed it. `rms` is the linear RMS of the int16 block
+normalized to 0..1 (int16 / 32768); the engine throttles emission to at most one
+per **66 ms** per capture, because PortAudio delivers a block every few
+milliseconds and a signal per block would swamp the transport for a meter the
+eye reads at video rate. Level computation happens on the PortAudio callback
+thread and the engine hops it onto the event loop before emitting (the same hop
+`AudioLevel` makes); a raising consumer callback can never interrupt the
+capture. The app's first consumer is the ⚙ Settings "Test mic" toggle
+(Win/mac): it starts a recording purely for the meter and always ends it with
+`CancelRecording`, so a test leaves no file behind.

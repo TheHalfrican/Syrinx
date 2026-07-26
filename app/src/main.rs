@@ -103,6 +103,7 @@ enum Cmd {
     SettingsLoad,
     SaveTheme { theme: String },
     StPickMic { index: usize },
+    StMicTestToggle,
     StPickMonitor { index: usize },
     StToggleRefine,
     StToggleStopEngine,
@@ -314,6 +315,11 @@ fn main() -> anyhow::Result<()> {
         // (WASAPI loopback); macOS waits for phase 3. Gates the ◉ Record-system
         // buttons, the create-voice System chip, and the ⚙ tap picker.
         ui.set_system_capture_supported(cfg!(any(target_os = "linux", target_os = "windows")));
+        // The ⚙ mic test drives the §14 engine recorder, which only exists on
+        // Win/mac — Linux captures through parecord with pactl source ids the
+        // engine's PortAudio recorder cannot resolve, so the row stays hidden
+        // there until the Linux twin lands.
+        ui.set_st_mic_test_supported(cfg!(any(target_os = "windows", target_os = "macos")));
         // Decorative titlebar chrome, per OS. Linux keeps the authored
         // "hyprland · workspace 3" (the slint default); Win/mac get an
         // equivalently subtle, lowercase string.
@@ -597,6 +603,10 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_st_pick_mic(move |i| { let _ = tx.send(Cmd::StPickMic { index: i.max(0) as usize }); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_mic_test_toggle(move || { let _ = tx.send(Cmd::StMicTestToggle); });
     }
     {
         let tx = tx.clone();
@@ -2645,6 +2655,14 @@ async fn run_session(
     let mut cfg = load_config();
     let mut st_mics: Vec<(String, String)> = Vec::new();
     let mut st_mons: Vec<(String, String)> = Vec::new();
+    // ⚙ test-mic: the live §14 recording id (None = not testing) and its age in
+    // 1 s ticks. The test is normally ended by the toggle or by leaving the tab
+    // (slint fires st-mic-test-toggle on any tab change); MIC_TEST_MAX is the
+    // belt-and-braces stop in case that interception is ever bypassed — an open
+    // input stream nobody can see is the one outcome this feature may not have.
+    let mut mic_test_id: Option<String> = None;
+    let mut mic_test_elapsed: u32 = 0;
+    const MIC_TEST_MAX: u32 = 120;
     // library (▤) state — rows cached, filters applied app-side
     let mut lib_rows: Vec<LibRow> = Vec::new();
     let mut lib_voices: Vec<String> = Vec::new();
@@ -2675,6 +2693,16 @@ async fn run_session(
                 EngineEvent::AudioLevel { rms, .. } => {
                     let rms = rms as f32;
                     ui.upgrade_in_event_loop(move |ui| ui.set_level(rms)).ok();
+                }
+                EngineEvent::RecordingLevel { rec_id, rms } => {
+                    // Every §14 capture emits this (dictation, ⇄, create-voice);
+                    // only the ⚙ test's own id drives the meter.
+                    if mic_test_id.as_deref() == Some(rec_id.as_str()) {
+                        // sqrt = perceptual: linear RMS leaves normal speech
+                        // hugging the left edge of the bar.
+                        let lvl = (rms.max(0.0) as f32).sqrt();
+                        ui.upgrade_in_event_loop(move |ui| ui.set_st_mic_level(lvl)).ok();
+                    }
                 }
                 EngineEvent::GenerationProgress { gen_id, state, .. } => {
                     // conversions report to the ⇄ tab, not the composer
@@ -2947,7 +2975,14 @@ async fn run_session(
                 None => break SessionEnd::TransportLost,
             },
 
-            _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() || vc_rec.is_some() => {
+            _ = rec_interval.tick(), if cv_rec.is_some() || tr_rec.is_some() || vc_rec.is_some()
+                                        || mic_test_id.is_some() => {
+                if mic_test_id.is_some() {
+                    mic_test_elapsed += 1;
+                    if mic_test_elapsed >= MIC_TEST_MAX {
+                        mic_test_stop(&ui, &proxy, mic_test_id.take()).await;
+                    }
+                }
                 // recorder died on its own (e.g. a suspended monitor source
                 // erroring at first open) — surface it instead of a phantom
                 // "recording" that never advances
@@ -4425,6 +4460,22 @@ async fn run_session(
                         st_mics.get(index - 1).map(|(n, _)| n.clone()).unwrap_or_default()
                     };
                     save_config(&cfg);
+                    // retarget a running test at the newly picked device instead
+                    // of leaving the meter reporting the old one
+                    if mic_test_id.is_some() {
+                        mic_test_stop(&ui, &proxy, mic_test_id.take()).await;
+                        mic_test_id = mic_test_start(&ui, &proxy, &cfg.mic_device).await;
+                        mic_test_elapsed = 0;
+                    }
+                }
+                Some(Cmd::StMicTestToggle) => {
+                    if mic_test_id.is_some() {
+                        mic_test_stop(&ui, &proxy, mic_test_id.take()).await;
+                    } else {
+                        // same device string the capture path passes ("" = default)
+                        mic_test_id = mic_test_start(&ui, &proxy, &cfg.mic_device).await;
+                        mic_test_elapsed = 0;
+                    }
                 }
                 Some(Cmd::StPickMonitor { index }) => {
                     cfg.monitor_device = if index == 0 {
@@ -4818,7 +4869,66 @@ async fn run_session(
             else => break SessionEnd::UiQuit,
         }
     };
+    // Session over (quit, or a transport loss that took the engine's capture
+    // with it): zero the meter so a reconnect can't come back to a stuck bar
+    // and a Stop button with nothing behind it.
+    if mic_test_id.take().is_some() {
+        ui.upgrade_in_event_loop(|ui| {
+            ui.set_st_mic_testing(false);
+            ui.set_st_mic_level(0.0);
+        })
+        .ok();
+    }
     end
+}
+
+/// Start the ⚙ mic test on `device` ("" = system default) and light the UI up.
+/// Returns the §14 recording id, or `None` when the engine refused the device —
+/// in which case the toggle springs back to "not testing" rather than lying.
+async fn mic_test_start(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineClient,
+    device: &str,
+) -> Option<String> {
+    // Flip the toggle BEFORE the round-trip: leaving ⚙ mid-start would
+    // otherwise see `st-mic-testing` still false and skip the auto-off,
+    // stranding an open input stream on a tab the user has left. Optimistic
+    // "on" makes the tab change fire the toggle, which the worker processes
+    // right after this await returns — so the stream is closed either way.
+    ui.upgrade_in_event_loop(|ui| ui.set_st_mic_testing(true)).ok();
+    let id = match proxy.start_recording(device).await {
+        Ok(id) if !id.is_empty() => id,
+        Ok(_) => {
+            tracing::warn!("mic test: engine could not open {device:?}");
+            String::new()
+        }
+        Err(e) => {
+            tracing::error!("mic test: start_recording failed: {e}");
+            String::new()
+        }
+    };
+    let testing = !id.is_empty();
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_st_mic_testing(testing);
+        ui.set_st_mic_level(0.0);
+    })
+    .ok();
+    testing.then_some(id)
+}
+
+/// Stop the ⚙ mic test and blank the meter. Always **cancel**, never stop: a
+/// test must not leave a WAV in the engine's scratch dir.
+async fn mic_test_stop(ui: &slint::Weak<AppWindow>, proxy: &EngineClient, id: Option<String>) {
+    if let Some(id) = id {
+        if let Err(e) = proxy.cancel_recording(&id).await {
+            tracing::warn!("mic test: cancel_recording failed: {e}");
+        }
+    }
+    ui.upgrade_in_event_loop(|ui| {
+        ui.set_st_mic_testing(false);
+        ui.set_st_mic_level(0.0);
+    })
+    .ok();
 }
 
 /// Linux worker: one D-Bus session for the app's life, byte-identical to

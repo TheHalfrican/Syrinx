@@ -212,6 +212,10 @@ pub(crate) fn notification_to_event(v: &Value) -> Option<EngineEvent> {
             let a = arr()?;
             Some(EngineEvent::AudioLevel { gen_id: u32_at(a, 0)?, rms: f64_at(a, 1)? })
         }
+        "RecordingLevel" => {
+            let a = arr()?;
+            Some(EngineEvent::RecordingLevel { rec_id: str_at(a, 0)?, rms: f64_at(a, 1)? })
+        }
         "PlaybackInfo" => {
             let a = arr()?;
             Some(EngineEvent::PlaybackInfo {
@@ -325,6 +329,24 @@ mod tests {
             }
             other => panic!("wrong decode: {other:?}"),
         }
+    }
+
+    #[test]
+    fn decodes_recording_level_with_a_string_id() {
+        // RecordingLevel is the one level signal keyed by a STRING id (the
+        // StartRecording handle), not the u32 gen_id AudioLevel carries.
+        let v = json!({"jsonrpc": "2.0", "method": "RecordingLevel", "params": ["a1b2", 0.37]});
+        match notification_to_event(&v) {
+            Some(EngineEvent::RecordingLevel { rec_id, rms }) => {
+                assert_eq!((rec_id.as_str(), rms), ("a1b2", 0.37));
+            }
+            other => panic!("wrong decode: {other:?}"),
+        }
+        // a numeric id is not a rec_id — decode fails rather than coercing
+        assert!(notification_to_event(
+            &json!({"jsonrpc": "2.0", "method": "RecordingLevel", "params": [1, 0.5]})
+        )
+        .is_none());
     }
 
     #[test]

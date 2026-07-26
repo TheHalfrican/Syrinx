@@ -650,6 +650,54 @@ Note: the captured frames were digital zeros both runs — nobody spoke;
 the A50 X hard-mutes with the boom up and its noise gate emits true
 zeros, so an rms-0 capture is NOT itself a bug signal on this headset.
 
+**2026-07-26 — ⚙ Test Mic lands (one vertical Opus agent; the §14 meter
+the protocol reserved space for).** New `RecordingLevel` signal ("sd":
+rec_id, rms 0..1) mirrors AudioLevel at every layer — recording.py grows
+an `on_level` callback (66 ms monotonic throttle, int16→float32 widen
+before squaring, raising meter can't kill the capture), core hops it to
+the loop, both transports broadcast it, and the ⚙ tab gains a "◉ Test /
+■ Stop" toggle + animated level bar under the mic dropdown (sqrt
+perceptual scaling; 🎙 U+1F399 would be tofu in the bundled fonts so the
+known-good ◉ stands in). Auto-off is a central `changed tab => {}` on
+the root tab property (Slint 1.17 supports it — none of the 8 NavIcon
+sites patched), backed by a 120 s client cap, session-end reset, and
+stop-always-cancels so no scratch WAV survives; picking a new mic while
+testing retargets seamlessly. Gated to Win/mac (queue item 4 below).
+Gotchas earned: (a) `_emit` is NOT thread-safe from arbitrary threads —
+AudioLevel's safety lives in audio.play's private call_soon_threadsafe
+wrapper, so every new non-loop-thread emitter needs its own hop (the
+contract test asserts delivery, which catches a missing one); (b)
+np.square on int16 wraps silently above ~181 counts — widen first; (c) a
+Slint toggle whose state lives in Rust has an in-flight blind spot —
+flip the property optimistically before the await or a `changed tab`
+guard reads stale false; (d) animate-width bars inside layouts need the
+VerticalLayout{alignment:center} wrapper, not a y: binding (ledger's
+x/y-exclusion rule). Doc re-baseline folded in: §0/§11 now 70 methods /
+11 signals / 3 props (closes queue item 2). Verified independently:
+392 pytest (was 389) + ruff, shared 6+1 (was 5+1), app 57, clippy +
+linux cross-check clean, release exe rebuilt via rename-aside while the
+old app ran, and a scratch-dir engine over real RPC delivered 32
+RecordingLevel notifications in 2.5 s (~13 Hz, correct rec_id, 0..1
+range) with zero WAVs left after cancel.
+
+**LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
+Windows sessions; each also appears in its origin ledger entry above):
+1. `dictate/src/main.rs` still reads only `a.text` from LlmResult — mirror
+   the Windows immediate-fallback on the error flag (c5e4e32 precedent)
+   and compile-check it (the dictate crate doesn't build on Windows).
+2. ~~RPC-PROTOCOL §0/§11 method-count re-baseline~~ RESOLVED 2026-07-26
+   with the RecordingLevel commit: §0/§11 now pin 70 methods / 11 signals
+   / 3 props, lib.rs 84 fn — verified by hand against the decorator list.
+3. 🗑 U+1F5D1 rendering: fontconfig will likely hand it to Noto Color
+   Emoji (color glyph, ignores the text-style intent) — if so, switch the
+   7 delete sites + del-kind modal to the U+FE0E text-presentation form.
+4. Test-mic meter Linux twin: the ⚙ Test button is gated off on Linux —
+   the mic dropdown holds pactl source ids that the §14 engine recorder
+   can't resolve. Either compute levels app-side from the existing
+   `parecord` capture path, or teach the Linux arm to translate a pactl
+   source to its PortAudio name. UI + RecordingLevel plumbing are already
+   shared; only the level source is missing.
+
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,
    detect absence gracefully) behind the same `system-capture-supported`

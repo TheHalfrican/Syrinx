@@ -89,6 +89,11 @@ class FakeInputStream:
             # array, but the recorder just does bytes(indata))
             self.callback(b"\x00\x00" * 480, 480, None, None)
 
+    def feed(self, data):
+        """Push one more block into the callback (level-meter tests)."""
+        if self.callback:
+            self.callback(data, len(data) // 2, None, None)
+
     def stop(self):
         self.stopped = True
 

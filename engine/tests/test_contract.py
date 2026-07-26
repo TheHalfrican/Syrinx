@@ -21,9 +21,9 @@ from syrinx_engine.rpc import engine_method_names, PROPERTY_GETTERS, TRANSPORT_M
 from _contract import DbusAdapter, RpcAdapter, EngineCallError
 
 DOCUMENTED_SIGNALS = {
-    "GenerationProgress", "AudioLevel", "PlaybackInfo", "PlaybackProgress",
-    "LlmResult", "TranscribeProgress", "TranscribeResult", "ModelProgress",
-    "SpeakStarted", "SpeakEnded",
+    "GenerationProgress", "AudioLevel", "RecordingLevel", "PlaybackInfo",
+    "PlaybackProgress", "LlmResult", "TranscribeProgress", "TranscribeResult",
+    "ModelProgress", "SpeakStarted", "SpeakEnded",
 }
 
 
@@ -145,6 +145,12 @@ async def exercise_recording_round_trip(a):
     assert any(d["id"] for d in devs)
     rid = await a.call("StartRecording", "")
     assert isinstance(rid, str) and rid
+    # the capture emits RecordingLevel for its own id (the stub feeds one silent
+    # block on start); it reaches the client only because core hops the
+    # PortAudio-thread callback onto the loop
+    await a.wait_for("RecordingLevel")
+    levels = [p for (n, p) in a.notifications if n == "RecordingLevel"]
+    assert levels and levels[0][0] == rid and 0.0 <= levels[0][1] <= 1.0
     path = await a.call("StopRecording", rid)
     assert path.endswith(".wav") and os.path.exists(path)
     assert await a.call("StopRecording", rid) == ""       # already stopped

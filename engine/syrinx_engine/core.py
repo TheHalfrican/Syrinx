@@ -1078,8 +1078,20 @@ class EngineCore:
     async def StartRecording(self, device_id) -> str:
         """Start capturing mic input to a WAV; returns a recording id ("" on
         failure). "" device = system default input. A second call cancels the
-        previous capture (latest-wins)."""
-        return self._recorder.start(device_id)
+        previous capture (latest-wins). Emits ``RecordingLevel`` (throttled,
+        ~15 Hz) for as long as the capture is live."""
+        loop = asyncio.get_running_loop()
+
+        def on_level(rid, rms):
+            # The recorder calls back on the PortAudio thread; signal emission
+            # must happen on the event-loop thread — the same hop audio.play
+            # does for AudioLevel.
+            try:
+                loop.call_soon_threadsafe(self._emit, "RecordingLevel", rid, rms)
+            except RuntimeError:
+                pass  # loop already closed (engine shutdown)
+
+        return self._recorder.start(device_id, on_level=on_level)
 
     async def StopRecording(self, rec_id) -> str:
         """Stop + finalize; returns the WAV's absolute path ("" for an

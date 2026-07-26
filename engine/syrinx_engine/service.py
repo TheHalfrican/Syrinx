@@ -417,6 +417,13 @@ class EngineInterface(ServiceInterface):
         return [gen_id, rms]
 
     @signal()
+    def RecordingLevel(self, rec_id, rms) -> "sd":  # noqa: F821
+        # Live INPUT rms (0..1) during any active §14 capture, throttled to
+        # ~15 Hz. rec_id is the StartRecording id, so a listener can tell its
+        # own capture's meter from someone else's.
+        return [rec_id, rms]
+
+    @signal()
     def PlaybackInfo(self, gen_id, clip_id, title, duration, bars) -> "ussds":  # noqa: F821
         # clip_id, display title, seconds, and a JSON array of waveform bars (0..1)
         return [gen_id, clip_id, title, duration, bars]
