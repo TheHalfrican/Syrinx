@@ -620,6 +620,36 @@ it next Linux session; RPC-PROTOCOL §0/§11 method-count drift (doc says
 66, contract pins 70) needs a deliberate re-baseline; SetActiveModel
 stays lazy BY DESIGN (OOM surfaces at first generation, now readably).
 
+**2026-07-26 — a NAMED mic never worked on Windows (PortAudio's
+four-host-API name collision).** Noah picked his headset in ⚙ and every
+mic ◉ failed with "⚠ recording failed" — while "System default" worked,
+which is exactly why the 7/24 e2e (default device) never caught it.
+Root cause: Windows lists one physical device under MME / DirectSound /
+WASAPI / WDM-KS with an IDENTICAL name; recording.py's name-based ids
+(chosen for hotplug stability) hit sounddevice's own string matcher,
+which rejects four exact matches as "Multiple input devices found" —
+`InputStream` never opens, StartRecording returns "", and the deleted
+scratch WAV was the only forensic trace (the per-spawn truncating
+engine.log had eaten the exception). Fix in recording.py: `_resolve_input`
+maps the persisted name to a concrete PortAudio index itself, tie-breaking
+WASAPI > DirectSound > MME > WDM-KS (full names, native rates vs MME's
+31-char truncation); unresolvable names fall through to PortAudio's
+substring matching, `""` still means default; `_device_rate` now reads
+the RESOLVED device so the WAV header matches the stream. fake_sd stub
+taught the Windows shape (query_hostapis + per-API duplicate rows +
+ambiguity ValueError), §14 StartRecording semantics documented. Verified:
+389 pytest green (was 387) + ruff; live probe resolved the A50 X to
+WASAPI idx 21 and captured 2s where the old path threw; engine chain
+bounced under the app's supervisor (respawn clean, new rpc.json) and a
+real RPC drive against the LIVE engine recorded 3.00s @ 48 kHz through
+StartRecording/StopRecording with the exact persisted name. Gotcha
+earned: engine.log is truncated per spawn (File::create) — any failure
+from a previous engine incarnation is gone; check dir mtimes (the
+recordings/ touch at 17:38 was the tell) before declaring "no evidence".
+Note: the captured frames were digital zeros both runs — nobody spoke;
+the A50 X hard-mutes with the boom up and its noise gate emits true
+zeros, so an rms-0 capture is NOT itself a bug signal on this headset.
+
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,
    detect absence gracefully) behind the same `system-capture-supported`

@@ -114,11 +114,12 @@ def fake_sd(monkeypatch):
         return in_made[-1]
 
     _devs = [
-        {"name": "Fake Mic", "max_input_channels": 2, "max_output_channels": 0,
-         "default_samplerate": 48000.0},
-        {"name": "Fake Speakers", "max_input_channels": 0, "max_output_channels": 2,
-         "default_samplerate": 48000.0},
+        {"name": "Fake Mic", "hostapi": 0, "max_input_channels": 2,
+         "max_output_channels": 0, "default_samplerate": 48000.0},
+        {"name": "Fake Speakers", "hostapi": 0, "max_input_channels": 0,
+         "max_output_channels": 2, "default_samplerate": 48000.0},
     ]
+    _hostapis = [{"name": "Fake API"}]
 
     def query_devices(device=None, kind=None):
         if kind == "input":
@@ -127,15 +128,23 @@ def fake_sd(monkeypatch):
             return list(_devs)
         if isinstance(device, int):
             return _devs[device]
-        for d in _devs:
-            if d["name"] == device or device in d["name"]:
-                return d
+        found = [d for d in _devs if d["name"] == device or device in d["name"]]
+        if len(found) > 1:
+            # mirrors real sounddevice: a name listed under several host APIs
+            # is ambiguous (the Windows shape recording.py must resolve around)
+            raise ValueError(f"Multiple devices found for {device!r}")
+        if found:
+            return found[0]
         raise ValueError(f"no device matching {device!r}")
+
+    def query_hostapis():
+        return list(_hostapis)
 
     module = types.SimpleNamespace(
         OutputStream=OutputStream, made=made,
         InputStream=InputStream, in_made=in_made,
-        query_devices=query_devices,
+        query_devices=query_devices, query_hostapis=query_hostapis,
+        devs=_devs, hostapis=_hostapis,
         default=types.SimpleNamespace(device=[0, 1]),
     )
     monkeypatch.setitem(sys.modules, "sounddevice", module)

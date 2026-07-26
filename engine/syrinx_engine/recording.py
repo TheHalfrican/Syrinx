@@ -26,6 +26,45 @@ log = logging.getLogger("syrinx.engine.recording")
 # the WASAPI/CoreAudio default and downstream (whisper / VC workers) resamples.
 DEFAULT_RATE = 48_000
 
+# Same-named PortAudio entries are tie-broken by host API in this order.
+# Windows lists every physical device once per host API under an identical
+# name, so a bare name is ambiguous to sounddevice's own string matching
+# (ValueError: "Multiple input devices found ..."). WASAPI is the modern
+# shared-mode API (full device names, native rates); MME truncates names to
+# 31 chars; WDM-KS wants near-exclusive access. Single-host-API platforms
+# (macOS Core Audio) never have a tie to break.
+_HOSTAPI_PREFERENCE = ("Windows WASAPI", "Windows DirectSound", "MME", "Windows WDM-KS")
+
+
+def _resolve_input(sd, name: str) -> "int | None":
+    """Persisted device name → PortAudio index, or ``None`` when nothing
+    matches exactly (the caller then hands the raw string to sounddevice, so
+    near-miss names keep PortAudio's own substring matching)."""
+    try:
+        try:
+            apis = list(sd.query_hostapis())
+        except Exception:  # noqa: BLE001 — stubbed/exotic PortAudio builds
+            apis = []
+        matches = [
+            (idx, d)
+            for idx, d in enumerate(sd.query_devices())
+            if int(d.get("max_input_channels", 0)) >= 1
+            and str(d.get("name", "")).strip() == name
+        ]
+    except Exception:  # noqa: BLE001
+        return None
+    if not matches:
+        return None
+
+    def rank(match: "tuple[int, dict]") -> int:
+        try:
+            api = str(apis[int(match[1]["hostapi"])]["name"])
+            return _HOSTAPI_PREFERENCE.index(api)
+        except Exception:  # noqa: BLE001 — no hostapi info / unlisted API
+            return len(_HOSTAPI_PREFERENCE)
+
+    return min(matches, key=rank)[0]
+
 
 def _scratch_dir() -> Path:
     """Engine-owned scratch for recordings — mirrors how history.py lays out its
@@ -129,7 +168,11 @@ class RecordingManager:
         # latest-wins: drop any in-flight capture before starting a new one
         self._discard_current()
 
-        device = device_id or None
+        device: "int | str | None" = device_id or None
+        if device is not None:
+            resolved = _resolve_input(sd, device_id)
+            if resolved is not None:
+                device = resolved
         rate = self._device_rate(sd, device)
         rec_id = uuid.uuid4().hex
         path = _scratch_dir() / f"{rec_id}.wav"
@@ -163,7 +206,9 @@ class RecordingManager:
         rec._stream = stream
         with self._lock:
             self._current = rec
-        log.info("recording %s started (device=%r, %d Hz)", rec_id, device_id, rate)
+        log.info(
+            "recording %s started (device=%r -> %r, %d Hz)", rec_id, device_id, device, rate
+        )
         return rec_id
 
     def stop(self, rec_id: str) -> str:

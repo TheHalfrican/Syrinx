@@ -58,8 +58,48 @@ def test_start_uses_named_device(fake_sd):
     mgr = RecordingManager()
     rid = mgr.start("Fake Mic")
     assert rid
-    assert fake_sd.in_made[-1].device == "Fake Mic"
+    # exact names resolve to a concrete PortAudio index (never the raw string —
+    # bare names are ambiguous when several host APIs list the device)
+    assert fake_sd.in_made[-1].device == 0
     assert fake_sd.in_made[-1].samplerate == 48000  # device-native rate
+    mgr.cancel(rid)
+
+
+def test_named_device_resolves_across_host_apis(fake_sd):
+    # The Windows shape: ONE physical mic listed under four host APIs with an
+    # identical name. sounddevice's own string matching raises "Multiple input
+    # devices found" here — the recorder must pick one index itself, and it
+    # must be the WASAPI entry (full names, native rate).
+    fake_sd.hostapis[:] = [
+        {"name": "MME"}, {"name": "Windows DirectSound"},
+        {"name": "Windows WASAPI"}, {"name": "Windows WDM-KS"},
+    ]
+    fake_sd.devs[:] = [
+        {"name": "Headset Mic", "hostapi": 0, "max_input_channels": 1,
+         "max_output_channels": 0, "default_samplerate": 44100.0},
+        {"name": "Headset Mic", "hostapi": 1, "max_input_channels": 1,
+         "max_output_channels": 0, "default_samplerate": 44100.0},
+        {"name": "Headset Mic", "hostapi": 2, "max_input_channels": 2,
+         "max_output_channels": 0, "default_samplerate": 48000.0},
+        {"name": "Headset Mic", "hostapi": 3, "max_input_channels": 2,
+         "max_output_channels": 0, "default_samplerate": 48000.0},
+    ]
+    mgr = RecordingManager()
+    rid = mgr.start("Headset Mic")
+    assert rid
+    st = fake_sd.in_made[-1]
+    assert st.device == 2          # the WASAPI entry
+    assert st.samplerate == 48000  # rate read from the RESOLVED device
+    mgr.cancel(rid)
+
+
+def test_unresolvable_name_falls_through_to_portaudio(fake_sd):
+    # A stale/renamed persisted name has no exact match — hand the raw string
+    # to sounddevice so PortAudio's substring matching still gets a shot.
+    mgr = RecordingManager()
+    rid = mgr.start("Fake")  # substring of "Fake Mic", not an exact name
+    assert rid
+    assert fake_sd.in_made[-1].device == "Fake"
     mgr.cancel(rid)
 
 
