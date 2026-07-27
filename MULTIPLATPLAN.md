@@ -694,9 +694,20 @@ Windows sessions; each also appears in its origin ledger entry above):
 2. ~~RPC-PROTOCOL §0/§11 method-count re-baseline~~ RESOLVED 2026-07-26
    with the RecordingLevel commit: §0/§11 now pin 70 methods / 11 signals
    / 3 props, lib.rs 84 fn — verified by hand against the decorator list.
-3. 🗑 U+1F5D1 rendering: fontconfig will likely hand it to Noto Color
+3. ~~🗑 U+1F5D1 rendering: fontconfig will likely hand it to Noto Color
    Emoji (color glyph, ignores the text-style intent) — if so, switch the
-   7 delete sites + del-kind modal to the U+FE0E text-presentation form.
+   7 delete sites + del-kind modal to the U+FE0E text-presentation form~~
+   RESOLVED 2026-07-27: no code change — the premise is false on the real
+   stack. fc-match does rank Noto Color Emoji first for U+1F5D1, but the
+   fontique fallback (`unstable-fontique-010`) skips the color font and
+   draws the monochrome Noto Sans Symbols 2 basket, matched to ⇩/✎
+   (verified in-app on Linux: screenshot of the voice-card action row).
+   The planned switch actively regresses: fontique does not resolve
+   variation sequences, so `🗑\u{FE0E}` renders tofu at every delete site
+   (verified with a probe build carrying the 7-site edit, then reverted;
+   a minimal repro also showed bare 🗑 fine / +FE0E tofu / explicit
+   font-family fine). Candidate upstream Slint report. Note the del-kind
+   modal contains no 🗑 — the 7 glyph sites were the full inventory.
 4. Test-mic meter Linux twin: the ⚙ Test button is gated off on Linux —
    the mic dropdown holds pactl source ids that the §14 engine recorder
    can't resolve. Either compute levels app-side from the existing
