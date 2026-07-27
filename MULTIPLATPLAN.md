@@ -682,9 +682,15 @@ range) with zero WAVs left after cancel.
 
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
-1. `dictate/src/main.rs` still reads only `a.text` from LlmResult — mirror
-   the Windows immediate-fallback on the error flag (c5e4e32 precedent)
-   and compile-check it (the dictate crate doesn't build on Windows).
+1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
+   RESOLVED 2026-07-27: `refine()` now bails inside the wait loop the
+   moment a matching req_id arrives with `error=true`, routing through the
+   existing `Err(e)` arm for a single accurate "refinement unavailable
+   (engine reported an LLM failure)" warn and immediate raw-transcript
+   fallback (no 180 s wait); genuinely-empty and timeout results still take
+   the "returned nothing" path. Verified on Linux (never builds on Windows):
+   `cargo check`/`clippy -D warnings` clean for syrinx-dictate and
+   syrinx-shared, `cargo test --bins` = 0 tests (bin-only crate).
 2. ~~RPC-PROTOCOL §0/§11 method-count re-baseline~~ RESOLVED 2026-07-26
    with the RecordingLevel commit: §0/§11 now pin 70 methods / 11 signals
    / 3 props, lib.rs 84 fn — verified by hand against the decorator list.

@@ -183,18 +183,27 @@ fn refine(raw: &str) -> String {
             }
             // generous timeout: the first call may load the model (~40 s on CPU)
             let deadline = std::time::Duration::from_secs(180);
-            let refined = tokio::time::timeout(deadline, async {
+            let refined = match tokio::time::timeout(deadline, async {
                 while let Some(sig) = results.next().await {
                     if let Ok(a) = sig.args() {
                         if a.req_id == req_id {
-                            return a.text.to_string();
+                            // error=true carries text="" — bail so the fallback
+                            // names the failure instead of reading as an empty
+                            // refinement (and stop waiting immediately)
+                            if a.error {
+                                anyhow::bail!("engine reported an LLM failure");
+                            }
+                            return Ok(a.text.to_string());
                         }
                     }
                 }
-                String::new()
+                Ok(String::new())
             })
             .await
-            .unwrap_or_default();
+            {
+                Ok(res) => res?,        // inner finished — Ok text, or the error bail
+                Err(_) => String::new(), // timed out → fall back as empty
+            };
             Ok::<String, anyhow::Error>(refined)
         })
     };
