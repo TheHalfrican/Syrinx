@@ -1,4 +1,5 @@
-# systemd --user unit for the Syrinx engine — rendered by scripts/install.sh.
+# systemd --user unit for the Syrinx engine — rendered by scripts/install.sh
+# and engine/setup-linux-activation.sh.
 # The engine runs FROM THE CHECKOUT: its venvs and worker paths resolve
 # relative to the engine source dir, so ExecStart points there, not /usr/bin.
 #
@@ -14,5 +15,11 @@ Type=dbus
 BusName=sh.syrinx.Engine
 ExecStart=@REPO@/engine/.venv/bin/syrinx-engine
 WorkingDirectory=@REPO@/engine
+# Type=dbus makes systemd hold the job open until the name is claimed. The claim
+# happens after imports only — ~13s on the CPU box — because warmup runs in the
+# background once the name is up (syrinx_engine/__main__.py). 120s is headroom
+# for a cold page cache; the alternative, plain D-Bus activation with no
+# SystemdService=, would instead race dbus's own fixed 25s start limit.
+TimeoutStartSec=120
 Restart=on-failure
 RestartSec=2

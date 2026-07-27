@@ -729,6 +729,29 @@ Windows sessions; each also appears in its origin ledger entry above):
    monitor as the mic device, 12 s 440 Hz paplay tone — meter 0 in
    silence, ~30 % fill during the tone, back to 0 after; parecord dying
    (dead/absent source) springs the toggle back instead of lying.
+5. (added 2026-07-27, Noah) Engine cold-start on Linux: the app's Linux
+   worker only ever `connect_dbus()`es — with no engine on the bus a
+   cold app sat engine-less, and §13's "lifecycle belongs to systemd +
+   D-Bus activation" had no installer on dev checkouts (the packaging/
+   templates existed but only the full scripts/install.sh rendered
+   them).
+   RESOLVED 2026-07-27: `engine/setup-linux-activation.sh` — the
+   no-build subset of scripts/install.sh, rendering the SAME packaging/
+   templates (single source of truth, cannot drift) into
+   ~/.config/systemd/user + ~/.local/share/dbus-1/services, then
+   daemon-reload + dbus ReloadConfig and an is-activatable check.
+   Starts nothing by design (no [Install] — the app's first D-Bus call
+   wakes the engine). syrinx-engine.service.in gains
+   TimeoutStartSec=120: Type=dbus holds the job until the name claim,
+   and the claim is imports-only (~13 s measured on the CPU box —
+   warmup runs in the background AFTER the claim,
+   syrinx_engine/__main__.py:143-149), so 120 s covers cold caches
+   where bare non-systemd dbus activation would race its fixed 25 s
+   limit. Verified cold: app+engine both dead → launch app alone →
+   systemd activates the engine (static unit, journald logs), app
+   connects and renders full data. Per-box step: re-run the script
+   after moving a checkout; 4090-Linux must run it too (HANDOFF
+   checklist).
 
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,
