@@ -680,6 +680,25 @@ old app ran, and a scratch-dir engine over real RPC delivered 32
 RecordingLevel notifications in 2.5 s (~13 Hz, correct rec_id, 0..1
 range) with zero WAVs left after cancel.
 
+**2026-07-27 — the installer CI release job is PROVEN on the hosted
+runner.** The first real `workflow_dispatch` run failed in "Pack NSIS
+installer": SourceForge only 302s to a mirror for **CLI** user agents —
+a browser-shaped UA (Invoke-WebRequest's default) gets the HTML
+download page instead, which then died in Expand-Archive with an
+empty-message OperationStopped. A HEAD probe DOES get the 302, which
+is exactly how the step had been pre-verified yet still failed live;
+the auto-selected mirror (cfhcable) was also down that day. Fix
+(`cc63288`): fetch with curl.exe (real CLI UA, ships on the runner),
+fall back across explicit mirrors (master/netcologne/phoenixnap), and
+verify a pinned SHA-256 (`C7D27F78…394FA1`, taken from a good download
+proven by a local `makensis /VERSION`) before makensis ever sees the
+archive. Retry run green end to end on a warm rust-cache: winget SoX
+behaved on the hosted runner (the one stated unknown), bundle build +
+NSIS pack + silent-install smoke (installed embedded python imports
+`syrinx_engine` torch-free) all passed, artifacts uploaded
+(SyrinxSetup-x64 ~35 MB; unpacked bundle for no-rebuild debugging).
+Every item on the Windows campaign list is now closed.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
