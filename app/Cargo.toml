@@ -12,7 +12,10 @@ slint = { version = "1.17", features = ["unstable-fontique-010"] }
 syrinx-shared.workspace = true
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { workspace = true, features = ["process", "time"] }
+# io-util: the ⚙ mic test reads raw PCM off parecord's stdout (AsyncReadExt).
+# It is already on via the workspace's other tokio users, but this crate calls
+# it directly, so it says so.
+tokio = { workspace = true, features = ["process", "time", "io-util"] }
 # per-OS config/data dirs — mirrors shared's discovery-path derivation (§2.2)
 dirs.workspace = true
 # avatar thumbnails: decode + crop + high-quality downscale (the GPU's plain

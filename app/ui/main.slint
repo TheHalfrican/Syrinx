@@ -1032,9 +1032,9 @@ export component AppWindow inherits Window {
     in-out property <int> st-mon-index: 0;
     // ⚙ test-mic meter: `st-mic-testing` mirrors the toggle, `st-mic-level` is
     // the PERCEPTUAL bar fill (Rust already took sqrt of the raw RMS), and
-    // `st-mic-test-supported` gates the whole row — Win/mac only, because the
-    // Linux mic path is parecord/pactl and the §14 engine recorder can't
-    // resolve a pactl source id. SET FROM RUST.
+    // `st-mic-test-supported` gates the whole row — on now for every platform:
+    // Win/mac meter the §14 engine recorder, Linux meters its own parecord
+    // child app-side. SET FROM RUST.
     in property <bool> st-mic-testing: false;
     in property <float> st-mic-level: 0;
     in property <bool> st-mic-test-supported: false;
@@ -2596,7 +2596,7 @@ export component AppWindow inherits Window {
                                         }
                                     }
                                     // live input meter — proof the picked mic is
-                                    // alive. Win/mac only (see st-mic-test-supported).
+                                    // alive (see st-mic-test-supported).
                                     if root.st-mic-test-supported : HorizontalLayout {
                                         spacing: 12px;
                                         // empty label cell keeps the controls in the

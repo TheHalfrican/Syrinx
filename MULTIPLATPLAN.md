@@ -708,12 +708,27 @@ Windows sessions; each also appears in its origin ledger entry above):
    a minimal repro also showed bare 🗑 fine / +FE0E tofu / explicit
    font-family fine). Candidate upstream Slint report. Note the del-kind
    modal contains no 🗑 — the 7 glyph sites were the full inventory.
-4. Test-mic meter Linux twin: the ⚙ Test button is gated off on Linux —
+4. ~~Test-mic meter Linux twin: the ⚙ Test button is gated off on Linux —
    the mic dropdown holds pactl source ids that the §14 engine recorder
    can't resolve. Either compute levels app-side from the existing
    `parecord` capture path, or teach the Linux arm to translate a pactl
    source to its PortAudio name. UI + RecordingLevel plumbing are already
-   shared; only the level source is missing.
+   shared; only the level source is missing.~~
+   RESOLVED 2026-07-27: levels come app-side (option 1 — the meter now
+   tests the same parecord path Linux real captures use). The Linux arm
+   of `mic_test_start` spawns `parecord --raw --rate=24000 --channels=1
+   --format=s16le --latency-msec=75 [--device=<pactl source>]` — the
+   latency flag is mandatory (default fragsize 96000 B ≈ 2 s of audio
+   per delivery, a slideshow) — and a reader task RMSes 3200-byte chunks
+   (1600 samples ≈ 15 Hz) into `st-mic-level` with the same perceptual
+   sqrt the RecordingLevel arm applies. The worker's holder cfg-splits
+   (`MicTest` = §14 rec-id String on Win/mac, parecord child + reader
+   task on Linux) so every call site plus the 2-min auto-stop, tab-leave
+   off, and device-change restart stay shared and byte-identical. §0/§11
+   RPC surface unchanged (70/11/3). Verified live on Linux: HDMI-sink
+   monitor as the mic device, 12 s 440 Hz paplay tone — meter 0 in
+   silence, ~30 % fill during the tone, back to 0 after; parecord dying
+   (dead/absent source) springs the toggle back instead of lying.
 
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
 1. System capture: BlackHole loopback driver detection (document install,

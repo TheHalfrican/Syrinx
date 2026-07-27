@@ -315,11 +315,12 @@ fn main() -> anyhow::Result<()> {
         // (WASAPI loopback); macOS waits for phase 3. Gates the ◉ Record-system
         // buttons, the create-voice System chip, and the ⚙ tap picker.
         ui.set_system_capture_supported(cfg!(any(target_os = "linux", target_os = "windows")));
-        // The ⚙ mic test drives the §14 engine recorder, which only exists on
-        // Win/mac — Linux captures through parecord with pactl source ids the
-        // engine's PortAudio recorder cannot resolve, so the row stays hidden
-        // there until the Linux twin lands.
-        ui.set_st_mic_test_supported(cfg!(any(target_os = "windows", target_os = "macos")));
+        // The ⚙ mic test has a level source on every platform: Win/mac read the
+        // §14 engine recorder's RecordingLevel, Linux meters its own parecord
+        // child app-side (the same capture path its real recordings use, so the
+        // pactl source ids the engine's PortAudio recorder can't resolve never
+        // come up).
+        ui.set_st_mic_test_supported(true);
         // Decorative titlebar chrome, per OS. Linux keeps the authored
         // "hyprland · workspace 3" (the slint default); Win/mac get an
         // equivalently subtle, lowercase string.
@@ -2655,12 +2656,14 @@ async fn run_session(
     let mut cfg = load_config();
     let mut st_mics: Vec<(String, String)> = Vec::new();
     let mut st_mons: Vec<(String, String)> = Vec::new();
-    // ⚙ test-mic: the live §14 recording id (None = not testing) and its age in
-    // 1 s ticks. The test is normally ended by the toggle or by leaving the tab
-    // (slint fires st-mic-test-toggle on any tab change); MIC_TEST_MAX is the
-    // belt-and-braces stop in case that interception is ever bypassed — an open
-    // input stream nobody can see is the one outcome this feature may not have.
-    let mut mic_test_id: Option<String> = None;
+    // ⚙ test-mic: the live test (None = not testing) and its age in 1 s ticks.
+    // On Win/mac a `MicTest` is the §14 recording id; on Linux it is the app's
+    // own parecord child plus the task metering it. The test is normally ended
+    // by the toggle or by leaving the tab (slint fires st-mic-test-toggle on any
+    // tab change); MIC_TEST_MAX is the belt-and-braces stop in case that
+    // interception is ever bypassed — an open input stream nobody can see is the
+    // one outcome this feature may not have.
+    let mut mic_test_id: Option<MicTest> = None;
     let mut mic_test_elapsed: u32 = 0;
     const MIC_TEST_MAX: u32 = 120;
     // library (▤) state — rows cached, filters applied app-side
@@ -2697,7 +2700,7 @@ async fn run_session(
                 EngineEvent::RecordingLevel { rec_id, rms } => {
                     // Every §14 capture emits this (dictation, ⇄, create-voice);
                     // only the ⚙ test's own id drives the meter.
-                    if mic_test_id.as_deref() == Some(rec_id.as_str()) {
+                    if is_mic_test_rec(&mic_test_id, &rec_id) {
                         // sqrt = perceptual: linear RMS leaves normal speech
                         // hugging the left edge of the bar.
                         let lvl = (rms.max(0.0) as f32).sqrt();
@@ -4882,9 +4885,41 @@ async fn run_session(
     end
 }
 
+// --- ⚙ mic test ----------------------------------------------------------
+//
+// One live test, two level sources. Win/mac start a §14 engine recording and
+// let its RecordingLevel signal drive the meter; Linux never starts the engine
+// recorder (its mic path is parecord, whose pactl source ids the engine's
+// PortAudio recorder cannot resolve) and computes levels app-side instead. The
+// worker holds whichever this platform produced, so the two `mic_test_start` /
+// `mic_test_stop` pairs share one signature and every call site is identical.
+
+/// A live ⚙ mic test: the `parecord` child and the task draining its stdout
+/// into the meter.
+#[cfg(target_os = "linux")]
+struct MicTest {
+    child: tokio::process::Child,
+    reader: tokio::task::JoinHandle<()>,
+}
+/// A live ⚙ mic test: the engine's §14 recording id.
+#[cfg(not(target_os = "linux"))]
+type MicTest = String;
+
+/// Does this §14 recording belong to the ⚙ test? Only its own id may drive the
+/// meter. On Linux no engine recording ever runs, so nothing can.
+#[cfg(not(target_os = "linux"))]
+fn is_mic_test_rec(test: &Option<MicTest>, rec_id: &str) -> bool {
+    test.as_deref() == Some(rec_id)
+}
+#[cfg(target_os = "linux")]
+fn is_mic_test_rec(_test: &Option<MicTest>, _rec_id: &str) -> bool {
+    false
+}
+
 /// Start the ⚙ mic test on `device` ("" = system default) and light the UI up.
 /// Returns the §14 recording id, or `None` when the engine refused the device —
 /// in which case the toggle springs back to "not testing" rather than lying.
+#[cfg(not(target_os = "linux"))]
 async fn mic_test_start(
     ui: &slint::Weak<AppWindow>,
     proxy: &EngineClient,
@@ -4918,10 +4953,117 @@ async fn mic_test_start(
 
 /// Stop the ⚙ mic test and blank the meter. Always **cancel**, never stop: a
 /// test must not leave a WAV in the engine's scratch dir.
+#[cfg(not(target_os = "linux"))]
 async fn mic_test_stop(ui: &slint::Weak<AppWindow>, proxy: &EngineClient, id: Option<String>) {
     if let Some(id) = id {
         if let Err(e) = proxy.cancel_recording(&id).await {
             tracing::warn!("mic test: cancel_recording failed: {e}");
+        }
+    }
+    ui.upgrade_in_event_loop(|ui| {
+        ui.set_st_mic_testing(false);
+        ui.set_st_mic_level(0.0);
+    })
+    .ok();
+}
+
+/// Start the ⚙ mic test on `device` ("" = system default) and light the UI up.
+/// The engine is not involved: `parecord` streams raw PCM the reader task turns
+/// into meter levels. `None` means the spawn failed, so the toggle springs back
+/// to "not testing" rather than lying.
+#[cfg(target_os = "linux")]
+async fn mic_test_start(
+    ui: &slint::Weak<AppWindow>,
+    _proxy: &EngineClient,
+    device: &str,
+) -> Option<MicTest> {
+    // Flip the toggle BEFORE the spawn: leaving ⚙ mid-start would otherwise see
+    // `st-mic-testing` still false and skip the auto-off, stranding an open
+    // input stream on a tab the user has left. Optimistic "on" makes the tab
+    // change fire the toggle, which the worker processes right after this await
+    // returns — so the stream is closed either way.
+    ui.upgrade_in_event_loop(|ui| ui.set_st_mic_testing(true)).ok();
+    let mut cmd = tokio::process::Command::new("parecord");
+    // --raw puts PCM on stdout instead of a file. --latency-msec is not
+    // optional: parecord's default fragment here is 96000 bytes — two seconds
+    // of 24 kHz mono per read, which is a slideshow, not a meter.
+    cmd.args(["--raw", "--rate=24000", "--channels=1", "--format=s16le", "--latency-msec=75"]);
+    if !device.is_empty() {
+        cmd.arg(format!("--device={device}"));
+    }
+    let spawned = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        // session end drops the holder without a stop call; an orphaned
+        // parecord would hold the input open past the app's own exit
+        .kill_on_drop(true)
+        .spawn();
+    let mut child = match spawned {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::error!("mic test: parecord failed to start: {e}");
+            ui.upgrade_in_event_loop(|ui| {
+                ui.set_st_mic_testing(false);
+                ui.set_st_mic_level(0.0);
+            })
+            .ok();
+            return None;
+        }
+    };
+    let Some(mut out) = child.stdout.take() else {
+        tracing::error!("mic test: parecord stdout was not piped");
+        let _ = child.kill().await;
+        ui.upgrade_in_event_loop(|ui| {
+            ui.set_st_mic_testing(false);
+            ui.set_st_mic_level(0.0);
+        })
+        .ok();
+        return None;
+    };
+    let ui = ui.clone();
+    let reader = tokio::spawn(async move {
+        use tokio::io::AsyncReadExt;
+        // 1600 samples ≈ 66 ms at 24 kHz — one bar update per read
+        let mut buf = [0u8; 3200];
+        while out.read_exact(&mut buf).await.is_ok() {
+            let mut sumsq = 0f64;
+            for s in buf.chunks_exact(2) {
+                let v = i16::from_le_bytes([s[0], s[1]]) as f64 / 32768.0;
+                sumsq += v * v;
+            }
+            let rms = (sumsq / (buf.len() / 2) as f64).sqrt() as f32;
+            // sqrt = perceptual: linear RMS leaves normal speech hugging the
+            // left edge of the bar.
+            let lvl = rms.sqrt();
+            if ui.upgrade_in_event_loop(move |ui| ui.set_st_mic_level(lvl)).is_err() {
+                return;
+            }
+        }
+        // EOF/read error = parecord is gone (a missing or busy source exits
+        // immediately), and a dead recorder may not leave the toggle lit with
+        // nothing behind it. The worker's now-stale holder needs no signal: the
+        // next toggle or the auto-stop timer kills an already-dead child.
+        ui.upgrade_in_event_loop(|ui| {
+            ui.set_st_mic_testing(false);
+            ui.set_st_mic_level(0.0);
+        })
+        .ok();
+    });
+    Some(MicTest { child, reader })
+}
+
+/// Stop the ⚙ mic test and blank the meter. Nothing needs finalizing — `--raw`
+/// writes no WAV header — so parecord takes a straight SIGKILL rather than the
+/// SIGINT-then-wait dance `stop_pw_record` owes a real capture.
+#[cfg(target_os = "linux")]
+async fn mic_test_stop(ui: &slint::Weak<AppWindow>, _proxy: &EngineClient, test: Option<MicTest>) {
+    if let Some(mut test) = test {
+        // reader first: one still draining the pipe would race the kill and
+        // paint a last level onto an already-blanked meter
+        test.reader.abort();
+        if let Err(e) = test.child.kill().await {
+            tracing::warn!("mic test: could not kill parecord: {e}");
         }
     }
     ui.upgrade_in_event_loop(|ui| {
