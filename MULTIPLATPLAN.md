@@ -370,7 +370,7 @@ The Linux snapshot (NAS: `Z:\Backups\Syrinx Data`) restored to
 `%LOCALAPPDATA%\syrinx\syrinx` + `%APPDATA%\syrinx`; Piccolo/Frieza/Goku,
 16 history rows, clips, active models all live on Windows (warmup
 auto-fetched whisper-large + qwen3-4b). Polish batch from real usage, all
-committed (7c6c214..0338be1): platform titlebar chip + dictation hint
+committed (8ff54a0..4f6fb35): platform titlebar chip + dictation hint
 gated `is-linux`; **DPI compensation** — this panel is 300% native; app
 targets Linux density by default off-Linux, `ui_scale` in
 `%APPDATA%\syrinx\settings.json` overrides (set 2.0 here; ⚙ knob deferred
@@ -515,7 +515,7 @@ Two Opus agents on disjoint ownership, orchestrator integration on top.
 
 **2026-07-24 evening — post-phase-3 session close.** The user's first real
 day driving the Windows build produced and closed five more items, all
-pushed @ d2dcf3b: DownloadModel serialization (the symlink-probe race,
+pushed @ 4c6625c: DownloadModel serialization (the symlink-probe race,
 ModelManager._fetch_lock); honest download progress (real hub byte totals
 via HfApi files_metadata w/ estimate fallback, new "finalizing" stage +
 finishing marquee, all 22 catalog size_mb re-measured — the stale
