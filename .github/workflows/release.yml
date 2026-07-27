@@ -76,16 +76,42 @@ jobs:
       # The winget NSIS package needs elevation and fails headless (proven), so
       # fetch the PINNED portable NSIS zip from SourceForge and run its makensis
       # directly. The zip carries its own Include/Stubs/Plugins, so MUI2.nsh
-      # resolves relative to makensis.exe. HEAD-verified: the direct-download URL
-      # 302s to a mirror and serves nsis-3.11.zip (2361546 bytes).
+      # resolves relative to makensis.exe.
+      #
+      # Fetch mechanics (2026-07-27, learned from the first live run):
+      # SourceForge only 302s to a mirror for CLI user agents — a browser-shaped
+      # UA (Invoke-WebRequest's default) gets the HTML download page, which then
+      # dies in Expand-Archive. A HEAD probe *does* get the 302, which is how the
+      # original Invoke-WebRequest version passed pre-verification and still
+      # failed live. So: curl.exe (real CLI UA, ships on the runner), explicit
+      # mirror fallbacks (individual mirrors go down — cfhcable was dead that
+      # day), and a pinned SHA-256 so nothing unverified ever reaches makensis.
       - name: Pack NSIS installer (portable NSIS)
         env:
           NSIS_VERSION: '3.11'
+          NSIS_SHA256: 'C7D27F780DDB6CFFB4730138CD1591E841F4B7EDB155856901CDF5F214394FA1'
         run: |
           $zip = Join-Path $env:RUNNER_TEMP "nsis-$env:NSIS_VERSION.zip"
           $dst = Join-Path $env:RUNNER_TEMP 'nsis'
-          $url = "https://downloads.sourceforge.net/project/nsis/NSIS%203/$env:NSIS_VERSION/nsis-$env:NSIS_VERSION.zip"
-          Invoke-WebRequest -Uri $url -OutFile $zip
+          $path = "project/nsis/NSIS%203/$env:NSIS_VERSION/nsis-$env:NSIS_VERSION.zip"
+          $sources = @(
+            "https://downloads.sourceforge.net/$path",
+            "https://master.dl.sourceforge.net/$path",
+            "https://netcologne.dl.sourceforge.net/$path",
+            "https://phoenixnap.dl.sourceforge.net/$path"
+          )
+          $fetched = $false
+          foreach ($url in $sources) {
+            curl.exe -sSL --connect-timeout 15 --max-time 120 -o $zip $url
+            if ($LASTEXITCODE -eq 0 -and (Test-Path $zip) -and
+                (Get-FileHash $zip -Algorithm SHA256).Hash -eq $env:NSIS_SHA256) {
+              $fetched = $true
+              Write-Host "fetched + verified from $url"
+              break
+            }
+            Write-Warning "bad or failed download from $url"
+          }
+          if (-not $fetched) { throw "no mirror served a hash-valid nsis-$env:NSIS_VERSION.zip" }
           Expand-Archive -Path $zip -DestinationPath $dst -Force
           $makensis = Join-Path $dst "nsis-$env:NSIS_VERSION\makensis.exe"
           if (-not (Test-Path $makensis)) { throw "makensis.exe not found at $makensis" }
