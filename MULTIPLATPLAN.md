@@ -812,6 +812,32 @@ measurable and pretending otherwise is a lying progress bar. macOS
 inherits the POSIX `.sh` path design-ready but **unvalidated** — no Mac
 has run this; it stays a phase-3 item.
 
+**2026-07-28 (evening) — first live exercise of the one-click install
+found two holes, both closed same-day.** Noah's first click on Install
+(Seed-VC, dev build) died building webrtcvad — a 2017 sdist with no
+cp312 Windows wheels, pulled in via seed-vc → resemblyzer. Two causes
+stacked: (a) the dev app had been launched from a sandboxed agent
+shell whose stripped env broke setuptools' vswhere discovery ("Unable
+to find a compatible Visual Studio installation" with VS Community
+2022 + SDK fully present — the same wheel builds fine from a normal
+shell; engine_proc passes the app env through verbatim, so launch env
+is destiny); a Start-Menu launch never hits this. (b) The REAL bug the
+failure exposed: the venv+torch stages had succeeded, so the torn venv
+had a working interpreter and `installed()` (interpreter-exists) called
+it installed — warning cleared, Install button gone, worker broken.
+Fixed: `installed()` now also requires a landmark site-packages dir
+only the critical pip command leaves behind (seed_vc / torchcrepe —
+pip is all-or-nothing per command), checked in the venv the interpreter
+was actually found in; the hand-built Vevo venv grandfathers cleanly.
+Also landed from the same session: Noah's "every error message should
+be copy-able" — the three existing ⧉ copy buttons consolidated into a
+CopyBtn component and the fourth added to the install-error banner.
+QUEUED for CI: build webrtcvad's cp312 wheel on the MSVC-equipped
+windows runner and ship it in the bundle + have setup-seedvc.ps1
+install it first when present — an end user without Visual Studio
+cannot build it, and that wall is otherwise the first thing the
+one-click Seed-VC install hits on a stock box.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
