@@ -109,8 +109,10 @@ pub(crate) fn resolve_engine_exe() -> PathBuf {
 }
 
 /// The engine log: `engine.log` beside the discovery file (§13.2 note). Honors
-/// `SYRINX_RPC_ENDPOINT`, so tests keep their logs in a temp dir.
-fn engine_log_path() -> Option<PathBuf> {
+/// `SYRINX_RPC_ENDPOINT`, so tests keep their logs in a temp dir. Visible to
+/// the crate because failure banners have to *name* this file: it is where the
+/// reason lives for anything the RPC protocol reports without a message.
+pub(crate) fn engine_log_path() -> Option<PathBuf> {
     syrinx_shared::discovery_path()
         .ok()
         .and_then(|p| p.parent().map(|d| d.join("engine.log")))

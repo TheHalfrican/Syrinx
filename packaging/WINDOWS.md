@@ -147,17 +147,31 @@ visible in a PowerShell window. It is re-runnable and:
   disabled by policy, launch `syrinx-app.exe` after setting `SYRINX_ENGINE_CMD`
   and `PATH` yourself.
 - First-run needs network (PyTorch index + PyPI) and ~2–7 GB (CUDA) of download.
-- **Model downloads are serialized engine-side** (since 2026-07-24). Without
-  Windows **Developer Mode** (or admin), `huggingface_hub` can't create
-  symlinks and probes for support at download time; overlapping
-  `snapshot_download`s race that probe and one dies with `WinError 1314` ("A
-  required privilege is not held by the client"). The engine therefore runs
-  fetches one at a time behind an asyncio lock (`ModelManager._fetch_lock`) —
-  queued models still show as downloading immediately. The non-symlink
-  fallback stores each file once, directly in `snapshots/` (blobs stay
-  empty) — it does NOT double the cache (2026-07-24 correction of an earlier
-  note; the "doubling" was a catalog size-estimate artifact). Developer Mode
-  gets the native symlink layout, whose real win is dedup across revisions.
+- **Model downloads are serialized *and* symlink-pre-warmed engine-side.**
+  Without Windows **Developer Mode** (or admin), `huggingface_hub` can't create
+  symlinks. It doesn't know that up front — it probes at download time, per
+  **directory** (the repo dir, the common parent of `blobs/` and `snapshots/`),
+  and memoizes the answer in a dict it writes *twice*: optimistically `True` on
+  entry, then the real answer after a trial `os.symlink`. That gap is unlocked,
+  so any reader inside it is told symlinks work, tries one, and dies with
+  `WinError 1314` ("A required privilege is not held by the client") — an
+  `OSError` that `_create_symlink` does not catch. Two racers hit it:
+  - *repo against repo* — overlapping `snapshot_download`s (fixed 2026-07-24:
+    fetches run one at a time behind `ModelManager._fetch_lock`; queued models
+    still show as downloading immediately);
+  - *file worker against file worker inside one repo* — `snapshot_download`
+    fans out over eight threads, so a **fresh** repo dir gets eight
+    simultaneous first-probes (fixed 2026-07-28 after the seed-vc row died at
+    ~4% starting `funasr/campplus`: `models._settle_symlink_probe` runs hub's
+    own probe once, serially, before each `snapshot_download`, so the memo is
+    settled before the workers can read it).
+
+  The non-symlink fallback stores each file once, directly in `snapshots/`
+  (blobs stay empty) — it does NOT double the cache (2026-07-24 correction of
+  an earlier note; the "doubling" was a catalog size-estimate artifact).
+  Developer Mode still probes `True` and keeps the native symlink layout, whose
+  real win is dedup across revisions — the pre-warm removes the race, not the
+  symlinks.
 
 ## A future CI release job would run
 

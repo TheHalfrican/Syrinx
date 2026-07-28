@@ -535,7 +535,17 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let tx = tx.clone();
-        ui.on_download_model(move |id| { let _ = tx.send(Cmd::DownloadModel { id: id.to_string() }); });
+        let ui_weak = ui.as_weak();
+        ui.on_download_model(move |id| {
+            // A previous failure's banner says "click Download to resume" — so
+            // clicking it has to take that banner down, exactly as Install
+            // clears its own. Otherwise the retry starts under a warning about
+            // the attempt it just replaced.
+            if let Some(ui) = ui_weak.upgrade() {
+                ui.set_vc_install_error("".into());
+            }
+            let _ = tx.send(Cmd::DownloadModel { id: id.to_string() });
+        });
     }
     {
         let tx = tx.clone();
@@ -2601,6 +2611,58 @@ fn model_progress_ui(status: &str) -> ModelProgressUi {
     }
 }
 
+/// Where to send someone for the reason behind a failure the protocol reported
+/// without one. On Linux the engine is a systemd user unit, so its output is in
+/// the journal rather than a file.
+#[cfg(target_os = "linux")]
+fn engine_log_hint() -> String {
+    "journalctl --user -u syrinx-engine".to_string()
+}
+
+/// Win/mac: the supervisor pipes the engine's output into `engine.log` beside
+/// the discovery file, so the real path can be named outright.
+#[cfg(not(target_os = "linux"))]
+fn engine_log_hint() -> String {
+    engine_proc::engine_log_path()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|| "the engine log".to_string())
+}
+
+/// The Models-tab banner for a download that died — `ModelProgress` with
+/// status `"error"`.
+///
+/// The signal is `(model_id, pct, status)` and carries no message (the counts
+/// are pinned), so the reason only ever reaches the engine log. Until this
+/// existed, a failed download was the app's last silent failure: the row's bar
+/// flashed to 0% and reverted, which looks exactly like a click that didn't
+/// register. So the banner does the three things the signal can't — name the
+/// model in the words the catalog uses, say where the reason is, and say that
+/// Download picks up where it stopped (huggingface_hub resumes; the partial
+/// blobs on disk are not wasted).
+///
+/// `rows` is the catalog flattened to (id, display); an id with no row left —
+/// a fetch that outlived a catalog refresh — is named by its raw id rather than
+/// being reported as a blank.
+fn model_download_error(model_id: &str, rows: &[(&str, &str)], log_hint: &str) -> String {
+    let name = rows
+        .iter()
+        .find(|(id, display)| *id == model_id && !display.is_empty())
+        .map(|(_, display)| *display)
+        .unwrap_or(model_id);
+    format!(
+        "Downloading {name} failed — check {log_hint} for the reason, \
+         then click Download to resume."
+    )
+}
+
+/// Put a Models-tab failure in the ⚠ banner *without* touching the install
+/// marquee. Unlike [`set_install_error`] this one has no install to stop — a
+/// download that dies while some engine happens to be installing must not take
+/// that install's progress line down with it.
+fn set_models_error(ui: &slint::Weak<AppWindow>, msg: String) {
+    ui.upgrade_in_event_loop(move |ui| ui.set_vc_install_error(msg.into())).ok();
+}
+
 /// How a `VcSetupProgress` status string maps to the Models-tab treatment.
 /// Split out from the event handler for the same reason as
 /// [`ModelProgressUi`]: the decision is unit-testable without a running UI.
@@ -3486,12 +3548,34 @@ async fn run_session(
                         ModelProgressUi::Downloading => set_model_progress(&ui, model_id, pct as f32, true, false),
                         ModelProgressUi::Finalizing => set_model_progress(&ui, model_id, pct as f32, true, true),
                         ModelProgressUi::Terminal => { // done / error
+                            // "done" and "error" agree on everything except
+                            // whether the user is told: both refetch, because
+                            // a torn download changes the rows too.
+                            let failed = status == "error";
                             reload_models!();
                             // ListVoices gates the extra preset engines on
                             // DOWNLOADED, so a finished (or deleted) fetch
                             // changes the voice grid too — the pre-existing
                             // gap that only showed up once Use died.
                             refresh_grid(&ui, &proxy, &mut avatar_cache).await;
+                            if failed {
+                                tracing::error!("model download failed: {model_id}");
+                                // Named off the refreshed catalog, so the
+                                // banner says "Seed-VC", not "seed-vc".
+                                let mut rows: Vec<(&str, &str)> = voice_models
+                                    .iter()
+                                    .chain(&stt_models)
+                                    .chain(&llm_models)
+                                    .map(|r| (r.id.as_str(), r.display.as_str()))
+                                    .collect();
+                                rows.extend(
+                                    vc_models.iter().map(|m| (m.id.as_str(), m.display.as_str())),
+                                );
+                                let msg = model_download_error(
+                                    &model_id, &rows, &engine_log_hint(),
+                                );
+                                set_models_error(&ui, msg);
+                            }
                         }
                     }
                 }
@@ -6206,6 +6290,38 @@ mod tests {
         for s in ["", "verifying", "queued", "FINALIZING", "unknown"] {
             assert_eq!(model_progress_ui(s), ModelProgressUi::Downloading);
         }
+    }
+
+    // --- model_download_error --------------------------------------------
+
+    const CATALOG: [(&str, &str); 3] =
+        [("kokoro", "Kokoro"), ("seed-vc", "Seed-VC"), ("qwen3-1.7b", "Qwen3 1.7B")];
+
+    #[test]
+    fn model_download_error_names_the_model_the_log_and_the_way_out() {
+        let msg = model_download_error("seed-vc", &CATALOG, r"C:\log\engine.log");
+        assert_eq!(
+            msg,
+            "Downloading Seed-VC failed — check C:\\log\\engine.log for the reason, \
+             then click Download to resume."
+        );
+    }
+
+    #[test]
+    fn model_download_error_falls_back_to_the_raw_id() {
+        // a fetch that outlives its catalog row is still nameable — a blank
+        // here would be worse than the id (the banner would name nothing)
+        for rows in [&CATALOG[..], &[][..], &[("ghost", "")][..]] {
+            assert!(model_download_error("ghost", rows, "the engine log")
+                .starts_with("Downloading ghost failed —"));
+        }
+    }
+
+    #[test]
+    fn model_download_error_is_specific_to_the_failed_row() {
+        // the id decides the name — not the first row, not the last
+        assert!(model_download_error("qwen3-1.7b", &CATALOG, "L")
+            .starts_with("Downloading Qwen3 1.7B failed"));
     }
 
     // --- vc_setup_ui -----------------------------------------------------

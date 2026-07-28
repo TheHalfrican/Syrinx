@@ -1127,7 +1127,9 @@ export component AppWindow inherits Window {
     // vc-install-kind ("seedvc" | "vevo"), the consent modal picks the wording
     // and fires install-vc. The rest is SET FROM RUST: vc-install-active is the
     // setup id currently running ("" = none), vc-install-stage its human label,
-    // vc-install-error the last failure ("" = none).
+    // vc-install-error the last failure ("" = none) — the tab's one banner, so
+    // it carries failed model DOWNLOADS too, not just installs (the name is
+    // historical).
     in-out property <string> vc-install-kind: "";
     in property <string> vc-install-active: "";
     in property <string> vc-install-stage: "";
@@ -3460,7 +3462,10 @@ export component AppWindow inherits Window {
                             alignment: start;
                             padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 8px;
                             // a failed (or refused) engine install — the
-                            // detail carries the reason and the log path.
+                            // detail carries the reason and the log path — or
+                            // a failed model download, whose signal carries no
+                            // message at all and so is named + pointed at the
+                            // engine log app-side.
                             // Hoisted above the section loop: the error string
                             // is a single global, and engines that install
                             // from this tab live in more than one section

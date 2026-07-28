@@ -310,6 +310,59 @@ def _repo_bytes(repo: str, base: "Path | None" = None) -> int:
     return sum(f.stat().st_size for f in blobs.glob("*") if f.is_file())
 
 
+def _settle_symlink_probe(repo: str, base: "Path | None" = None) -> None:
+    """Answer huggingface_hub's symlink question ONCE, serially, before its
+    parallel file workers can ask it at the same time.
+
+    `huggingface_hub` links every downloaded file from `snapshots/` to the blob
+    it just wrote, and decides whether it *can* symlink by probing the directory
+    the two share — which is the repo dir, `<cache>/models--<org>--<name>`. The
+    answer is memoized in a plain dict (file_download's
+    `_are_symlinks_supported_in_dir`) that is written **twice**: optimistically
+    `True` on entry, then the real answer after the trial `os.symlink`. That gap
+    is not locked, and nothing holds it shut. On a fresh
+    repo dir, snapshot_download's eight file workers all reach `_create_symlink`
+    within milliseconds of each other, so a worker that reads the memo inside
+    the gap is told "symlinks work", calls `os.symlink`, and — on Windows
+    without Developer Mode or admin — dies with
+
+        OSError: [WinError 1314] A required privilege is not held by the client
+
+    which nothing in `_create_symlink` catches (it only handles FileExistsError
+    and PermissionError, and 1314 is neither). Field failure 2026-07-28: the
+    seed-vc row died at ~4%, starting its second repo (funasr/campplus) into a
+    brand-new cache dir.
+
+    Serializing whole fetches (`ModelManager._fetch_lock`, 2026-07-24) closed
+    the *cross-repo* half of this; calling the probe here closes the *within-
+    repo* half. One serial call settles the memo, and every file worker that
+    follows reads a value that can no longer change.
+
+    Deliberately hub's own probe rather than a hand-rolled one: it is the
+    function `_create_symlink` actually consults, keyed by the same
+    `Path(...).resolve()` string, so pre-warming it is exact. It is also
+    self-answering — a Developer-Mode box probes `True` and keeps the native
+    symlink layout (whose real win is dedup across revisions), a locked-down box
+    probes `False` and takes the no-symlink path, which stores each file **once,
+    directly in `snapshots/`** (blobs stay empty). That layout does not double
+    the cache; see packaging/WINDOWS.md.
+
+    Unconditional rather than `sys.platform == "win32"`-gated: the race is in
+    the memo, not in Windows, and one code path is one thing to reason about.
+    Everything here is best-effort — a pre-warm that cannot run must never be
+    the reason a download doesn't start.
+    """
+    try:
+        from huggingface_hub.file_download import are_symlinks_supported
+    except Exception:  # noqa: BLE001
+        log.debug("symlink probe unavailable; skipping pre-warm", exc_info=True)
+        return
+    try:
+        are_symlinks_supported(_repo_dir(repo, base))
+    except Exception:  # noqa: BLE001
+        log.debug("symlink probe failed for %s; letting the fetch try", repo, exc_info=True)
+
+
 # Kept as a name here because vevo_worker.py and this module have to agree about
 # where the clone is; the resolution itself lives with the rest of the setup
 # knowledge in vcsetup.py.
@@ -504,10 +557,13 @@ class ModelManager:
         self._settings = _data_dir() / "models.json"
         self._active = dict(_DEFAULT_ACTIVE)
         self._downloading: set = set()
-        # Concurrent snapshot_downloads race huggingface_hub's per-cache
+        # Concurrent snapshot_downloads race huggingface_hub's per-directory
         # symlink-support probe (WinError 1314 on boxes without Developer
         # Mode) — fetches must run one at a time. Queued downloads still
         # appear in `_downloading` immediately, so status() shows them.
+        # This lock only covers repo-against-repo; the file workers *inside*
+        # one snapshot_download race the same probe, which is what
+        # `_settle_symlink_probe` is for.
         self._fetch_lock = asyncio.Lock()
         try:
             self._active.update(json.loads(self._settings.read_text()))
@@ -591,6 +647,9 @@ class ModelManager:
 
             for r in m.repos:
                 base = _cache_root(m, r)
+                # Settle the symlink question for THIS repo dir before the
+                # eight file workers inside snapshot_download can race it.
+                _settle_symlink_probe(r, base)
                 snapshot_download(
                     r,
                     cache_dir=str(base) if base else None,

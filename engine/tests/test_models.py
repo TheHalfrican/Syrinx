@@ -562,11 +562,26 @@ def test_detect_hardware_without_torch_reports_no_gpu(monkeypatch):
 # --- download ------------------------------------------------------------
 
 
+def fake_symlink_probe(monkeypatch, probe):
+    """Install a fake ``huggingface_hub.file_download`` exposing only the probe.
+
+    Registered under its dotted name so ``from huggingface_hub.file_download
+    import …`` resolves it straight out of sys.modules — huggingface_hub is not
+    in the CI dependency contract, so nothing here may import the real one."""
+    mod = types.ModuleType("huggingface_hub.file_download")
+    mod.are_symlinks_supported = probe
+    monkeypatch.setitem(sys.modules, "huggingface_hub.file_download", mod)
+
+
 def fake_hub(monkeypatch, snapshot_download):
     monkeypatch.setitem(
         sys.modules, "huggingface_hub",
         types.SimpleNamespace(snapshot_download=snapshot_download),
     )
+    # …and the submodule the symlink pre-warm reaches for. Without this the
+    # fetch path would find whatever `huggingface_hub.file_download` a real
+    # install left in sys.modules and probe the tmp cache for real.
+    fake_symlink_probe(monkeypatch, lambda _d: True)
 
 
 def test_download_polls_progress_and_finishes(monkeypatch, hf_cache):
@@ -651,6 +666,129 @@ def test_a_failing_download_reports_error(monkeypatch):
 def test_download_without_huggingface_hub_fails_cleanly(monkeypatch):
     monkeypatch.setitem(sys.modules, "huggingface_hub", None)
     assert asyncio.run(models.ModelManager().download("kokoro", lambda *a: None)) is False
+
+
+# --- the symlink probe (WinError 1314) ------------------------------------
+#
+# huggingface_hub memoizes "can I symlink in this directory?" per directory,
+# writing the dict optimistically-True before the trial os.symlink answers.
+# snapshot_download's file workers all reach that dict at once on a fresh repo
+# dir; one reading it inside the gap symlinks for real and dies with WinError
+# 1314 on a box without Developer Mode. _settle_symlink_probe runs the probe
+# serially first so the memo can no longer change under them.
+
+
+def test_the_probe_asks_huggingface_about_the_repo_dir(monkeypatch, hf_cache):
+    """The probed directory must be the one hub itself probes: the repo dir,
+    the common parent of blobs/ and snapshots/ — not the cache root."""
+    seen = []
+    fake_symlink_probe(monkeypatch, lambda d: seen.append(d) or True)
+
+    models._settle_symlink_probe("funasr/campplus")
+    assert seen == [hf_cache / "models--funasr--campplus"]
+
+
+def test_the_probe_follows_a_custom_cache_root(monkeypatch, tmp_path):
+    """seed-vc's per-engine cache root is exactly where the field failure hit,
+    so the pre-warm has to land under it, not under the default HF cache."""
+    seen = []
+    fake_symlink_probe(monkeypatch, lambda d: seen.append(d) or False)
+
+    base = tmp_path / "seedvc" / "checkpoints"
+    models._settle_symlink_probe("funasr/campplus", base)
+    assert seen == [base / "models--funasr--campplus"]
+
+
+def test_every_repo_is_probed_before_it_is_fetched(monkeypatch, isolated_env):
+    """Per repo, in order: probe, then fetch. A probe that ran after its own
+    snapshot_download would settle the memo too late to help anyone."""
+    order = []
+    monkeypatch.setattr(models, "_settle_symlink_probe",
+                        lambda repo, base=None: order.append(("probe", repo)))
+
+    def snapshot_download(repo, cache_dir=None, allow_patterns=None):
+        order.append(("fetch", repo))
+
+    fake_hub(monkeypatch, snapshot_download)
+    asyncio.run(models.ModelManager().download("seed-vc", lambda *a: None))
+
+    repos = models.spec("seed-vc").repos
+    assert order == [step for r in repos for step in (("probe", r), ("fetch", r))]
+
+
+def test_a_probe_that_cannot_run_never_blocks_the_download(monkeypatch, hf_cache):
+    """Best-effort, always: the pre-warm is an optimization, and a download
+    that refuses to start because of it would be a worse bug than the race."""
+    def boom(_d):
+        raise OSError("probe exploded")
+
+    fake_symlink_probe(monkeypatch, boom)
+    models._settle_symlink_probe("hexgrad/Kokoro-82M")  # must not raise
+
+    def snapshot_download(repo, cache_dir=None, allow_patterns=None):
+        fake_repo(hf_cache, repo)
+
+    fake_hub(monkeypatch, snapshot_download)
+    assert asyncio.run(models.ModelManager().download("kokoro", lambda *a: None)) is True
+
+
+def test_a_missing_probe_never_blocks_the_download(monkeypatch, hf_cache):
+    """An older/newer huggingface_hub without that function is a no-op, not a
+    crash — the fetch just races the way it did before."""
+    monkeypatch.setitem(sys.modules, "huggingface_hub.file_download", None)
+    models._settle_symlink_probe("hexgrad/Kokoro-82M")  # must not raise
+
+    def snapshot_download(repo, cache_dir=None, allow_patterns=None):
+        fake_repo(hf_cache, repo)
+
+    fake_hub(monkeypatch, snapshot_download)
+    assert asyncio.run(models.ModelManager().download("kokoro", lambda *a: None)) is True
+
+
+@pytest.fixture
+def real_probe(monkeypatch):
+    """The real huggingface_hub probe, with its per-directory memo emptied.
+
+    Skipped where huggingface_hub isn't installed (the CI contract is numpy +
+    soundfile + dbus-next + pytest); on a dev box it pins the behavior the fix
+    actually depends on."""
+    fd = pytest.importorskip("huggingface_hub.file_download")
+    monkeypatch.setattr(fd, "_are_symlinks_supported_in_dir", {})
+    return fd
+
+
+# hub warns (once per directory) that it is falling back; that IS the branch
+# under test, so it's expected output rather than suite noise
+@pytest.mark.filterwarnings("ignore::UserWarning")
+def test_a_box_without_the_privilege_settles_to_no_symlinks(monkeypatch, hf_cache, real_probe):
+    """WinError 1314 is a bare OSError, which is what the trial symlink raises
+    on a Windows box with neither Developer Mode nor admin."""
+    import os as _os
+
+    def denied(_src, _dst, **_kw):
+        raise OSError(13, "A required privilege is not held by the client", None, 1314)
+
+    monkeypatch.setattr(_os, "symlink", denied)
+    monkeypatch.setattr(models, "_hf_cache", lambda: hf_cache)
+
+    models._settle_symlink_probe("funasr/campplus")
+
+    memo = real_probe._are_symlinks_supported_in_dir
+    assert list(memo.values()) == [False]
+    # settled, not merely seeded: the value cannot flip under the file workers
+    models._settle_symlink_probe("funasr/campplus")
+    assert list(memo.values()) == [False]
+
+
+def test_a_developer_mode_box_keeps_native_symlinks(monkeypatch, hf_cache, real_probe):
+    """The probe answers itself — where symlinks work the cache keeps hub's
+    native layout (dedup across revisions), the fix only removes the race."""
+    import os as _os
+
+    monkeypatch.setattr(_os, "symlink", lambda src, dst, **kw: open(dst, "w").close())
+
+    models._settle_symlink_probe("funasr/campplus", hf_cache)
+    assert list(real_probe._are_symlinks_supported_in_dir.values()) == [True]
 
 
 def test_download_refuses_unknown_ids_and_repeat_requests():
@@ -762,6 +900,7 @@ def test_download_uses_the_real_metadata_total(monkeypatch, hf_cache):
         snapshot_download=snapshot_download,
         HfApi=type("A", (), {"model_info": lambda self, r, files_metadata=False:
                              types.SimpleNamespace(siblings=[FakeSibling("m.bin", 200)])})))
+    fake_symlink_probe(monkeypatch, lambda _d: True)
     events = []
 
     def on_progress(*a):
@@ -788,6 +927,7 @@ def test_download_finalizing_when_bytes_reach_the_total(monkeypatch, hf_cache):
         snapshot_download=snapshot_download,
         HfApi=type("A", (), {"model_info": lambda self, r, files_metadata=False:
                              types.SimpleNamespace(siblings=[FakeSibling("m.bin", 50)])})))
+    fake_symlink_probe(monkeypatch, lambda _d: True)
 
     events = []
 
@@ -815,6 +955,7 @@ def test_download_falls_back_to_size_mb_when_metadata_fails(monkeypatch, hf_cach
 
     monkeypatch.setitem(sys.modules, "huggingface_hub", types.SimpleNamespace(
         snapshot_download=snapshot_download, HfApi=BoomApi))
+    fake_symlink_probe(monkeypatch, lambda _d: True)
     events = []
     ok = asyncio.run(models.ModelManager().download("kokoro", lambda *a: events.append(a)))
     assert ok is True
