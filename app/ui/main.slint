@@ -198,6 +198,61 @@ component IconBtn inherits Rectangle {
     ]
 }
 
+// --- ⧉ copy-to-clipboard button (every ⚠ error banner) ---
+//
+// "Every error message should be copy-able" — and slint's Text is not
+// selectable, so the user's only route to an error they cannot retype is this
+// button. The mechanism is a hidden read-only TextInput mirroring the message:
+// TextInput is slint's only clipboard access, so copying means owning a
+// selection. Three banners open-coded this; the VC-install failure (whose
+// detail carries a reason AND a log path, the least retypable error we have)
+// made it four, so it is a component now and the four cannot drift apart.
+//
+// Sized to the 10px type the banners use so dropping one beside a message
+// never reflows the line it sits on.
+component CopyBtn inherits Rectangle {
+    in property <string> text;              // the full, UN-elided message
+    in property <string> tip: "Copy to clipboard";
+    property <bool> win95: Theme.name == "win95";
+    width: 18px; height: 16px;
+    border-radius: Theme.rad;
+    background: cta.has-hover ? Theme.acc-soft : transparent;
+    // 1px and fully transparent: this exists to hold a selection, not to be
+    // seen — and at zero opacity it cannot flash a caret over the banner
+    cti := TextInput { text: root.text; read-only: true; opacity: 0; width: 1px; height: 1px; }
+    cta := TouchArea { clicked => { cti.select-all(); cti.copy(); } }
+    Text {
+        text: "⧉"; font-size: 10px; color: Theme.dim;
+        horizontal-alignment: center; vertical-alignment: center;
+    }
+    // tooltip — right-aligned above, same delay/fade as TBtn and IconBtn. The
+    // x/y bindings keep it out of the button's layout info so the tip's width
+    // can never widen the 18px button and shove the error text over.
+    tipbox := Rectangle {
+        x: root.width - self.width;
+        y: -self.height - 5px;
+        height: 20px;
+        width: ctl.preferred-width + 14px;
+        opacity: 0;
+        background: win95 ? #ffffe1 : #10151be6;
+        border-width: 1px; border-color: win95 ? #000000 : #ffffff33;
+        border-radius: win95 ? 0px : 4px;
+        ctl := Text {
+            x: 7px; height: 100%;
+            text: tip; font-size: 10px; font-family: Theme.font;
+            color: win95 ? #000000 : #ffffff;
+            vertical-alignment: center;
+        }
+    }
+    states [
+        tip-shown when cta.has-hover && tip != "" : {
+            tipbox.opacity: 1;
+            in { animate tipbox.opacity { duration: 100ms; delay: 1200ms; } }
+            out { animate tipbox.opacity { duration: 80ms; } }
+        }
+    ]
+}
+
 component VoiceCard inherits Rectangle {
     in property <VoiceItem> v;
     in property <string> selected;
@@ -1477,15 +1532,7 @@ export component AppWindow inherits Window {
                                             overflow: elide; preferred-width: 0px;
                                             horizontal-stretch: 1; vertical-alignment: center;
                                         }
-                                        Rectangle {
-                                            width: 18px; height: 16px; border-radius: Theme.rad;
-                                            background: gecta.has-hover ? Theme.acc-soft : transparent;
-                                            // hidden mirror input: TextInput is slint's only
-                                            // clipboard access, so copy = select-all on this
-                                            gecti := TextInput { text: gen-error; read-only: true; opacity: 0; width: 1px; height: 1px; }
-                                            gecta := TouchArea { clicked => { gecti.select-all(); gecti.copy(); } }
-                                            Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
-                                        }
+                                        CopyBtn { text: gen-error; }
                                     }
                                     // language / engine / effects (Voicebox dropdown row; opens upward)
                                     HorizontalLayout {
@@ -2329,13 +2376,7 @@ export component AppWindow inherits Window {
                                     overflow: elide; preferred-width: 0px;
                                     horizontal-stretch: 1; vertical-alignment: center;
                                 }
-                                Rectangle {
-                                    width: 18px; height: 16px; border-radius: Theme.rad;
-                                    background: vecta.has-hover ? Theme.acc-soft : transparent;
-                                    vecti := TextInput { text: vc-error; read-only: true; opacity: 0; width: 1px; height: 1px; }
-                                    vecta := TouchArea { clicked => { vecti.select-all(); vecti.copy(); } }
-                                    Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
-                                }
+                                CopyBtn { text: vc-error; }
                             }
                             // the same bottom player the TTS and Library views show —
                             // appears live the moment a finished conversion auto-plays
@@ -3082,10 +3123,23 @@ export component AppWindow inherits Window {
                                 if sec.cat == "vc" : VerticalLayout {
                                     spacing: 8px;
                                     // a failed (or refused) engine install — the
-                                    // detail carries the reason and the log path
-                                    if vc-install-error != "" : Text {
-                                        text: "⚠ " + vc-install-error;
-                                        font-size: 10px; color: #d9922b; wrap: word-wrap;
+                                    // detail carries the reason and the log path.
+                                    // Unlike the other banners this one WRAPS
+                                    // rather than elides (the log path is the
+                                    // actionable half and must stay readable),
+                                    // so the ⧉ is pinned to the first line
+                                    // instead of centred on a growing block.
+                                    if vc-install-error != "" : HorizontalLayout {
+                                        spacing: 6px;
+                                        Text {
+                                            text: "⚠ " + vc-install-error;
+                                            font-size: 10px; color: #d9922b; wrap: word-wrap;
+                                            horizontal-stretch: 1; preferred-width: 0px;
+                                        }
+                                        VerticalLayout {
+                                            alignment: start;
+                                            CopyBtn { text: vc-install-error; }
+                                        }
                                     }
                                     for m in vc-conv-models : ModelRow {
                                         m: m; selectable: false;
@@ -3378,15 +3432,11 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center; overflow: elide;
                                 horizontal-stretch: 1; preferred-width: 0px;
                             }
+                            // the footer row is 56px tall, so the button is hand-
+                            // centered in a full-height slot rather than stretched
                             Rectangle {
                                 width: 18px; height: 100%;
-                                cvecti := TextInput { text: cv-error; read-only: true; opacity: 0; width: 1px; height: 1px; }
-                                Rectangle {
-                                    width: 18px; height: 16px; y: parent.height / 2 - 8px; border-radius: Theme.rad;
-                                    background: cvecta.has-hover ? Theme.acc-soft : transparent;
-                                    cvecta := TouchArea { clicked => { cvecti.select-all(); cvecti.copy(); } }
-                                    Text { text: "⧉"; font-size: 10px; color: Theme.dim; horizontal-alignment: center; vertical-alignment: center; }
-                                }
+                                CopyBtn { y: parent.height / 2 - self.height / 2; text: cv-error; }
                             }
                         }
                         if cv-error == "" : Rectangle { horizontal-stretch: 1; }
