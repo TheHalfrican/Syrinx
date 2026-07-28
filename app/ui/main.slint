@@ -916,6 +916,9 @@ export component AppWindow inherits Window {
     in property <[string]> vc-voice-names: []; // cloned profiles with samples
     in-out property <int> vc-voice-index: 0;
     // conversion models — ids resolved in Rust (VC_ENGINE_IDS / VC_MUSIC_ENGINE_IDS)
+    // engines that still need their one-time install, already phrased in Rust
+    // ("Seed-VC and Vevo"); "" = nothing missing, notice stays out of the view
+    in property <string> vc-engines-missing: "";
     in property <[string]> vc-engine-names: ["Chatterbox VC", "Seed-VC", "Vevo-Timbre"];
     in-out property <int> vc-engine-index: 0;
     in-out property <string> vc-mode: "speech";  // "speech" | "music"
@@ -2014,6 +2017,48 @@ export component AppWindow inherits Window {
                         }
                     }
 
+                    // ---- ⇄ engines not installed yet: an invitation, not an error ----
+                    // Chatterbox-VC ships with the engine, so the view below always
+                    // converts — this only advertises the optional engines and the
+                    // one-time install that unlocks them. Accent border + accent
+                    // glyph, deliberately NOT the amber ⚠ treatment the failure
+                    // banners use. The `if` keeps it out of the layout entirely
+                    // once the installs are done (refresh_models clears the string).
+                    if tab == "vc" && vc-engines-missing != "" : HorizontalLayout {
+                        padding-left: 22px; padding-right: 22px; padding-bottom: 12px;
+                        Rectangle {
+                            height: 44px;
+                            border-width: Theme.name == "win95" ? 0px : 1px;
+                            border-color: Theme.acc;
+                            border-radius: Theme.rad;
+                            background: Theme.card-bg;
+                            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                            HorizontalLayout {
+                                padding-left: 12px; padding-right: 12px; spacing: 10px;
+                                // the Models nav glyph — says where to go before the text does
+                                Text {
+                                    text: "◈"; font-size: 14px; color: Theme.acc;
+                                    vertical-alignment: center;
+                                }
+                                Text {
+                                    text: "More conversion engines are available: " + vc-engines-missing
+                                        + " — one-time install in Models.";
+                                    font-size: 11.5px; color: Theme.fg;
+                                    vertical-alignment: center; overflow: elide;
+                                    preferred-width: 0px; horizontal-stretch: 1;
+                                }
+                                VerticalLayout {
+                                    alignment: center;
+                                    TBtn {
+                                        label: "Open Models";
+                                        tip: "Install the remaining conversion engines";
+                                        // same pair the ◈ nav icon fires
+                                        clicked => { tab = "models"; root.models-open(); }
+                                    }
+                                }
+                            }
+                        }
+                    }
                     // ---- Voice Changer (style-preserved voice conversion) ----
                     if tab == "vc" : HorizontalLayout {
                         padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 14px;

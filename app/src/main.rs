@@ -1753,6 +1753,41 @@ fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, 
     (voice, stt, llm, vc)
 }
 
+/// The conversion engines that still need their one-time local install, as a
+/// human phrase for the ⇄ Voice Converter notice ("" = nothing missing).
+///
+/// Keyed by *setup* id rather than by row: Vevo ships as two catalog entries
+/// (timbre + singing) sharing one install, so it must be named once. Rows with
+/// no setup id (Chatterbox-VC, bundled) never count — the view always works.
+fn missing_vc_engines(vc: &[ModelItem]) -> String {
+    let mut seen: Vec<&str> = Vec::new();
+    let mut names: Vec<String> = Vec::new();
+    for m in vc.iter().filter(|m| m.needs_setup) {
+        let id = m.setup_id.as_str();
+        if id.is_empty() || seen.contains(&id) {
+            continue;
+        }
+        seen.push(id);
+        names.push(
+            match id {
+                // Seed-VC is the pick of the bunch — say so, but only here,
+                // where it is actually one of the things left to install
+                "seedvc" => "Seed-VC (recommended)",
+                "vevo" => "Vevo",
+                // a future engine we have no short name for — the row's own
+                // label beats printing a raw setup id at the user
+                _ => m.display.as_str(),
+            }
+            .to_string(),
+        );
+    }
+    match names.split_last() {
+        None => String::new(),
+        Some((last, [])) => last.clone(),
+        Some((last, head)) => format!("{} and {last}", head.join(", ")),
+    }
+}
+
 /// One-line hardware summary for the Models header.
 fn hardware_line(json: &str) -> String {
     let h: serde_json::Value = serde_json::from_str(json).unwrap_or_default();
@@ -1780,6 +1815,9 @@ async fn refresh_models(
     let hw_json = proxy.hardware().await.unwrap_or_default();
     let (voice, stt, llm, vc_conv) = build_models(&models_json);
     let hwline = hardware_line(&hw_json);
+    // ⇄ view notice — recomputed on every refresh, so a finished install clears
+    // it without a restart (refresh_models runs when an install completes)
+    let vc_missing = missing_vc_engines(&vc_conv);
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(&models_json).unwrap_or_default();
     let mut models: Vec<(String, String)> = Vec::new(); // (model id, engine)
@@ -1808,6 +1846,7 @@ async fn refresh_models(
         ui.set_stt_models(ModelRc::from(Rc::new(VecModel::from(stt))));
         ui.set_llm_models(ModelRc::from(Rc::new(VecModel::from(llm))));
         ui.set_vc_conv_models(ModelRc::from(Rc::new(VecModel::from(vc_conv))));
+        ui.set_vc_engines_missing(vc_missing.into());
         ui.set_hardware_line(hwline.into());
         ui.set_composer_engines(ModelRc::from(Rc::new(VecModel::from(eng_names))));
         ui.set_composer_engine_index(active_idx);
@@ -5534,6 +5573,78 @@ mod tests {
         let (voice, ..) = build_models(json);
         assert!(!voice[0].needs_setup);
         assert_eq!(voice[0].setup_id, "");
+    }
+
+    // --- missing_vc_engines (⇄ view notice) -------------------------------
+
+    /// The four real VC catalog rows, with the two installable ones toggled.
+    fn vc_catalog(seedvc_missing: bool, vevo_missing: bool) -> Vec<ModelItem> {
+        let json = format!(
+            r#"[
+            {{"id": "chatterbox-vc", "display": "Chatterbox VC", "category": "vc",
+             "needs_setup": false, "setup_id": ""}},
+            {{"id": "seed-vc", "display": "Seed-VC", "category": "vc",
+             "needs_setup": {seedvc_missing}, "setup_id": "seedvc"}},
+            {{"id": "vevo-timbre", "display": "Vevo-Timbre", "category": "vc",
+             "needs_setup": {vevo_missing}, "setup_id": "vevo"}},
+            {{"id": "vevo2-singing", "display": "Vevo2 (singing)", "category": "vc",
+             "needs_setup": {vevo_missing}, "setup_id": "vevo"}}
+        ]"#
+        );
+        let (.., vc) = build_models(&json);
+        vc
+    }
+
+    #[test]
+    fn missing_vc_engines_is_empty_when_everything_is_installed() {
+        assert_eq!(missing_vc_engines(&vc_catalog(false, false)), "");
+        assert_eq!(missing_vc_engines(&[]), "");
+    }
+
+    #[test]
+    fn missing_vc_engines_names_one_engine() {
+        assert_eq!(
+            missing_vc_engines(&vc_catalog(true, false)),
+            "Seed-VC (recommended)"
+        );
+        // nothing to recommend when Seed-VC is already installed
+        assert_eq!(missing_vc_engines(&vc_catalog(false, true)), "Vevo");
+    }
+
+    #[test]
+    fn missing_vc_engines_joins_both() {
+        assert_eq!(
+            missing_vc_engines(&vc_catalog(true, true)),
+            "Seed-VC (recommended) and Vevo"
+        );
+    }
+
+    #[test]
+    fn missing_vc_engines_dedupes_the_two_vevo_rows() {
+        // vevo-timbre and vevo2-singing share setup_id "vevo" — one install,
+        // so the notice must say "Vevo" once, not twice
+        let both_vevo = missing_vc_engines(&vc_catalog(false, true));
+        assert_eq!(both_vevo.matches("Vevo").count(), 1);
+        assert!(!both_vevo.contains("and"));
+    }
+
+    #[test]
+    fn missing_vc_engines_ignores_rows_with_no_setup() {
+        // Chatterbox-VC is bundled: even a stray needs_setup can't name a row
+        // that has no install to run
+        let json = r#"[{"id": "chatterbox-vc", "display": "Chatterbox VC", "category": "vc",
+                        "needs_setup": true, "setup_id": ""}]"#;
+        let (.., vc) = build_models(json);
+        assert_eq!(missing_vc_engines(&vc), "");
+    }
+
+    #[test]
+    fn missing_vc_engines_falls_back_to_the_row_label() {
+        // an engine added after this build ships an id we have no phrase for
+        let json = r#"[{"id": "future-vc", "display": "Future VC", "category": "vc",
+                        "needs_setup": true, "setup_id": "futurevc"}]"#;
+        let (.., vc) = build_models(json);
+        assert_eq!(missing_vc_engines(&vc), "Future VC");
     }
 
     #[test]
