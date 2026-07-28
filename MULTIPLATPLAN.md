@@ -721,6 +721,34 @@ gotcha earned: `Die` ends in `Read-Host`, so a failed firstrun launched
 hidden/headless hangs forever on the prompt — kill by PID; also quote
 the `-File` path (this user dir has spaces).
 
+**2026-07-28 (later) — Vevo on-demand install exercised for the first
+time on an INSTALLED (non-checkout) Windows box; four gaps found, one
+workaround deployed.** (1) The install tree ships neither setup-*.ps1
+script (engine/ = .venv + wheels only) — the checkout's copy was used;
+the installer should ship both scripts (they're installers, not GPL/NC
+payloads, so the license boundary is untouched). (2) The Models-view
+warning and vevo.py's not-installed error hardcode "run
+engine/setup-vevo.sh" on every platform (test_models.py pins the
+string) — should say .ps1 on win32. (3) MAX_PATH, again: on the
+installed layout `_ENGINE_DIR` resolves to `.venv\Lib\site-packages`,
+and building `.venv-vevo` there overflows MAX_PATH — torch's dist-info
+ships a ~160-char licenses tree (`third_party/kineto/…/DCGM/testing/
+python3/libs_3rdparty/colorama`), pip dies with WinError 206 at ~250
+chars. Workaround: build the venv at the SHORT path
+`%LOCALAPPDATA%\syrinx\syrinx\vevo\.venv-vevo` (setup-vevo.ps1 copied
+there — $PSScriptRoot puts the venv beside it; Amphion default already
+lands in that dir) and JUNCTION it into site-packages. Runtime is safe
+through the junction (worker python + torch DLL paths stay well under
+260; only pip-install-time license paths explode), verified: torch
+imports via the junction, `_vc_setup_warning("vevo-timbre")` == "".
+Real fix candidate: default the vevo/seedvc venvs to the data dir on
+win32 (kills the MAX_PATH nesting AND survives reinstalls). (4) This
+box had no venv-capable python: PATH python is the Store stub, the
+bundled embeddable python has no venv module — winget
+`Python.Python.3.12` per-user + `SYRINX_VEVO_PYTHON` override. Not yet
+proven: an actual conversion (checkpoints auto-download at first ⇄
+run; CPU box, expect slow — 76 s on the 4090 incl. weights).
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
