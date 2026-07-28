@@ -699,6 +699,28 @@ NSIS pack + silent-install smoke (installed embedded python imports
 (SyrinxSetup-x64 ~35 MB; unpacked bundle for no-rebuild debugging).
 Every item on the Windows campaign list is now closed.
 
+**2026-07-28 — the end-user install path is PROVEN on a clean CPU box
+(and the firstrun script had a splat bug the CI smoke couldn't see).**
+The CI-built SyrinxSetup-x64.exe (run 30295591666) installed fine, but
+`syrinx-firstrun.ps1 -Cpu` died in the ML-stack step with pip
+`ERROR: Invalid requirement: ':'`. Root cause is a two-layer PowerShell
+gotcha (both editions): in the bundled-wheel branch `$mlSpec` was
+assigned from an `if` that yields a single string, and splatting a
+SCALAR string against a native command enumerates it char-by-char —
+pip received ~100 one-character args and died on the drive colon. The
+obvious fix (`@()` INSIDE the branch) does nothing: statement output
+rides the pipeline, which unrolls a one-element array back to a scalar
+at assignment. The `@()` must wrap the whole `if` (`9d4898a`),
+argv-echo-verified — pip now gets exactly `['<wheel>[qwen]',
+'numba>=0.60']`. CI never caught this because its silent-install smoke
+is deliberately torch-free; the wheel branch of the ML pip step first
+ran live here. Rerun green end to end on the CPU-only box: full ML
+stack installed (kokoro, faster-whisper, qwen-tts, numba), import
+proof `torch 2.13.0+cpu | cuda False`, "Syrinx is ready". Operational
+gotcha earned: `Die` ends in `Read-Host`, so a failed firstrun launched
+hidden/headless hangs forever on the prompt — kill by PID; also quote
+the `-File` path (this user dir has spaces).
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
