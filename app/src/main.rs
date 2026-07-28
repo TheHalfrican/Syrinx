@@ -61,7 +61,6 @@ enum Cmd {
     ModelsLoad,
     DownloadModel { id: String },
     DeleteModel { id: String },
-    ActivateModel { id: String },
     InstallVc { setup_id: String },
     CancelVc { setup_id: String },
     // Voicebox-style composer / cards / player
@@ -69,6 +68,11 @@ enum Cmd {
     SelectVoice { id: String },
     PickLanguage { voice: String, index: usize },
     PickEngine { voice: String, index: usize },
+    // The other two category pickers. They live where the category is used —
+    // whisper in the Transcription view, the LLM in Settings — and both funnel
+    // into the same SetActiveModel the composer's picker uses.
+    PickSttModel { index: usize },
+    PickLlmModel { index: usize },
     ToggleLoop { on: bool },
     SetVol { v: f64 },
     PickEffect { index: usize },
@@ -96,6 +100,9 @@ enum Cmd {
     VcToggleRecord { system: bool },
     VcPickFile,
     VcConvert { index: usize, engine_index: usize, label: String, transcript: String, mode: String, semitones: i32 },
+    /// The user accepted Vevo2's whisper-medium download in the consent
+    /// dialog — remember it and replay the conversion that raised it.
+    Vevo2Ack,
     VcSuggestPitch { index: usize },
     VcSaveClip { name: String, transcript: String, kind: String },
     VcDeleteClip { id: String },
@@ -164,6 +171,12 @@ struct AppConfig {
     /// on Linux, where native scaling is left completely untouched.
     #[serde(default)]
     ui_scale: f32,
+    /// One-shot consent for Vevo2's whisper-medium content encoder (~1.5 GB).
+    /// It lives inside Amphion's own cache rather than the Models catalog, so
+    /// no Download button can ever cover it — this dialog is the only place the
+    /// user gets to spend that disk on purpose. Sticky once accepted.
+    #[serde(default)]
+    vevo2_whisper_ack: bool,
 }
 
 // hand-rolled (not derived) so `stop_engine_on_quit` is true with no file at
@@ -178,6 +191,7 @@ impl Default for AppConfig {
             export_dir: String::new(),
             stop_engine_on_quit: true,
             ui_scale: 0.0,
+            vevo2_whisper_ack: false,
         }
     }
 }
@@ -549,7 +563,7 @@ fn main() -> anyhow::Result<()> {
     }
     {
         let tx = tx.clone();
-        ui.on_activate_model(move |id| { let _ = tx.send(Cmd::ActivateModel { id: id.to_string() }); });
+        ui.on_vevo2_ack(move || { let _ = tx.send(Cmd::Vevo2Ack); });
     }
     {
         let tx = tx.clone();
@@ -753,6 +767,20 @@ fn main() -> anyhow::Result<()> {
                 voice: ui.get_selected_voice().to_string(),
                 index: i as usize,
             });
+        });
+    }
+    // The STT and LLM pickers — same dropdown-Cmd shape, one per category, each
+    // living in the view that uses it (Transcription / Settings).
+    {
+        let tx = tx.clone();
+        ui.on_pick_stt_model(move |i| {
+            let _ = tx.send(Cmd::PickSttModel { index: i.max(0) as usize });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_pick_llm_model(move |i| {
+            let _ = tx.send(Cmd::PickLlmModel { index: i.max(0) as usize });
         });
     }
     {
@@ -1673,10 +1701,41 @@ fn st_to_semitone_index(st: i32) -> i32 {
     st.clamp(-VC_SEMITONE_LIMIT, VC_SEMITONE_LIMIT) + VC_SEMITONE_LIMIT
 }
 
-/// Conversion-model ids, index-aligned with the vc-engine-names dropdown.
-const VC_ENGINE_IDS: &[&str] = &["chatterbox_vc", "seed_vc", "vevo_timbre"];
-/// Music-mode ids, index-aligned with vc-music-engine-names (singing-capable).
-const VC_MUSIC_ENGINE_IDS: &[&str] = &["seed_vc", "vevo_timbre"];
+/// The ⇄ speech dropdown, in order: (conversion engine, the catalog row that
+/// engine loads in that mode). Mirrors the engine's `models.VC_ROW_FOR` — the
+/// dropdown had hardcoded labels before, which is how vevo2-singing's row state
+/// ended up consulted by nothing at all. Cross-tested against the engine map.
+const VC_SPEECH_ROWS: &[(&str, &str)] = &[
+    ("chatterbox_vc", "chatterbox-vc"),
+    ("seed_vc", "seed-vc"),
+    ("vevo_timbre", "vevo-timbre"),
+];
+/// The ⇄ music dropdown (singing-capable engines only). `vevo_timbre` loads a
+/// DIFFERENT row here — that asymmetry is the whole reason this is a table of
+/// pairs rather than a list of engine ids.
+const VC_MUSIC_ROWS: &[(&str, &str)] = &[("seed_vc", "seed-vc"), ("vevo_timbre", "vevo2-singing")];
+
+/// Labels for one ⇄ engine dropdown, read off the real catalog rows so an
+/// engine that isn't installed or downloaded says so in the picker instead of
+/// failing at Convert time (requirement 7: unready models stay visible).
+/// A pair with no catalog row falls back to its engine id — a picker slot that
+/// silently vanished would shift every index below it.
+fn vc_row_labels(vc: &[ModelItem], pairs: &[(&str, &str)]) -> Vec<SharedString> {
+    pairs
+        .iter()
+        .map(|(engine, row)| {
+            match vc.iter().find(|m| m.id == *row) {
+                Some(m) => format!(
+                    "{}{}",
+                    m.display,
+                    readiness_suffix(m.downloaded, m.needs_setup)
+                )
+                .into(),
+                None => SharedString::from(*engine),
+            }
+        })
+        .collect()
+}
 
 fn build_history(json: &str) -> Vec<HistItem> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
@@ -1718,6 +1777,128 @@ fn size_label(mb: i64) -> String {
     }
 }
 
+// --- model selection: one authority per category ---------------------------
+//
+// The Models tab is an INVENTORY (install engines, download and delete
+// weights). What actually runs is chosen where it is used: the composer's model
+// dropdown for speech, the Transcription view's picker for whisper, Settings
+// for the LLM. Everything below serves that rule.
+
+/// One catalog row, in the shape the pickers need. Named for its first user —
+/// the composer's voice-model dropdown — but the STT and LLM pickers are built
+/// from the same five fields.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct VoiceRow {
+    id: String,
+    engine: String,
+    display: String,
+    downloaded: bool,
+    /// the engine behind this row still needs its one-time local install
+    needs_setup: bool,
+}
+
+/// The engines that can speak a CLONED voice.
+///
+/// Mirrors the engine's `tts.CLONING_ENGINES` exactly; the Python suite pins
+/// the same five names, so a new cloning engine that lands on one side and not
+/// the other fails a test rather than quietly disappearing from the composer.
+const CLONING_ENGINES: &[&str] = &["qwen", "luxtts", "chatterbox", "chatterbox_turbo", "tada"];
+
+fn is_cloning_engine(engine: &str) -> bool {
+    CLONING_ENGINES.contains(&engine)
+}
+
+/// Can this row run right now? The load-bearing definition: weights on disk AND
+/// the engine installed. LuxTTS made the second half real — it can be fully
+/// downloaded and still not run until its venv exists.
+fn row_ready(downloaded: bool, needs_setup: bool) -> bool {
+    downloaded && !needs_setup
+}
+
+/// The honest tail on a picker label; "" when the row is ready to run.
+///
+/// `needs_setup` wins over `not downloaded`: weights are useless without the
+/// engine, so the install is the one next step worth naming.
+fn readiness_suffix(downloaded: bool, needs_setup: bool) -> &'static str {
+    if needs_setup {
+        " — needs setup"
+    } else if !downloaded {
+        " — not downloaded"
+    } else {
+        ""
+    }
+}
+
+/// A picker entry: the catalog display plus what is missing, if anything.
+fn option_label(r: &VoiceRow) -> String {
+    format!("{}{}", r.display, readiness_suffix(r.downloaded, r.needs_setup))
+}
+
+/// The row that best represents `engine` — a downloaded one if there is one,
+/// else the engine's first row.
+///
+/// The preference matters. The engine's own `require_weights` resolves a
+/// sizeless request to the catalog's FIRST row, so a CustomVoice user who
+/// downloaded only 0.6B would otherwise be shown "Qwen CustomVoice 1.7B" and
+/// coachmarked onto a row they have no reason to fetch. Where something IS on
+/// disk, that is the row the user means.
+fn engine_row<'a>(rows: &'a [VoiceRow], engine: &str) -> Option<&'a VoiceRow> {
+    rows.iter()
+        .find(|r| r.engine == engine && r.downloaded)
+        .or_else(|| rows.iter().find(|r| r.engine == engine))
+}
+
+/// The rows the composer's model dropdown may offer for the selected voice.
+///
+/// `locked` = the one engine this voice can ever speak on (Kokoro presets,
+/// preset profiles): the dropdown is replaced by a read-only field, so it has
+/// nothing to offer. Everything else is a cloned profile, and a cloned profile
+/// may only be offered engines that can clone — picking Kokoro for one used to
+/// crash generation.
+fn composer_options(rows: &[VoiceRow], locked: Option<&str>) -> Vec<VoiceRow> {
+    if locked.is_some() {
+        return Vec::new();
+    }
+    rows.iter().filter(|r| is_cloning_engine(&r.engine)).cloned().collect()
+}
+
+/// Which option the composer lands on when a voice is selected.
+///
+/// The authorities, strongest first:
+///  1. what the user picked for THIS voice in THIS session — an explicit
+///     choice, honored even if the weights aren't there (the label says so and
+///     Generate raises the notice);
+///  2. the profile's `default_engine` SEED, preferring the engine's active
+///     model when it belongs to that engine, else that engine's first ready
+///     row. A pin whose engine has nothing runnable falls through rather than
+///     parking the dropdown on weights nobody has;
+///  3. the engine's active voice model;
+///  4. the first row that can actually run.
+fn seed_index(opts: &[VoiceRow], session: Option<&str>, pin: &str, active_id: &str) -> i32 {
+    let pos = |id: &str| opts.iter().position(|r| r.id == id);
+    let ready_pos = |id: &str| pos(id).filter(|i| row_ready(opts[*i].downloaded, opts[*i].needs_setup));
+    if let Some(i) = session.and_then(pos) {
+        return i as i32;
+    }
+    if !pin.is_empty() {
+        if let Some(i) = ready_pos(active_id).filter(|i| opts[*i].engine == pin) {
+            return i as i32;
+        }
+        if let Some(i) = opts
+            .iter()
+            .position(|r| r.engine == pin && row_ready(r.downloaded, r.needs_setup))
+        {
+            return i as i32;
+        }
+    }
+    if let Some(i) = ready_pos(active_id) {
+        return i as i32;
+    }
+    opts.iter()
+        .position(|r| row_ready(r.downloaded, r.needs_setup))
+        .unwrap_or(0) as i32
+}
+
 /// Build the three category model lists from the engine's ListModels JSON.
 fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>) {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
@@ -1726,6 +1907,14 @@ fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, 
         let s = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         let b = |k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
         let mb = m.get("size_mb").and_then(|v| v.as_i64()).unwrap_or(0);
+        let category = m.get("category").and_then(|v| v.as_str()).unwrap_or("");
+        // "IN USE" on a voice row means "this is what a cloned voice speaks
+        // on". models.json ships with `{"voice": "kokoro"}` as its factory
+        // default, and Kokoro cannot clone anything — so that stale value must
+        // not light a chip. Non-cloning voice engines simply have no IN USE
+        // state to show; the other categories keep theirs verbatim.
+        let active = b("active")
+            && (category != "voice" || is_cloning_engine(m.get("engine").and_then(|v| v.as_str()).unwrap_or("")));
         let item = ModelItem {
             id: s("id").into(),
             display: s("display").into(),
@@ -1733,7 +1922,7 @@ fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, 
             description: s("description").into(),
             downloaded: b("downloaded"),
             downloading: b("downloading"),
-            active: b("active"),
+            active,
             supported: b("supported"),
             warning: s("warning").into(),
             progress: 0.0,
@@ -1742,7 +1931,7 @@ fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, 
             needs_setup: b("needs_setup"),
             setup_id: s("setup_id").into(),
         };
-        match m.get("category").and_then(|v| v.as_str()).unwrap_or("") {
+        match category {
             "voice" => voice.push(item),
             "stt" => stt.push(item),
             "llm" => llm.push(item),
@@ -1803,14 +1992,48 @@ fn hardware_line(json: &str) -> String {
     format!("{cores} cores · {ram:.1} GB RAM · {gpu_part}")
 }
 
-/// Re-fetch the catalog + hardware and push into the UI. Also rebuilds the
-/// composer's engine dropdown and the modal's default-model options (usable =
-/// downloaded + supported voice models); returns (model id, engine, display)
-/// triples in dropdown order plus the active voice engine name.
-async fn refresh_models(
-    ui: &slint::Weak<AppWindow>,
-    proxy: &EngineClient,
-) -> (Vec<(String, String, String)>, String) {
+/// One catalog refresh, in the shapes the worker keeps between commands.
+struct Catalog {
+    /// every SUPPORTED voice row, downloaded or not — the pickers show unready
+    /// models with a "— not downloaded" tail rather than hiding them
+    voice: Vec<VoiceRow>,
+    stt: Vec<VoiceRow>,
+    llm: Vec<VoiceRow>,
+    /// the ⇄ conversion rows, for Convert's readiness pre-check
+    vc: Vec<ModelItem>,
+    /// the engine's active model id per category ("" = none recorded)
+    active_voice: String,
+    active_stt: String,
+    active_llm: String,
+}
+
+/// SetActiveModel — the one call that changes what a category runs on.
+///
+/// Every picker funnels through here: the composer's model dropdown, the
+/// Transcription view's whisper picker, Settings' LLM picker. Nothing else in
+/// the app calls `set_active_model` any more, which is the whole point — there
+/// used to be three authorities and they disagreed.
+async fn apply_active_model(proxy: &EngineClient, id: &str) {
+    if let Err(e) = proxy.set_active_model(id).await {
+        tracing::error!("set_active_model failed: {id}: {e}");
+    }
+}
+
+/// Where a category picker lands with no per-voice seed to honor: the active
+/// model if it can run, else the first row that can.
+fn picker_index(rows: &[VoiceRow], active_id: &str) -> i32 {
+    seed_index(rows, None, "", active_id)
+}
+
+/// Re-fetch the catalog + hardware and push into the UI: the four Models-tab
+/// lists, the ⇄ engine labels, the STT and LLM pickers, and the create-voice
+/// modal's seed options.
+///
+/// It deliberately does NOT touch `composer-engines` / `composer-engine-index`.
+/// Those belong to `apply_composer_engines`, which knows which voice is
+/// selected; two writers racing over the composer's dropdown is exactly the bug
+/// this redesign removes.
+async fn refresh_models(ui: &slint::Weak<AppWindow>, proxy: &EngineClient) -> Catalog {
     let models_json = proxy.list_models().await.unwrap_or_else(|_| "[]".into());
     let hw_json = proxy.hardware().await.unwrap_or_default();
     let (voice, stt, llm, vc_conv) = build_models(&models_json);
@@ -1818,30 +2041,74 @@ async fn refresh_models(
     // ⇄ view notice — recomputed on every refresh, so a finished install clears
     // it without a restart (refresh_models runs when an install completes)
     let vc_missing = missing_vc_engines(&vc_conv);
+    // ⇄ dropdown labels, read off the real rows (VC_ROW_FOR's app-side twin)
+    let vc_speech = vc_row_labels(&vc_conv, VC_SPEECH_ROWS);
+    let vc_music = vc_row_labels(&vc_conv, VC_MUSIC_ROWS);
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(&models_json).unwrap_or_default();
-    // (model id, engine, catalog display) — the display rides along so an
-    // engine-locked voice can name its engine without a second catalog pass
-    let mut models: Vec<(String, String, String)> = Vec::new();
-    let mut eng_names: Vec<SharedString> = Vec::new();
-    let mut active_idx: i32 = 0;
-    let mut active_engine = String::from("kokoro");
+    let (mut v_rows, mut s_rows, mut l_rows) = (Vec::new(), Vec::new(), Vec::new());
+    let (mut active_voice, mut active_stt, mut active_llm) =
+        (String::new(), String::new(), String::new());
     for m in &arr {
         let s = |k: &str| m.get(k).and_then(|v| v.as_str()).unwrap_or("");
         let b = |k: &str| m.get(k).and_then(|v| v.as_bool()).unwrap_or(false);
-        if s("category") == "voice" && b("downloaded") && b("supported") {
-            if b("active") {
-                active_idx = models.len() as i32;
-                active_engine = s("engine").to_string();
+        // "engine soon" rows have no backend at all — a picker slot for one
+        // would be an offer nothing can honor, download or no download
+        if !b("supported") {
+            continue;
+        }
+        let row = VoiceRow {
+            id: s("id").to_string(),
+            engine: s("engine").to_string(),
+            display: s("display").to_string(),
+            downloaded: b("downloaded"),
+            needs_setup: b("needs_setup"),
+        };
+        match s("category") {
+            "voice" => {
+                if b("active") {
+                    active_voice = row.id.clone();
+                }
+                v_rows.push(row);
             }
-            models.push((s("id").to_string(), s("engine").to_string(), s("display").to_string()));
-            eng_names.push(s("display").into());
+            "stt" => {
+                if b("active") {
+                    active_stt = row.id.clone();
+                }
+                s_rows.push(row);
+            }
+            "llm" => {
+                if b("active") {
+                    active_llm = row.id.clone();
+                }
+                l_rows.push(row);
+            }
+            _ => {}
         }
     }
-    // modal picker: "Follow active model" + the same list
-    let cv_options: Vec<SharedString> = std::iter::once(SharedString::from("Follow active model"))
-        .chain(eng_names.iter().cloned())
+    let stt_labels: Vec<SharedString> = s_rows.iter().map(|r| option_label(r).into()).collect();
+    let llm_labels: Vec<SharedString> = l_rows.iter().map(|r| option_label(r).into()).collect();
+    let stt_idx = picker_index(&s_rows, &active_stt);
+    let llm_idx = picker_index(&l_rows, &active_llm);
+    // the ✎ Compose / Rewrite / Refine tooltips name the model they will use
+    let llm_label = l_rows
+        .get(llm_idx.max(0) as usize)
+        .map(|r| r.display.clone())
+        .unwrap_or_default();
+    // create-voice modal: the optional seed. Option 0 follows the composer;
+    // the rest are the engines a cloned voice can actually speak on.
+    let cv_options: Vec<SharedString> = std::iter::once(SharedString::from("Follow the composer"))
+        .chain(composer_options(&v_rows, None).iter().map(|r| option_label(r).into()))
         .collect();
+    let out = Catalog {
+        voice: v_rows,
+        stt: s_rows,
+        llm: l_rows,
+        vc: vc_conv.clone(),
+        active_voice,
+        active_stt,
+        active_llm,
+    };
 
     ui.upgrade_in_event_loop(move |ui| {
         ui.set_voice_models(ModelRc::from(Rc::new(VecModel::from(voice))));
@@ -1850,12 +2117,176 @@ async fn refresh_models(
         ui.set_vc_conv_models(ModelRc::from(Rc::new(VecModel::from(vc_conv))));
         ui.set_vc_engines_missing(vc_missing.into());
         ui.set_hardware_line(hwline.into());
-        ui.set_composer_engines(ModelRc::from(Rc::new(VecModel::from(eng_names))));
-        ui.set_composer_engine_index(active_idx);
+        ui.set_vc_engine_names(ModelRc::from(Rc::new(VecModel::from(vc_speech))));
+        ui.set_vc_music_engine_names(ModelRc::from(Rc::new(VecModel::from(vc_music))));
+        ui.set_stt_options(ModelRc::from(Rc::new(VecModel::from(stt_labels))));
+        ui.set_stt_index(stt_idx);
+        ui.set_llm_options(ModelRc::from(Rc::new(VecModel::from(llm_labels))));
+        ui.set_llm_index(llm_idx);
+        ui.set_llm_model_label(llm_label.into());
         ui.set_cv_model_options(ModelRc::from(Rc::new(VecModel::from(cv_options))));
     })
     .ok();
-    (models, active_engine)
+    out
+}
+
+/// What the composer ended up set to after `apply_composer_engines`.
+struct ComposerPick {
+    /// dropdown rows in order — index → model id for `Cmd::PickEngine`
+    rows: Vec<VoiceRow>,
+    /// the engine that will actually speak (the lock, else the seeded row's)
+    engine: String,
+    /// the row that will actually speak ("" = nothing to run this on)
+    model: Option<VoiceRow>,
+}
+
+/// Push the composer's model dropdown for one voice: options, selected index
+/// and the engine-locked read-only label, all in ONE event-loop closure.
+///
+/// Sole owner of those three properties. They only make sense together — an
+/// index into last voice's option list is a lie — and the old arrangement had
+/// `refresh_models` and `select-voice` both writing them, from two different
+/// threads' closures, in whatever order the loop happened to run them.
+fn apply_composer_engines(
+    ui: &slint::Weak<AppWindow>,
+    rows: &[VoiceRow],
+    voice_id: &str,
+    profile_json: &str,
+    session: Option<&str>,
+    active_id: &str,
+) -> ComposerPick {
+    let lock = locked_engine(voice_id, profile_json);
+    let opts = composer_options(rows, lock.as_deref());
+    let pin = serde_json::from_str::<serde_json::Value>(profile_json)
+        .ok()
+        .and_then(|p| p.get("default_engine").and_then(|v| v.as_str()).map(str::to_string))
+        .unwrap_or_default();
+    let idx = seed_index(&opts, session, &pin, active_id);
+    let picked = opts.get(idx.max(0) as usize).cloned();
+    // locked voices show a flat field instead of the dropdown; the row behind
+    // it is still needed, for the Generate readiness pre-check
+    let (engine, model) = match &lock {
+        Some(e) => (e.clone(), engine_row(rows, e).cloned()),
+        None => (
+            picked.as_ref().map(|r| r.engine.clone()).unwrap_or_else(|| pin.clone()),
+            picked.clone(),
+        ),
+    };
+    let lock_label = lock
+        .as_deref()
+        .map(|e| engine_label(rows, e))
+        .unwrap_or_default();
+    let labels: Vec<SharedString> = opts.iter().map(|r| option_label(r).into()).collect();
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_composer_engines(ModelRc::from(Rc::new(VecModel::from(labels))));
+        ui.set_composer_engine_index(idx);
+        ui.set_composer_engine_locked(lock_label.into());
+    })
+    .ok();
+    ComposerPick { rows: opts, engine, model }
+}
+
+/// One ⇄ conversion request, held whole so the Vevo2 consent dialog can replay
+/// the exact request it interrupted instead of asking the user to set it up
+/// again.
+#[derive(Clone)]
+struct VcRequest {
+    src: String,
+    pid: String,
+    engine: &'static str,
+    label: String,
+    transcript: String,
+    mode: String,
+    semitones: i32,
+}
+
+impl VcRequest {
+    /// Vevo2 (singing) pulls whisper-medium as its content encoder — the one
+    /// multi-GB fetch in this app that no catalog row covers.
+    fn needs_vevo2_consent(&self) -> bool {
+        self.engine == "vevo_timbre" && self.mode == "music"
+    }
+}
+
+/// Fire a ⇄ conversion and arm the view's busy state. Returns the generation
+/// id, or None when the engine refused to start one.
+async fn start_conversion(
+    ui: &slint::Weak<AppWindow>,
+    proxy: &EngineClient,
+    r: &VcRequest,
+) -> Option<u32> {
+    match proxy
+        .convert_voice(&r.src, &r.pid, r.engine, &r.label, &r.transcript, &r.mode, r.semitones)
+        .await
+    {
+        Ok(gid) if gid != 0 => {
+            ui.upgrade_in_event_loop(|ui| {
+                ui.set_vc_busy(true);
+                ui.set_vc_error("".into());
+                ui.set_vc_status("starting…".into());
+            })
+            .ok();
+            Some(gid)
+        }
+        Ok(_) => None,
+        Err(e) => {
+            tracing::error!("convert failed: {e}");
+            ui.upgrade_in_event_loop(|ui| {
+                ui.set_vc_busy(false);
+                ui.set_vc_status("engine unavailable".into());
+            })
+            .ok();
+            None
+        }
+    }
+}
+
+/// Take the composer back out of the optimistic state the ✦ click put it in
+/// (busy flags plus the "generating…" placeholder card) without a generation
+/// ever having started.
+async fn cancel_pending_generation(ui: &slint::Weak<AppWindow>, proxy: &EngineClient) {
+    let items = build_history(&proxy.list_history().await.unwrap_or_else(|_| "[]".into()));
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_generating(false);
+        ui.set_synthesizing(false);
+        ui.set_llm_busy(false);
+        set_history_model(&ui, items);
+    })
+    .ok();
+}
+
+/// Raise the "this model isn't ready" notice in one of the three views that can
+/// hit it (`where` is "tts" | "vc" | "tr"), naming the row its "Open Models →"
+/// button will coachmark.
+fn set_needs_model(ui: &slint::Weak<AppWindow>, place: &str, display: &str, id: &str) {
+    let (place, display, id) = (place.to_string(), display.to_string(), id.to_string());
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_nm_where(place.into());
+        ui.set_nm_display(display.into());
+        ui.set_nm_id(id.into());
+    })
+    .ok();
+}
+
+/// Take the notice back down — every dispatch that IS ready clears it first, so
+/// a stale one can never outlive the thing it was complaining about.
+fn clear_needs_model(ui: &slint::Weak<AppWindow>) {
+    ui.upgrade_in_event_loop(|ui| {
+        ui.set_nm_where("".into());
+        ui.set_nm_display("".into());
+        ui.set_nm_id("".into());
+    })
+    .ok();
+}
+
+/// Readiness gate for a category picker: `Ok` to dispatch, `Err(row)` to
+/// refuse and point at the row. An empty catalog passes — the engine's own
+/// `require_weights` is the authority, and refusing on an empty app-side list
+/// would break a raw-repo override the catalog never knew about.
+fn ready_or_notice<'a>(rows: &'a [VoiceRow], active_id: &str) -> Option<&'a VoiceRow> {
+    let idx = picker_index(rows, active_id);
+    rows.get(idx.max(0) as usize)
+        .filter(|r| !row_ready(r.downloaded, r.needs_setup))
 }
 
 /// Rebuild the voice-card grid from the engine (after create/edit/delete/import).
@@ -1940,9 +2371,12 @@ async fn inspect_profile(
     let row = voices_all.iter().find(|d| d.id == id);
     let gens = row.map(|d| d.gens.clone()).unwrap_or_else(|| "0".into());
     let baked = row.and_then(|d| d.baked.clone());
+    // DEFAULT MODEL, not ENGINE: this field is a seed for the composer's
+    // picker, nothing more. Unset reads as an em dash — "follows" implied a
+    // live link to an active model that no longer exists.
     let engine = {
         let e = s("default_engine");
-        if e.is_empty() { "follows".to_string() } else { e }
+        if e.is_empty() { "—".to_string() } else { e }
     };
     let (name, desc, pers, lang) = (s("name"), s("description"), s("personality"), s("language"));
     let id2 = id.to_string();
@@ -1995,9 +2429,11 @@ async fn refresh_voices_table(
                 cache, &s("avatar_path"), iv("avatar_sx"), iv("avatar_sy"),
                 iv("avatar_side"), iv("avatar_sh"),
             );
+            // see inspect_profile: the column is DEFAULT MODEL now, and unset
+            // is an em dash rather than a claim about what will speak
             let engine = {
                 let e = s("default_engine");
-                if e.is_empty() { "follows".to_string() } else { e }
+                if e.is_empty() { "—".to_string() } else { e }
             };
             Some(VpRowData {
                 id: id.clone(),
@@ -2106,18 +2542,15 @@ fn locked_engine(voice_id: &str, profile_json: &str) -> Option<String> {
 }
 
 /// Human label for an engine id: the catalog display of a voice model that
-/// runs it ("Kokoro 82M"), else the raw id — an engine whose model row isn't
-/// downloaded (or isn't in the catalog at all) still has to read as something
-/// rather than leave the composer's engine field blank.
+/// runs it ("Kokoro 82M"), else the raw id — an engine that isn't in the
+/// catalog at all still has to read as something rather than leave the
+/// composer's engine field blank.
 ///
-/// Engines with several size rows (qwen 1.7B/0.6B, …) take the first: this
-/// names the *engine*, which is what's locked — the size is a Models-tab
-/// concern and both rows say the same engine.
-fn engine_label(models: &[(String, String, String)], engine: &str) -> String {
-    models
-        .iter()
-        .find(|(_, e, _)| e == engine)
-        .map(|(_, _, d)| d.clone())
+/// Engines with several size rows (qwen 1.7B/0.6B, …) resolve through
+/// [`engine_row`], so the label names the size the user actually has.
+fn engine_label(models: &[VoiceRow], engine: &str) -> String {
+    engine_row(models, engine)
+        .map(|r| r.display.clone())
         .unwrap_or_else(|| engine.to_string())
 }
 
@@ -2448,7 +2881,7 @@ fn lib_engines_for_type(type_idx: i32) -> Vec<&'static str> {
         1 => vec!["kokoro", "qwen", "qwen_custom_voice", "luxtts",
                   "chatterbox", "chatterbox_turbo", "tada"],
         2 => vec!["chatterbox_vc", "seed_vc", "vevo_timbre"],
-        3 => VC_MUSIC_ENGINE_IDS.to_vec(),
+        3 => VC_MUSIC_ROWS.iter().map(|(e, _)| *e).collect(),
         _ => LIB_ENGINE_LABELS.iter().map(|(e, _)| *e).collect(),
     }
 }
@@ -2778,7 +3211,26 @@ async fn run_session(
     }
 
     let mut pending_llm: u32 = 0;
-    let (mut voice_models, mut active_engine) = refresh_models(&ui, &proxy).await;
+    // --- model-selection state (one authority per category) ---
+    // `voice_models`/`stt_models`/`llm_models` are the pickers' catalogs;
+    // `active_*` is what the engine currently has loaded for the category.
+    // `sel_voice`/`sel_profile_json` cache the composer's selection so any
+    // catalog rebuild can re-derive the dropdown without another GetProfile,
+    // and `session_engine` holds this session's explicit per-voice picks —
+    // never written back to the profile (requirement 3).
+    let cat0 = refresh_models(&ui, &proxy).await;
+    let mut voice_models = cat0.voice;
+    let mut stt_models = cat0.stt;
+    let mut llm_models = cat0.llm;
+    let mut vc_models = cat0.vc;
+    let mut active_voice = cat0.active_voice;
+    let mut active_stt = cat0.active_stt;
+    let mut active_llm = cat0.active_llm;
+    let mut sel_voice = String::new();
+    let mut sel_profile_json = String::new();
+    let mut session_engine: HashMap<String, String> = HashMap::new();
+    let mut composer_pick =
+        apply_composer_engines(&ui, &voice_models, "", "", None, &active_voice);
     let mut lang_codes = update_composer_langs(&ui, "kokoro", "en");
     // effects dropdown: "No effects" + engine presets (builtin + user)
     let (mut effect_ids, mut fxe_presets) = refresh_effect_presets(&ui, &proxy).await;
@@ -2824,6 +3276,8 @@ async fn run_session(
     let mut vc_voice_ids: Vec<String> = Vec::new(); // parallel to the dropdown names
     let mut pending_vc: u32 = 0;                    // in-flight conversion gen id
     let mut pending_vc_music = false;               // that conversion is a song cover
+    // the request the Vevo2 whisper-medium consent dialog interrupted
+    let mut pending_vevo2: Option<VcRequest> = None;
     // (id, name, path, cached transcript)
     let mut vc_clips_data: Vec<(String, String, String, String)> = Vec::new();
     let mut vc_audition_gen: u32 = 0;               // audition playback gen (0 = none)
@@ -2870,6 +3324,32 @@ async fn run_session(
     rec_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     let mut rec_elapsed: u32 = 0;
     const REC_MAX: u32 = 30;
+
+    // Re-fetch the catalog and re-derive everything that hangs off it. The
+    // composer's dropdown is rebuilt from the CACHED selection rather than
+    // dropped on the floor: a download finishing must not silently move which
+    // model the user is pointed at. A macro because it writes half a dozen of
+    // the worker's locals; captures them by name, like `handle_event!` below.
+    macro_rules! reload_models {
+        () => {{
+            let c = refresh_models(&ui, &proxy).await;
+            voice_models = c.voice;
+            stt_models = c.stt;
+            llm_models = c.llm;
+            vc_models = c.vc;
+            active_voice = c.active_voice;
+            active_stt = c.active_stt;
+            active_llm = c.active_llm;
+            composer_pick = apply_composer_engines(
+                &ui,
+                &voice_models,
+                &sel_voice,
+                &sel_profile_json,
+                session_engine.get(&sel_voice).map(|s| s.as_str()),
+                &active_voice,
+            );
+        }};
+    }
 
     // The one unified event stream feeds every arm the nine D-Bus signal
     // streams used to; the transport (D-Bus or RPC) is invisible here. The
@@ -3006,9 +3486,12 @@ async fn run_session(
                         ModelProgressUi::Downloading => set_model_progress(&ui, model_id, pct as f32, true, false),
                         ModelProgressUi::Finalizing => set_model_progress(&ui, model_id, pct as f32, true, true),
                         ModelProgressUi::Terminal => { // done / error
-                            let r = refresh_models(&ui, &proxy).await;
-                            voice_models = r.0;
-                            active_engine = r.1;
+                            reload_models!();
+                            // ListVoices gates the extra preset engines on
+                            // DOWNLOADED, so a finished (or deleted) fetch
+                            // changes the voice grid too — the pre-existing
+                            // gap that only showed up once Use died.
+                            refresh_grid(&ui, &proxy, &mut avatar_cache).await;
                         }
                     }
                 }
@@ -3024,9 +3507,7 @@ async fn run_session(
                             clear_install_state(&ui);
                             // the row's "one-time setup needed" warning comes
                             // from the engine — only a refetch clears it
-                            let r = refresh_models(&ui, &proxy).await;
-                            voice_models = r.0;
-                            active_engine = r.1;
+                            reload_models!();
                         }
                         VcSetupUi::Error => {
                             tracing::error!("vc setup failed: {setup_id}: {detail}");
@@ -3039,9 +3520,7 @@ async fn run_session(
                             };
                             set_install_error(&ui, msg);
                             // a half-done install can still have moved rows
-                            let r = refresh_models(&ui, &proxy).await;
-                            voice_models = r.0;
-                            active_engine = r.1;
+                            reload_models!();
                         }
                         // the user asked for this one — no banner
                         VcSetupUi::Cancelled => clear_install_state(&ui),
@@ -3322,9 +3801,23 @@ async fn run_session(
             }
             cmd = rx.recv() => match cmd {
                 Some(Cmd::Generate { text, voice }) => {
-                    match proxy.speak(&text, &voice).await {
-                        Ok(id) => current_gen = id,
-                        Err(e) => tracing::error!("speak failed: {e}"),
+                    // No silent downloads: the model the composer is showing is
+                    // the model that would run, so if it isn't on disk say so
+                    // here rather than letting the backend fetch multiple GB.
+                    // (The engine refuses too — this is the friendly half.)
+                    let missing = composer_pick
+                        .model
+                        .clone()
+                        .filter(|r| !row_ready(r.downloaded, r.needs_setup));
+                    if let Some(r) = missing {
+                        set_needs_model(&ui, "tts", &r.display, &r.id);
+                        cancel_pending_generation(&ui, &proxy).await;
+                    } else {
+                        clear_needs_model(&ui);
+                        match proxy.speak(&text, &voice).await {
+                            Ok(id) => current_gen = id,
+                            Err(e) => tracing::error!("speak failed: {e}"),
+                        }
                     }
                 }
                 Some(Cmd::Cancel { gen_id }) => {
@@ -3467,19 +3960,27 @@ async fn run_session(
                                 }
                                 "tr" => {
                                     tr_source = p.clone();
-                                    match proxy.transcribe_file(&p).await {
-                                        Ok(id) => {
-                                            pending_tr = id;
-                                            ui.upgrade_in_event_loop(|ui| {
-                                                ui.set_tr_text("".into());
-                                                ui.set_tr_busy(true);
-                                                ui.set_tr_status("transcribing…".into());
-                                                ui.set_trim_open(false);
-                                            }).ok();
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("post-trim transcribe failed: {e}");
-                                            ui.upgrade_in_event_loop(|ui| ui.set_trim_open(false)).ok();
+                                    if let Some(r) = ready_or_notice(&stt_models, &active_stt) {
+                                        // the trim itself landed; only the
+                                        // re-transcription waits on the weights
+                                        set_needs_model(&ui, "tr", &r.display, &r.id);
+                                        ui.upgrade_in_event_loop(|ui| ui.set_trim_open(false)).ok();
+                                    } else {
+                                        clear_needs_model(&ui);
+                                        match proxy.transcribe_file(&p).await {
+                                            Ok(id) => {
+                                                pending_tr = id;
+                                                ui.upgrade_in_event_loop(|ui| {
+                                                    ui.set_tr_text("".into());
+                                                    ui.set_tr_busy(true);
+                                                    ui.set_tr_status("transcribing…".into());
+                                                    ui.set_trim_open(false);
+                                                }).ok();
+                                            }
+                                            Err(e) => {
+                                                tracing::error!("post-trim transcribe failed: {e}");
+                                                ui.upgrade_in_event_loop(|ui| ui.set_trim_open(false)).ok();
+                                            }
                                         }
                                     }
                                 }
@@ -3676,15 +4177,16 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::CvCreate { name, desc, personality, language, transcript, model_index }) => {
-                    // "Follow active model" (index 0) stores "", else the engine
-                    // of the picked voice model — the same field the composer
-                    // dropdown pins.
+                    // "Follow the composer" (index 0) stores "", else the engine
+                    // of the picked cloning model. This modal is the ONLY writer
+                    // of `default_engine` now — it is a seed the composer reads
+                    // on selection, never a value the composer writes back.
                     let default_engine = if model_index == 0 {
                         String::new()
                     } else {
-                        voice_models
+                        composer_options(&voice_models, None)
                             .get(model_index - 1)
-                            .map(|(_, e, _)| e.clone())
+                            .map(|r| r.engine.clone())
                             .unwrap_or_default()
                     };
                     ui.upgrade_in_event_loop(|ui| ui.set_cv_error("".into())).ok();
@@ -3841,9 +4343,7 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::ModelsLoad) => {
-                    let r = refresh_models(&ui, &proxy).await;
-                    voice_models = r.0;
-                    active_engine = r.1;
+                    reload_models!();
                 }
                 Some(Cmd::DownloadModel { id }) => {
                     match proxy.download_model(&id).await {
@@ -3853,15 +4353,24 @@ async fn run_session(
                 }
                 Some(Cmd::DeleteModel { id }) => {
                     proxy.delete_model(&id).await.ok();
-                    let r = refresh_models(&ui, &proxy).await;
-                    voice_models = r.0;
-                    active_engine = r.1;
+                    reload_models!();
+                    // deleting an extra preset engine's weights takes its
+                    // voices out of ListVoices — the grid has to follow
+                    refresh_grid(&ui, &proxy, &mut avatar_cache).await;
                 }
-                Some(Cmd::ActivateModel { id }) => {
-                    proxy.set_active_model(&id).await.ok();
-                    let r = refresh_models(&ui, &proxy).await;
-                    voice_models = r.0;
-                    active_engine = r.1;
+                Some(Cmd::PickSttModel { index }) => {
+                    if let Some(row) = stt_models.get(index).cloned() {
+                        apply_active_model(&proxy, &row.id).await;
+                        clear_needs_model(&ui);
+                        reload_models!();
+                    }
+                }
+                Some(Cmd::PickLlmModel { index }) => {
+                    if let Some(row) = llm_models.get(index).cloned() {
+                        apply_active_model(&proxy, &row.id).await;
+                        clear_needs_model(&ui);
+                        reload_models!();
+                    }
                 }
                 Some(Cmd::InstallVc { setup_id }) => {
                     // the row is already showing "starting…" — every path that
@@ -3886,15 +4395,27 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::Compose { voice_id, prompt }) => {
-                    match proxy.compose_profile(&voice_id, &prompt).await {
-                        Ok(rid) if rid != 0 => pending_llm = rid,
-                        _ => { ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok(); }
+                    if let Some(r) = ready_or_notice(&llm_models, &active_llm) {
+                        set_needs_model(&ui, "tts", &r.display, &r.id);
+                        ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok();
+                    } else {
+                        clear_needs_model(&ui);
+                        match proxy.compose_profile(&voice_id, &prompt).await {
+                            Ok(rid) if rid != 0 => pending_llm = rid,
+                            _ => { ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok(); }
+                        }
                     }
                 }
                 Some(Cmd::Rewrite { voice_id, text }) => {
-                    match proxy.rewrite_profile(&voice_id, &text).await {
-                        Ok(rid) if rid != 0 => pending_llm = rid,
-                        _ => { ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok(); }
+                    if let Some(r) = ready_or_notice(&llm_models, &active_llm) {
+                        set_needs_model(&ui, "tts", &r.display, &r.id);
+                        ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok();
+                    } else {
+                        clear_needs_model(&ui);
+                        match proxy.rewrite_profile(&voice_id, &text).await {
+                            Ok(rid) if rid != 0 => pending_llm = rid,
+                            _ => { ui.upgrade_in_event_loop(|ui| ui.set_llm_busy(false)).ok(); }
+                        }
                     }
                 }
                 Some(Cmd::CvCancel) => {
@@ -3918,6 +4439,20 @@ async fn run_session(
                     }).ok();
                 }
                 Some(Cmd::GenerateInCharacter { text, voice }) => {
+                    // two models to check: the LLM that rewrites the line and
+                    // the voice model that then speaks it
+                    let missing = ready_or_notice(&llm_models, &active_llm).cloned().or_else(|| {
+                        composer_pick
+                            .model
+                            .clone()
+                            .filter(|r| !row_ready(r.downloaded, r.needs_setup))
+                    });
+                    if let Some(r) = missing {
+                        set_needs_model(&ui, "tts", &r.display, &r.id);
+                        cancel_pending_generation(&ui, &proxy).await;
+                        continue;
+                    }
+                    clear_needs_model(&ui);
                     match proxy.rewrite_profile(&voice, &text).await {
                         Ok(rid) if rid != 0 => {
                             pending_llm = rid;
@@ -3934,55 +4469,51 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::SelectVoice { id }) => {
-                    // one GetProfile serves both the language list and the engine
-                    // lock below; builtins have no profile row to fetch at all
+                    // one GetProfile serves the language list, the engine lock
+                    // and the seed; builtins have no profile row to fetch at all
                     let pj = if id.starts_with("builtin:") {
                         String::new()
                     } else {
                         proxy.get_profile(&id).await.unwrap_or_default()
                     };
-                    let (engine, code) = if id.starts_with("builtin:") {
-                        // builtin:<engine>:<voice> — kokoro or an extra preset
-                        // engine like qwen_custom_voice
-                        let engine = id.split(':').nth(1).unwrap_or("kokoro").to_string();
-                        let code = if engine == "kokoro" {
+                    let code = if id.starts_with("builtin:") {
+                        if id.split(':').nth(1).unwrap_or("kokoro") == "kokoro" {
                             kokoro_lang_code(&id).to_string()
                         } else {
                             "en".to_string()
-                        };
-                        (engine, code)
-                    } else if !pj.is_empty() {
-                        let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
-                        let de = p.get("default_engine").and_then(|v| v.as_str()).unwrap_or("");
-                        let engine = if de.is_empty() { active_engine.clone() } else { de.to_string() };
-                        let code = p.get("language").and_then(|v| v.as_str()).unwrap_or("en").to_string();
-                        (engine, code)
+                        }
                     } else {
-                        ("kokoro".to_string(), "en".to_string())
+                        serde_json::from_str::<serde_json::Value>(&pj)
+                            .ok()
+                            .and_then(|p| p.get("language").and_then(|v| v.as_str()).map(str::to_string))
+                            .unwrap_or_else(|| "en".to_string())
                     };
-                    // A voice bound to one engine (kokoro presets, preset
-                    // profiles) overrides all of the above: default_engine is
-                    // meaningless there, and the composer must show what will
-                    // actually speak — not the active clone engine.
-                    let lock = locked_engine(&id, &pj);
-                    let engine = lock.clone().unwrap_or(engine);
-                    lang_codes = update_composer_langs(&ui, &engine, &code);
-                    // the composer's model dropdown mirrors this voice's engine
-                    // (lock, else profile pin, else the active model); when it's
-                    // locked the dropdown is replaced by a read-only field, so
-                    // the picker never offers an engine the router would ignore
-                    let eidx = voice_models
-                        .iter()
-                        .position(|(_, e, _)| *e == engine)
-                        .unwrap_or(0) as i32;
-                    let lock_label = lock
-                        .map(|e| engine_label(&voice_models, &e))
-                        .unwrap_or_default();
-                    ui.upgrade_in_event_loop(move |ui| {
-                        ui.set_composer_engine_index(eidx);
-                        ui.set_composer_engine_locked(lock_label.into());
-                    })
-                    .ok();
+                    sel_voice = id.clone();
+                    sel_profile_json = pj;
+                    composer_pick = apply_composer_engines(
+                        &ui,
+                        &voice_models,
+                        &sel_voice,
+                        &sel_profile_json,
+                        session_engine.get(&sel_voice).map(|s| s.as_str()),
+                        &active_voice,
+                    );
+                    // The language subset follows the model that will actually
+                    // speak — the composer's own pick, not a profile field.
+                    lang_codes = update_composer_langs(&ui, &composer_pick.engine, &code);
+                    // A cloned voice speaks on whatever `set_voice_engine` last
+                    // loaded, so a seed that differs from the engine's active
+                    // model has to be pushed or the dropdown would be lying
+                    // about what Generate does. Locked voices route to their own
+                    // engine regardless — they never touch the active model.
+                    let seed = composer_pick
+                        .model
+                        .clone()
+                        .filter(|m| !composer_pick.rows.is_empty() && m.id != active_voice);
+                    if let Some(m) = seed {
+                        apply_active_model(&proxy, &m.id).await;
+                        reload_models!();
+                    }
                 }
                 Some(Cmd::PickLanguage { voice, index }) => {
                     if let Some(code) = lang_codes.get(index) {
@@ -4035,24 +4566,25 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::PickEngine { voice, index }) => {
-                    if let Some((mid, meng, _)) = voice_models.get(index).cloned() {
-                        if !voice.is_empty() && !voice.starts_with("builtin:") {
-                            // cloned profile selected: the dropdown pins THIS
-                            // voice's engine (same field as the edit modal)
-                            let patch = serde_json::json!({"default_engine": meng}).to_string();
-                            proxy.update_profile(&voice, &patch).await.ok();
-                            if let Ok(pj) = proxy.get_profile(&voice).await {
-                                let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
-                                let code = p.get("language").and_then(|v| v.as_str()).unwrap_or("en").to_string();
-                                lang_codes = update_composer_langs(&ui, &meng, &code);
-                            }
-                        } else {
-                            // preset selected: switch the global active voice model
-                            proxy.set_active_model(&mid).await.ok();
-                            let r = refresh_models(&ui, &proxy).await;
-                            voice_models = r.0;
-                            active_engine = r.1;
-                        }
+                    // The composer is the authority now. The dropdown's options
+                    // ARE catalog rows, so the picked size can no longer be
+                    // discarded on the way to the engine (the "0.6B picked,
+                    // 1.7B speaks" bug is gone by construction), and nothing
+                    // here writes the profile: the pick is this session's, for
+                    // this voice, and `default_engine` stays the seed the user
+                    // set in the create/edit modal.
+                    if let Some(row) = composer_pick.rows.get(index).cloned() {
+                        session_engine.insert(voice.clone(), row.id.clone());
+                        apply_active_model(&proxy, &row.id).await;
+                        clear_needs_model(&ui);
+                        reload_models!();
+                        let code = serde_json::from_str::<serde_json::Value>(&sel_profile_json)
+                            .ok()
+                            .and_then(|p| {
+                                p.get("language").and_then(|v| v.as_str()).map(str::to_string)
+                            })
+                            .unwrap_or_else(|| "en".to_string());
+                        lang_codes = update_composer_langs(&ui, &row.engine, &code);
                     }
                 }
                 Some(Cmd::ToggleLoop { on }) => { loop_on = on; }
@@ -4123,14 +4655,14 @@ async fn run_session(
                             .unwrap_or("")
                             .to_string();
                         cv_edit_transcript = transcript.clone();
-                        // pinned engine → its dropdown slot; "" → Follow active
+                        // seeded engine → its dropdown slot; "" → Follow the composer
                         let de = s("default_engine");
                         let model_idx = if de.is_empty() {
                             0
                         } else {
-                            voice_models
+                            composer_options(&voice_models, None)
                                 .iter()
-                                .position(|(_, e, _)| *e == de)
+                                .position(|r| r.engine == de)
                                 .map(|i| i as i32 + 1)
                                 .unwrap_or(0)
                         };
@@ -4211,7 +4743,18 @@ async fn run_session(
                                 ui.set_tr_recording(false);
                                 ui.set_tr_status("⚠ capture was silent — check the input device".into());
                             }).ok();
+                        } else if let Some(r) = ready_or_notice(&stt_models, &active_stt) {
+                            // the recording is safe on disk (✂ Trim still
+                            // reaches it) — only the transcription is refused
+                            tr_source = path.clone();
+                            set_needs_model(&ui, "tr", &r.display, &r.id);
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_recording(false);
+                                ui.set_tr_has_source(true);
+                                ui.set_tr_status("".into());
+                            }).ok();
                         } else {
+                            clear_needs_model(&ui);
                             match proxy.transcribe_file(&path).await {
                                 Ok(id) => {
                                     pending_tr = id;
@@ -4272,30 +4815,49 @@ async fn run_session(
                         .await
                     {
                         let path = handle.path().to_string_lossy().to_string();
-                        match proxy.transcribe_file(&path).await {
-                            Ok(id) => {
-                                pending_tr = id;
-                                tr_source = path.clone();
-                                ui.upgrade_in_event_loop(|ui| {
-                                    ui.set_tr_text("".into());
-                                    ui.set_tr_capture_id("".into()); // fresh source = new capture
-                                    ui.set_tr_busy(true);
-                                    ui.set_tr_has_source(true);
-                                    ui.set_tr_status("transcribing…".into());
-                                }).ok();
+                        if let Some(r) = ready_or_notice(&stt_models, &active_stt) {
+                            tr_source = path.clone();
+                            set_needs_model(&ui, "tr", &r.display, &r.id);
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_has_source(true);
+                                ui.set_tr_status("".into());
+                            }).ok();
+                        } else {
+                            clear_needs_model(&ui);
+                            match proxy.transcribe_file(&path).await {
+                                Ok(id) => {
+                                    pending_tr = id;
+                                    tr_source = path.clone();
+                                    ui.upgrade_in_event_loop(|ui| {
+                                        ui.set_tr_text("".into());
+                                        ui.set_tr_capture_id("".into()); // fresh source = new capture
+                                        ui.set_tr_busy(true);
+                                        ui.set_tr_has_source(true);
+                                        ui.set_tr_status("transcribing…".into());
+                                    }).ok();
+                                }
+                                Err(e) => tracing::error!("transcribe failed: {e}"),
                             }
-                            Err(e) => tracing::error!("transcribe failed: {e}"),
                         }
                     }
                 }
                 Some(Cmd::TrRefine { text }) => {
-                    match proxy.refine_transcript(&text).await {
-                        Ok(rid) if rid != 0 => pending_tr_refine = rid,
-                        _ => {
-                            ui.upgrade_in_event_loop(|ui| {
-                                ui.set_tr_busy(false);
-                                ui.set_tr_status("refine unavailable".into());
-                            }).ok();
+                    if let Some(r) = ready_or_notice(&llm_models, &active_llm) {
+                        set_needs_model(&ui, "tr", &r.display, &r.id);
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_tr_busy(false);
+                            ui.set_tr_status("".into());
+                        }).ok();
+                    } else {
+                        clear_needs_model(&ui);
+                        match proxy.refine_transcript(&text).await {
+                            Ok(rid) if rid != 0 => pending_tr_refine = rid,
+                            _ => {
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_tr_busy(false);
+                                    ui.set_tr_status("refine unavailable".into());
+                                }).ok();
+                            }
                         }
                     }
                 }
@@ -4478,28 +5040,53 @@ async fn run_session(
                     if let (Some(src), Some(pid)) =
                         (vc_source.clone(), vc_voice_ids.get(index).cloned())
                     {
-                        let table = if mode == "music" { VC_MUSIC_ENGINE_IDS } else { VC_ENGINE_IDS };
-                        let engine = table.get(engine_index).copied().unwrap_or("");
-                        match proxy.convert_voice(&src, &pid, engine, &label, &transcript, &mode, semitones).await {
-                            Ok(gid) if gid != 0 => {
+                        let table = if mode == "music" { VC_MUSIC_ROWS } else { VC_SPEECH_ROWS };
+                        let (engine, row_id) = table.get(engine_index).copied().unwrap_or(("", ""));
+                        let req = VcRequest {
+                            src, pid, engine, label, transcript, mode, semitones,
+                        };
+                        // The row this (engine, mode) pair actually loads — the
+                        // reason the table holds pairs: vevo_timbre is
+                        // Vevo-Timbre for speech and Vevo2 for singing.
+                        let missing = vc_models
+                            .iter()
+                            .find(|m| m.id == row_id)
+                            .filter(|m| !row_ready(m.downloaded, m.needs_setup))
+                            .cloned();
+                        if let Some(m) = missing {
+                            set_needs_model(&ui, "vc", &m.display, &m.id);
+                            ui.upgrade_in_event_loop(|ui| ui.set_vc_busy(false)).ok();
+                        } else if req.needs_vevo2_consent() && !cfg.vevo2_whisper_ack {
+                            // Vevo2's content encoder lives in Amphion's own
+                            // cache, outside the Models catalog — no Download
+                            // button can cover it, so this dialog is the only
+                            // place that ~1.5 GB gets spent on purpose.
+                            pending_vevo2 = Some(req);
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_vc_busy(false);
+                                ui.set_vevo2_ack_open(true);
+                            }).ok();
+                        } else {
+                            clear_needs_model(&ui);
+                            if let Some(gid) = start_conversion(&ui, &proxy, &req).await {
                                 pending_vc = gid;
                                 // the rail's ■ and the player bar stop via
                                 // Cancel{0} → current_gen; track it here too
                                 current_gen = gid;
-                                pending_vc_music = mode == "music";
-                                ui.upgrade_in_event_loop(|ui| {
-                                    ui.set_vc_busy(true);
-                                    ui.set_vc_error("".into());
-                                    ui.set_vc_status("starting…".into());
-                                }).ok();
+                                pending_vc_music = req.mode == "music";
                             }
-                            Ok(_) => {}
-                            Err(e) => {
-                                tracing::error!("convert failed: {e}");
-                                ui.upgrade_in_event_loop(|ui| {
-                                    ui.set_vc_status("engine unavailable".into());
-                                }).ok();
-                            }
+                        }
+                    }
+                }
+                Some(Cmd::Vevo2Ack) => {
+                    cfg.vevo2_whisper_ack = true;
+                    save_config(&cfg);
+                    if let Some(req) = pending_vevo2.take() {
+                        clear_needs_model(&ui);
+                        if let Some(gid) = start_conversion(&ui, &proxy, &req).await {
+                            pending_vc = gid;
+                            current_gen = gid;
+                            pending_vc_music = req.mode == "music";
                         }
                     }
                 }
@@ -5467,8 +6054,8 @@ mod tests {
 
     #[test]
     fn vc_engine_id_tables_stay_in_the_vc_family() {
-        assert!(VC_ENGINE_IDS.iter().all(|e| is_vc_engine(e)));
-        assert!(VC_MUSIC_ENGINE_IDS.iter().all(|e| is_vc_engine(e)));
+        assert!(VC_SPEECH_ROWS.iter().all(|(e, _)| is_vc_engine(e)));
+        assert!(VC_MUSIC_ROWS.iter().all(|(e, _)| is_vc_engine(e)));
     }
 
     // --- speech pitch fine-tune index <-> semitones ----------------------
@@ -5566,6 +6153,7 @@ mod tests {
     fn build_models_routes_by_category() {
         let json = r#"[
             {"id": "kokoro", "display": "Kokoro", "category": "voice", "size_mb": 350,
+             "engine": "kokoro",
              "description": "fast", "downloaded": true, "active": true, "supported": true},
             {"id": "qwen", "display": "Qwen", "category": "voice", "size_mb": 2048,
              "downloading": true, "supported": false, "warning": "needs 12 GB VRAM"},
@@ -5585,7 +6173,10 @@ mod tests {
         assert_eq!(voice[0].display, "Kokoro");
         assert_eq!(voice[0].size_label, "350 MB");
         assert_eq!(voice[0].description, "fast");
-        assert!(voice[0].downloaded && voice[0].active && voice[0].supported);
+        assert!(voice[0].downloaded && voice[0].supported);
+        // `active` is NOT passed through for a non-cloning voice engine — see
+        // build_models_suppresses_in_use_on_non_cloning_voice_rows
+        assert!(!voice[0].active);
         assert!(!voice[0].downloading);
         assert_eq!(voice[0].progress, 0.0); // progress is pushed later by set_model_progress
 
@@ -5807,7 +6398,7 @@ mod tests {
         let music = lib_engines_for_type(3);
         assert!(music.contains(&"seed_vc"), "music must offer Seed-VC");
         assert!(music.contains(&"vevo_timbre"), "music must offer Vevo");
-        assert_eq!(music, VC_MUSIC_ENGINE_IDS.to_vec());
+        assert_eq!(music, VC_MUSIC_ROWS.iter().map(|(e, _)| *e).collect::<Vec<_>>());
     }
 
     #[test]
@@ -5996,17 +6587,307 @@ mod tests {
         assert_eq!(locked_engine("", ""), None);
     }
 
+    // --- model selection: rows, labels, readiness, seeding ----------------
+
+    /// One catalog row. `dl`/`setup` are the two halves of readiness.
+    fn vrow(id: &str, engine: &str, display: &str, dl: bool, setup: bool) -> VoiceRow {
+        VoiceRow {
+            id: id.into(),
+            engine: engine.into(),
+            display: display.into(),
+            downloaded: dl,
+            needs_setup: setup,
+        }
+    }
+
+    /// A realistic voice catalog: Kokoro (preset-only), both Qwen TTS sizes
+    /// with only 0.6B fetched, LuxTTS downloaded but not installed, and a
+    /// CustomVoice row that a cloned voice may never use.
+    fn voice_catalog() -> Vec<VoiceRow> {
+        vec![
+            vrow("kokoro", "kokoro", "Kokoro 82M", true, false),
+            vrow("qwen-tts-1.7B", "qwen", "Qwen TTS 1.7B", false, false),
+            vrow("qwen-tts-0.6B", "qwen", "Qwen TTS 0.6B", true, false),
+            vrow("luxtts", "luxtts", "LuxTTS", true, true),
+            vrow("chatterbox", "chatterbox", "Chatterbox (Multilingual)", true, false),
+            vrow("qwen-custom-voice-1.7B", "qwen_custom_voice", "Qwen CustomVoice 1.7B", true, false),
+        ]
+    }
+
     #[test]
-    fn engine_label_prefers_the_catalog_display() {
-        let models = vec![
-            ("kokoro".to_string(), "kokoro".to_string(), "Kokoro 82M".to_string()),
-            ("qwen-tts-1.7B".to_string(), "qwen".to_string(), "Qwen TTS 1.7B".to_string()),
+    fn is_cloning_engine_matches_the_set_pinned_engine_side() {
+        // mirrors tts.CLONING_ENGINES; test_tts_routing.py pins the same five
+        assert_eq!(
+            CLONING_ENGINES,
+            &["qwen", "luxtts", "chatterbox", "chatterbox_turbo", "tada"]
+        );
+        for e in CLONING_ENGINES {
+            assert!(is_cloning_engine(e), "{e} should clone");
+        }
+        // preset-only engines and every conversion engine stay out
+        for e in ["kokoro", "qwen_custom_voice", "seed_vc", "chatterbox_vc", ""] {
+            assert!(!is_cloning_engine(e), "{e} should not clone");
+        }
+    }
+
+    #[test]
+    fn row_ready_needs_both_the_weights_and_the_engine() {
+        assert!(row_ready(true, false));
+        assert!(!row_ready(false, false)); // no weights
+        assert!(!row_ready(true, true)); // LuxTTS: fetched, not installed
+        assert!(!row_ready(false, true));
+    }
+
+    #[test]
+    fn readiness_suffix_lets_needs_setup_win() {
+        assert_eq!(readiness_suffix(true, false), "");
+        assert_eq!(readiness_suffix(false, false), " — not downloaded");
+        assert_eq!(readiness_suffix(true, true), " — needs setup");
+        // both missing: the install is the actionable step, so it is the one named
+        assert_eq!(readiness_suffix(false, true), " — needs setup");
+    }
+
+    #[test]
+    fn option_label_says_what_is_missing() {
+        assert_eq!(option_label(&vrow("a", "qwen", "Qwen TTS 0.6B", true, false)), "Qwen TTS 0.6B");
+        assert_eq!(
+            option_label(&vrow("a", "qwen", "Qwen TTS 1.7B", false, false)),
+            "Qwen TTS 1.7B — not downloaded"
+        );
+        assert_eq!(
+            option_label(&vrow("a", "luxtts", "LuxTTS", true, true)),
+            "LuxTTS — needs setup"
+        );
+    }
+
+    #[test]
+    fn composer_options_offers_a_locked_voice_nothing() {
+        // the LockedField replaces the dropdown — an option list would be an
+        // offer the router ignores
+        assert!(composer_options(&voice_catalog(), Some("kokoro")).is_empty());
+        assert!(composer_options(&voice_catalog(), Some("qwen_custom_voice")).is_empty());
+    }
+
+    #[test]
+    fn composer_options_offers_a_cloned_voice_cloning_engines_only() {
+        let opts = composer_options(&voice_catalog(), None);
+        let ids: Vec<&str> = opts.iter().map(|r| r.id.as_str()).collect();
+        // Kokoro and CustomVoice cannot clone — picking one used to crash Generate
+        assert_eq!(ids, ["qwen-tts-1.7B", "qwen-tts-0.6B", "luxtts", "chatterbox"]);
+    }
+
+    #[test]
+    fn composer_options_keeps_unready_rows_visible() {
+        // requirement 7: an undownloaded/uninstalled model is offered WITH its
+        // tail, not hidden — hiding it is how a user never learns it exists
+        let opts = composer_options(&voice_catalog(), None);
+        let labels: Vec<String> = opts.iter().map(option_label).collect();
+        assert!(labels.contains(&"Qwen TTS 1.7B — not downloaded".to_string()));
+        assert!(labels.contains(&"LuxTTS — needs setup".to_string()));
+    }
+
+    #[test]
+    fn seed_index_honors_this_sessions_pick_even_when_it_is_unready() {
+        let opts = composer_options(&voice_catalog(), None);
+        // the user explicitly chose 1.7B this session; the label says it isn't
+        // downloaded and Generate raises the notice — but the dropdown must not
+        // silently move off the thing they clicked
+        assert_eq!(seed_index(&opts, Some("qwen-tts-1.7B"), "chatterbox", "chatterbox"), 0);
+        assert_eq!(seed_index(&opts, Some("luxtts"), "", ""), 2);
+        // a session pick for a row that no longer exists falls through
+        assert_eq!(seed_index(&opts, Some("tada-1b"), "", "chatterbox"), 3);
+    }
+
+    #[test]
+    fn seed_index_prefers_the_active_model_when_the_pin_names_its_engine() {
+        let opts = composer_options(&voice_catalog(), None);
+        // pinned to "qwen" with 0.6B loaded: seed 0.6B, not the catalog's first
+        // qwen row — this is the "picked 0.6B, 1.7B speaks" bug's twin
+        assert_eq!(seed_index(&opts, None, "qwen", "qwen-tts-0.6B"), 1);
+    }
+
+    #[test]
+    fn seed_index_falls_back_to_the_pinned_engines_first_ready_row() {
+        let opts = composer_options(&voice_catalog(), None);
+        // active model is a different engine — the pin still wins, on the qwen
+        // row that can actually run (0.6B; 1.7B isn't downloaded)
+        assert_eq!(seed_index(&opts, None, "qwen", "chatterbox"), 1);
+    }
+
+    #[test]
+    fn seed_index_ignores_a_pin_with_nothing_runnable() {
+        // options: 0 qwen 1.7B (absent), 1 qwen 0.6B, 2 LuxTTS (needs setup),
+        // 3 Chatterbox — so "first ready" is 1
+        let opts = composer_options(&voice_catalog(), None);
+        // LuxTTS is pinned but still needs its install: seeding the dropdown
+        // onto it would park the composer on something that cannot speak, so
+        // the seed falls through to first-ready instead
+        assert_eq!(seed_index(&opts, None, "luxtts", ""), 1);
+        // an engine with no row here at all does the same
+        assert_eq!(seed_index(&opts, None, "kokoro", ""), 1);
+    }
+
+    #[test]
+    fn seed_index_falls_back_to_the_active_model_then_to_first_ready() {
+        let opts = composer_options(&voice_catalog(), None);
+        // the active model wins over first-ready when it can run
+        assert_eq!(seed_index(&opts, None, "", "chatterbox"), 3);
+        // an active model that isn't ready is no better than none
+        assert_eq!(seed_index(&opts, None, "", "qwen-tts-1.7B"), 1);
+        assert_eq!(seed_index(&opts, None, "", ""), 1);
+    }
+
+    #[test]
+    fn seed_index_survives_an_empty_or_wholly_unready_list() {
+        assert_eq!(seed_index(&[], Some("qwen-tts-0.6B"), "qwen", "qwen-tts-0.6B"), 0);
+        let nothing_ready = vec![
+            vrow("qwen-tts-1.7B", "qwen", "Qwen TTS 1.7B", false, false),
+            vrow("luxtts", "luxtts", "LuxTTS", true, true),
         ];
-        assert_eq!(engine_label(&models, "kokoro"), "Kokoro 82M");
-        assert_eq!(engine_label(&models, "qwen"), "Qwen TTS 1.7B");
-        // an engine with no usable model row still reads as something
-        assert_eq!(engine_label(&models, "luxtts"), "luxtts");
+        // no honest answer exists — land on the first row rather than a stray index
+        assert_eq!(seed_index(&nothing_ready, None, "", ""), 0);
+    }
+
+    #[test]
+    fn engine_row_prefers_a_downloaded_row_over_the_catalogs_first() {
+        let rows = voice_catalog();
+        // the field report's case: 1.7B is first, 0.6B is what's on disk
+        assert_eq!(engine_row(&rows, "qwen").unwrap().id, "qwen-tts-0.6B");
+        // nothing downloaded → the first row still names the engine
+        assert_eq!(
+            engine_row(&rows[..2], "qwen").unwrap().id,
+            "qwen-tts-1.7B"
+        );
+        assert!(engine_row(&rows, "tada").is_none());
+    }
+
+    #[test]
+    fn engine_label_names_the_size_the_user_actually_has() {
+        let rows = voice_catalog();
+        assert_eq!(engine_label(&rows, "kokoro"), "Kokoro 82M");
+        // NOT "Qwen TTS 1.7B": the LockedField and the coachmark must point at
+        // the row that exists on this machine
+        assert_eq!(engine_label(&rows, "qwen"), "Qwen TTS 0.6B");
+        assert_eq!(engine_label(&rows, "qwen_custom_voice"), "Qwen CustomVoice 1.7B");
+        // an engine with no catalog row still reads as something
+        assert_eq!(engine_label(&rows, "brand_new_engine"), "brand_new_engine");
         assert_eq!(engine_label(&[], "kokoro"), "kokoro");
+    }
+
+    #[test]
+    fn picker_index_lands_on_the_active_model_else_the_first_ready_one() {
+        let stt = vec![
+            vrow("whisper-base", "whisper", "Whisper Base", false, false),
+            vrow("whisper-small", "whisper", "Whisper Small", true, false),
+            vrow("whisper-medium", "whisper", "Whisper Medium", true, false),
+        ];
+        assert_eq!(picker_index(&stt, "whisper-medium"), 2);
+        // active but not downloaded → the first one that can run
+        assert_eq!(picker_index(&stt, "whisper-base"), 1);
+        assert_eq!(picker_index(&stt, ""), 1);
+        assert_eq!(picker_index(&[], "whisper-base"), 0);
+    }
+
+    #[test]
+    fn ready_or_notice_only_refuses_a_row_it_can_name() {
+        let stt = vec![
+            vrow("whisper-base", "whisper", "Whisper Base", false, false),
+            vrow("whisper-small", "whisper", "Whisper Small", false, false),
+        ];
+        // nothing downloaded: refuse, naming the row the picker points at
+        assert_eq!(ready_or_notice(&stt, "whisper-base").unwrap().id, "whisper-base");
+        // a ready pick dispatches
+        let ok = vec![vrow("whisper-base", "whisper", "Whisper Base", true, false)];
+        assert!(ready_or_notice(&ok, "whisper-base").is_none());
+        // an empty catalog passes: the engine's own require_weights is the
+        // authority, and a raw-repo override was never in this list
+        assert!(ready_or_notice(&[], "anything").is_none());
+    }
+
+    // --- ⇄ engine dropdowns (VC_ROW_FOR's app-side twin) ------------------
+
+    #[test]
+    fn vc_row_tables_mirror_the_engines_vc_row_for() {
+        // pinned against engine/tests/test_models.py's assertion on the same map
+        assert_eq!(
+            VC_SPEECH_ROWS,
+            &[
+                ("chatterbox_vc", "chatterbox-vc"),
+                ("seed_vc", "seed-vc"),
+                ("vevo_timbre", "vevo-timbre"),
+            ]
+        );
+        // the asymmetry that makes this a table of pairs: the same engine loads
+        // a different row for singing
+        assert_eq!(VC_MUSIC_ROWS, &[("seed_vc", "seed-vc"), ("vevo_timbre", "vevo2-singing")]);
+    }
+
+    #[test]
+    fn vc_row_labels_read_the_real_catalog_rows() {
+        // Vevo installed with only the timbre weights fetched — the singing row
+        // is a separate download, and the ⇄ picker has to say so
+        let json = r#"[
+            {"id": "chatterbox-vc", "display": "Chatterbox VC", "category": "vc",
+             "downloaded": true},
+            {"id": "seed-vc", "display": "Seed-VC", "category": "vc",
+             "needs_setup": true, "setup_id": "seedvc"},
+            {"id": "vevo-timbre", "display": "Vevo-Timbre", "category": "vc",
+             "downloaded": true},
+            {"id": "vevo2-singing", "display": "Vevo2 (singing)", "category": "vc",
+             "downloaded": false}
+        ]"#;
+        let (.., vc) = build_models(json);
+        assert_eq!(
+            vc_row_labels(&vc, VC_SPEECH_ROWS),
+            vec![
+                SharedString::from("Chatterbox VC"),
+                SharedString::from("Seed-VC — needs setup"),
+                SharedString::from("Vevo-Timbre"),
+            ]
+        );
+        // music mode names Vevo2's OWN row — its state was consulted by nothing
+        // at all while these labels were hardcoded, so the picker read
+        // "Vevo2 (singing)" for weights that were never on disk
+        assert_eq!(
+            vc_row_labels(&vc, VC_MUSIC_ROWS),
+            vec![
+                SharedString::from("Seed-VC — needs setup"),
+                SharedString::from("Vevo2 (singing) — not downloaded"),
+            ]
+        );
+    }
+
+    #[test]
+    fn vc_row_labels_keep_their_slot_when_a_row_is_missing() {
+        // a vanished catalog row must not shift every index below it — the
+        // dropdown index is what picks the engine
+        let labels = vc_row_labels(&[], VC_SPEECH_ROWS);
+        assert_eq!(labels.len(), VC_SPEECH_ROWS.len());
+        assert_eq!(labels[1], SharedString::from("seed_vc"));
+    }
+
+    // --- IN USE chips ------------------------------------------------------
+
+    #[test]
+    fn build_models_suppresses_in_use_on_non_cloning_voice_rows() {
+        // models.json ships `{"voice": "kokoro"}` as its factory default, and
+        // Kokoro cannot clone — that stale value may not light a chip
+        let json = r#"[
+            {"id": "kokoro", "display": "Kokoro 82M", "category": "voice",
+             "engine": "kokoro", "active": true},
+            {"id": "qwen-tts-0.6B", "display": "Qwen TTS 0.6B", "category": "voice",
+             "engine": "qwen", "active": true},
+            {"id": "whisper-base", "display": "Whisper Base", "category": "stt",
+             "engine": "whisper", "active": true},
+            {"id": "qwen3-1.7b", "display": "Qwen3 1.7B", "category": "llm",
+             "engine": "qwen_llm", "active": true}
+        ]"#;
+        let (voice, stt, llm, _) = build_models(json);
+        assert!(!voice[0].active, "Kokoro cannot be the cloning model in use");
+        assert!(voice[1].active, "a cloning engine keeps its chip");
+        // the other categories are untouched — their active row is real
+        assert!(stt[0].active);
+        assert!(llm[0].active);
     }
 
     // --- profile_err_msg -------------------------------------------------

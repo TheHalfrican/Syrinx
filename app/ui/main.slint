@@ -356,6 +356,10 @@ component ThemedDropdown inherits Rectangle {
     in property <[string]> model;
     in-out property <int> current-index: 0;
     in property <bool> up: false;   // open the list above (for bottom-anchored rows)
+    // hover tooltip, "" = none. Same idiom as TBtn/LockedField; used where a
+    // picker's reach is wider than the view it sits in (the whisper model is
+    // also dictation's, the ⇄ transcript's and voice cloning's).
+    in property <string> tip: "";
     callback selected(int);
     property <bool> win95: Theme.name == "win95";
     property <length> list-height: min(model.length * 26px + 4px, 210px);
@@ -404,6 +408,31 @@ component ThemedDropdown inherits Rectangle {
             }
         }
     }
+    // tooltip above the field — x/y bindings keep it out of the dropdown's
+    // layout info, same trick as TBtn, so a long tip can't widen the control
+    ddtip := Rectangle {
+        x: 0;
+        y: -self.height - 5px;
+        height: 20px;
+        width: ddtl.preferred-width + 14px;
+        opacity: 0;
+        background: win95 ? #ffffe1 : #10151be6;
+        border-width: 1px; border-color: win95 ? #000000 : #ffffff33;
+        border-radius: win95 ? 0px : 4px;
+        ddtl := Text {
+            x: 7px; height: 100%;
+            text: tip; font-size: 10px; font-family: Theme.font;
+            color: win95 ? #000000 : #ffffff;
+            vertical-alignment: center;
+        }
+    }
+    states [
+        tip-shown when ta.has-hover && tip != "" : {
+            ddtip.opacity: 1;
+            in { animate ddtip.opacity { duration: 100ms; delay: 1200ms; } }
+            out { animate ddtip.opacity { duration: 80ms; } }
+        }
+    ]
 }
 
 // --- read-only twin of ThemedDropdown: same slot, same height, no chevron ---
@@ -633,26 +662,49 @@ component LabeledInput inherits VerticalLayout {
 // --- a model catalog row (Models tab) ---
 component ModelRow inherits Rectangle {
     in property <ModelItem> m;
-    // false for conversion engines: the ⇄ tab's dropdown picks per
-    // conversion, so there is no "Use"/active concept to offer
-    in property <bool> selectable: true;
-    // one-click VC engine install (Seed-VC / Vevo): `installing` is true only
-    // for the row whose setup is running, `install-stage` is the engine's human
-    // label shown verbatim under the marquee
+    // one-click VC engine install (Seed-VC / Vevo / LuxTTS): `installing` is
+    // true only for the row whose setup is running, `install-stage` is the
+    // engine's human label shown verbatim under the marquee
     in property <bool> installing: false;
     in property <string> install-stage: "";
+    // "this is the row you were sent here to fetch" — armed by the
+    // ModelNeededNotice's Open Models →, cleared on Download or on leaving the
+    // tab. Accent border plus a pulsing ➜ so the eye lands on it even in a
+    // section of a dozen rows.
+    in property <bool> coachmark: false;
+    // fired once, shortly after a coachmarked row is laid out, with its
+    // absolute y — the Models list scrolls it into view (see `mdlsv`)
+    callback coachmark-placed(length);
     callback download();
     callback del();
-    callback activate();
     callback install-request();
     callback cancel-request();
     // 64px unless the description needs more lines (vevo2's disclaimer was the
     // first to overflow) — col.preferred-height measures the WRAPPED text at
     // its actual width, so the row grows exactly as much as the text needs
     height: max(64px, col.preferred-height + 24px);
-    border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
-    background: Theme.card-bg;
+    border-width: Theme.name == "win95" ? 0px : (coachmark ? 2px : 1px);
+    border-color: coachmark ? Theme.acc : Theme.brd;
+    border-radius: Theme.rad;
+    background: coachmark ? Theme.acc-soft : Theme.card-bg;
     if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+    // The row exists before layout has placed it, so reporting a position from
+    // `init` would report a zero. One short beat later the geometry is real.
+    // `cm-placed` makes it a ONE-shot: a repeating scroll would fight the
+    // user's own wheel. (Timers may not be conditional, hence the flag rather
+    // than an `if` — idle otherwise, so the ~40 uncoachmarked rows pay nothing.)
+    property <bool> cm-placed: false;
+    changed coachmark => {
+        if (!root.coachmark) { root.cm-placed = false; }
+    }
+    Timer {
+        interval: 180ms;
+        running: root.coachmark && !root.cm-placed;
+        triggered => {
+            root.cm-placed = true;
+            root.coachmark-placed(root.absolute-position.y);
+        }
+    }
     HorizontalLayout {
         padding-left: 14px; padding-right: 12px; spacing: 12px;
         Rectangle {
@@ -663,12 +715,19 @@ component ModelRow inherits Rectangle {
             alignment: center; spacing: 2px; horizontal-stretch: 1;
             HorizontalLayout {
                 spacing: 8px;
+                // the nudge: fades in and out on the shared animation tick
+                if coachmark : Text {
+                    text: "➜"; font-size: 13px; color: Theme.acc; vertical-alignment: center;
+                    opacity: 0.35 + 0.65 * abs(1.0 - 2.0 * (mod(animation-tick(), 1400ms) / 1400ms));
+                }
                 Text { text: m.display; font-size: 13px; font-weight: 700; color: Theme.fg; vertical-alignment: center; }
                 Text { text: m.size-label; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
+                // "IN USE", not "ACTIVE": nothing here makes a model active any
+                // more — the chip reports what the pickers currently point at.
                 if m.active : Rectangle {
                     background: Theme.acc; border-radius: 8px;
                     HorizontalLayout { padding-left: 6px; padding-right: 6px;
-                        Text { text: "ACTIVE"; font-size: 8.5px; font-weight: 700; color: Theme.acc-fg; vertical-alignment: center; } }
+                        Text { text: "IN USE"; font-size: 8.5px; font-weight: 700; color: Theme.acc-fg; vertical-alignment: center; } }
                 }
                 if !m.supported : Rectangle {
                     background: Theme.chip-bg; border-radius: 8px;
@@ -738,10 +797,6 @@ component ModelRow inherits Rectangle {
                         label: "Install Engine"; tip: "Set this engine up on this computer"; generate: true;
                         clicked => { root.install-request(); }
                     }
-                    if m.downloaded && m.supported && !m.active && selectable : TBtn {
-                        label: "Use"; tip: "Make this the active model";
-                        clicked => { root.activate(); }
-                    }
                     if m.downloaded : TBtn {
                         label: "Delete"; tip: "Remove the downloaded weights from disk";
                         clicked => { root.del(); }
@@ -756,6 +811,46 @@ component ModelRow inherits Rectangle {
                     if !m.downloaded && !m.supported : Text { text: "no backend yet"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
                 }
             }
+        }
+    }
+}
+
+// --- "that model isn't ready" notice ---------------------------------------
+//
+// The other half of "no silent downloads": unready models stay VISIBLE in every
+// picker (with a "— not downloaded" tail), and asking one to run says so here
+// instead of quietly fetching several gigabytes. Deliberately the accent
+// treatment of the ⇄ install invitation rather than the amber ⚠ of a failure —
+// nothing broke; something just hasn't been fetched yet.
+component ModelNeededNotice inherits Rectangle {
+    in property <string> display;
+    callback open-models();
+    callback dismiss();
+    height: 44px;
+    border-width: Theme.name == "win95" ? 0px : 1px;
+    border-color: Theme.acc;
+    border-radius: Theme.rad;
+    background: Theme.card-bg;
+    if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+    HorizontalLayout {
+        padding-left: 12px; padding-right: 12px; spacing: 10px;
+        Text { text: "⤓"; font-size: 14px; color: Theme.acc; vertical-alignment: center; }
+        Text {
+            text: display + " isn't downloaded yet — nothing was fetched. Get it in Models, then try again.";
+            font-size: 11.5px; color: Theme.fg;
+            vertical-alignment: center; overflow: elide;
+            preferred-width: 0px; horizontal-stretch: 1;
+        }
+        VerticalLayout {
+            alignment: center;
+            TBtn {
+                label: "Open Models →"; tip: "Jump straight to this model's row";
+                generate: true; clicked => { root.open-models(); }
+            }
+        }
+        VerticalLayout {
+            alignment: center;
+            TBtn { label: "✕"; tip: "Dismiss"; min-width: 30px; clicked => { root.dismiss(); } }
         }
     }
 }
@@ -945,6 +1040,12 @@ export component AppWindow inherits Window {
     in property <string> selected-voice-name;
     in property <[string]> composer-langs;
     in-out property <int> composer-lang-index: 0;
+    // The composer's model picker — THE authority on what speaks. Options,
+    // index and the lock below are pushed together, from one place in Rust
+    // (`apply_composer_engines`), because an index into the previous voice's
+    // option list is a lie. Options are catalog ROWS, so the picked size can
+    // never be discarded on the way to the engine; unready rows stay listed
+    // with a "— not downloaded" / "— needs setup" tail rather than vanishing.
     in property <[string]> composer-engines;
     in-out property <int> composer-engine-index: 0;
     // Engine-locked voice: the human name of the ONE engine the selected voice
@@ -981,15 +1082,19 @@ export component AppWindow inherits Window {
     in property <string> vc-error: "";
     in property <[string]> vc-voice-names: []; // cloned profiles with samples
     in-out property <int> vc-voice-index: 0;
-    // conversion models — ids resolved in Rust (VC_ENGINE_IDS / VC_MUSIC_ENGINE_IDS)
     // engines that still need their one-time install, already phrased in Rust
     // ("Seed-VC and Vevo"); "" = nothing missing, notice stays out of the view
     in property <string> vc-engines-missing: "";
+    // Conversion models. The LABELS are SET FROM RUST now, read off the real
+    // catalog rows (VC_SPEECH_ROWS / VC_MUSIC_ROWS, the app's twin of the
+    // engine's VC_ROW_FOR) so an engine that isn't installed or downloaded says
+    // so in the picker. The defaults below are only what shows before the first
+    // catalog fetch lands. The index still resolves the engine, in Rust.
     in property <[string]> vc-engine-names: ["Chatterbox VC", "Seed-VC", "Vevo-Timbre"];
     in-out property <int> vc-engine-index: 0;
     in-out property <string> vc-mode: "speech";  // "speech" | "music"
     // music mode = singing-capable engines only (Vevo2 joins here)
-    in property <[string]> vc-music-engine-names: ["Seed-VC (singing)", "Vevo2 (singing)"];
+    in property <[string]> vc-music-engine-names: ["Seed-VC", "Vevo2 (singing)"];
     in-out property <int> vc-music-engine-index: 0;
     in-out property <int> vc-octave-index: 2;    // 0..4 → −2..+2 octaves (♫ register shift)
     in-out property <int> vc-semitones-index: 6; // 0..12 → −6..+6 st (speech fine-tune; 6 = ±0)
@@ -1062,8 +1167,35 @@ export component AppWindow inherits Window {
     in property <[ModelItem]> voice-models;
     in property <[ModelItem]> stt-models;
     in property <[ModelItem]> llm-models;
-    in property <[ModelItem]> vc-conv-models;  // ⇄ conversion engines (no "Use")
+    in property <[ModelItem]> vc-conv-models;  // ⇄ conversion engines
     in property <string> hardware-line;
+    // The row a ModelNeededNotice sent the user here to fetch ("" = none).
+    // Armed by "Open Models →", cleared by that row's Download and by leaving
+    // the tab (see `changed tab`).
+    in-out property <string> models-coachmark: "";
+    // --- "that model isn't ready" notice (requirement 7) ---
+    // SET FROM RUST when a dispatch is refused: nm-where is the view that has
+    // to show it ("tts" | "vc" | "tr", "" = no notice anywhere), nm-display the
+    // model's catalog name, nm-id the row to coachmark.
+    in-out property <string> nm-where: "";
+    in property <string> nm-display: "";
+    in property <string> nm-id: "";
+    // --- transcription model picker (STT lives where it is used) ---
+    in property <[string]> stt-options: ["Whisper Base"];
+    in-out property <int> stt-index: 0;
+    callback pick-stt-model(int);
+    // --- language model picker (⚙ Settings) ---
+    in property <[string]> llm-options: ["Qwen3 1.7B"];
+    in-out property <int> llm-index: 0;
+    callback pick-llm-model(int);
+    // the LLM's catalog name, named in the ✎ Compose / Rewrite / Refine tips
+    in property <string> llm-model-label: "";
+    // --- Vevo2 whisper-medium consent (one-shot, persisted app-side) ---
+    // Vevo2's content encoder lives in Amphion's own cache, outside the Models
+    // catalog — no Download button can cover it, so this dialog is the only
+    // place that ~1.5 GB is ever spent, and only on purpose.
+    in-out property <bool> vevo2-ack-open: false;
+    callback vevo2-ack();
     // --- player (full-clip waveform + scrub) ---
     in property <bool> player-active;
     in property <[float]> player-bars;
@@ -1092,7 +1224,7 @@ export component AppWindow inherits Window {
     in-out property <string> cv-language: "en";
     in-out property <int> cv-lang-index: 0;
     in-out property <string> cv-edit-id: "";   // non-empty = the modal edits this profile
-    in property <[string]> cv-model-options: ["Follow active model"];
+    in property <[string]> cv-model-options: ["Follow the composer"];
     in-out property <int> cv-model-index: 0;
     // avatar preview in the modal (staged or existing; pre-baked thumbnail)
     in-out property <image> cv-avatar;
@@ -1117,7 +1249,6 @@ export component AppWindow inherits Window {
     callback rewrite();
     callback download-model(string);
     callback delete-model(string);
-    callback activate-model(string);
     callback play-hist(string);
     callback star-hist(string, bool);
     callback delete-hist(string);
@@ -1269,6 +1400,12 @@ export component AppWindow inherits Window {
     changed tab => {
         if (root.tab != "settings" && root.st-mic-testing) {
             root.st-mic-test-toggle();
+        }
+        // the coachmark is a one-trip errand: leaving Models ends it. Guarded
+        // on "not models" so that ARRIVING here (the notice sets the row and
+        // the tab together) doesn't immediately clear what it just armed.
+        if (root.tab != "models") {
+            root.models-coachmark = "";
         }
     }
 
@@ -1567,7 +1704,10 @@ export component AppWindow inherits Window {
                                                 // ⚄ compose · ✧ speak in character · ✦ generate
                                                 if selected-has-personality : IconBtn {
                                                     glyph: llm-busy ? "…" : "⚄";
-                                                    tip: llm-busy ? "Thinking…" : "Compose a line in character";
+                                                    tip: llm-busy ? "Thinking…"
+                                                        : (llm-model-label == ""
+                                                            ? "Compose a line in character"
+                                                            : "Compose a line in character with " + llm-model-label);
                                                     enabled: !llm-busy;
                                                     clicked => { root.compose(); }
                                                 }
@@ -1605,6 +1745,18 @@ export component AppWindow inherits Window {
                                             horizontal-stretch: 1; vertical-alignment: center;
                                         }
                                         CopyBtn { text: gen-error; }
+                                    }
+                                    // the model behind this generation isn't on
+                                    // disk — nothing was fetched, here's the row
+                                    if nm-where == "tts" : ModelNeededNotice {
+                                        display: nm-display;
+                                        open-models => {
+                                            root.models-coachmark = root.nm-id;
+                                            root.nm-where = "";
+                                            tab = "models";
+                                            root.models-open();
+                                        }
+                                        dismiss => { root.nm-where = ""; }
                                     }
                                     // language / engine / effects (Voicebox dropdown row; opens upward)
                                     HorizontalLayout {
@@ -1966,6 +2118,17 @@ export component AppWindow inherits Window {
                                     tip: "Transcribe an audio file from disk";
                                     clicked => { if (!tr-busy && !tr-recording) { root.tr-pick-file(); } }
                                 }
+                                // The whisper model lives here now, not in
+                                // Models — this is where transcription happens.
+                                // Its reach is wider than this view, which is
+                                // what the tooltip is for.
+                                ThemedDropdown {
+                                    width: narrow ? 150px : 190px;
+                                    model: stt-options;
+                                    current-index <=> stt-index;
+                                    tip: "Speech-to-text model — also used by dictation, the ⇄ converter's transcripts and voice cloning";
+                                    selected(i) => { root.pick-stt-model(i); }
+                                }
                                 Rectangle {}
                                 Text {
                                     text: tr-status; font-size: 11px; font-family: Theme.mono;
@@ -1974,6 +2137,18 @@ export component AppWindow inherits Window {
                                     overflow: elide; preferred-width: 0px;
                                     horizontal-stretch: 1; horizontal-alignment: right;
                                 }
+                            }
+                            // whisper (or the refine LLM) isn't downloaded —
+                            // the capture is safe, only the model is missing
+                            if nm-where == "tr" : ModelNeededNotice {
+                                display: nm-display;
+                                open-models => {
+                                    root.models-coachmark = root.nm-id;
+                                    root.nm-where = "";
+                                    tab = "models";
+                                    root.models-open();
+                                }
+                                dismiss => { root.nm-where = ""; }
                             }
                             // transcript — editable, scrollable, right-click menu
                             Rectangle {
@@ -2073,7 +2248,9 @@ export component AppWindow inherits Window {
                                 }
                                 TBtn {
                                     label: tr-busy ? "…" : "✎ Refine with LLM";
-                                    tip: "Clean up punctuation and names with the language model";
+                                    tip: llm-model-label == ""
+                                        ? "Clean up punctuation and names with the language model"
+                                        : "Clean up punctuation and names with " + llm-model-label + " (change it in ⚙ Settings)";
                                     clicked => { if (!tr-busy && tr-text != "") { root.tr-refine(); } }
                                 }
                                 TBtn {
@@ -2487,6 +2664,18 @@ export component AppWindow inherits Window {
                                 font-size: 11px; font-family: Theme.mono;
                                 color: Theme.name == "vista" ? #ffffff : Theme.dim;
                             }
+                            // the conversion engine's weights aren't on disk —
+                            // refused before any fetch, with the row named
+                            if nm-where == "vc" : ModelNeededNotice {
+                                display: nm-display;
+                                open-models => {
+                                    root.models-coachmark = root.nm-id;
+                                    root.nm-where = "";
+                                    tab = "models";
+                                    root.models-open();
+                                }
+                                dismiss => { root.nm-where = ""; }
+                            }
                             // last conversion failure (composer error-line pattern:
                             // elide + ⧉ copy; preferred-width 0 so it can't inflate)
                             if vc-error != "" : HorizontalLayout {
@@ -2860,6 +3049,37 @@ export component AppWindow inherits Window {
                                 }
                             }
 
+                            // The LLM's home. It is one model shared by ⚄
+                            // Compose, ✎ Rewrite, the transcription refiner and
+                            // dictation's post-processing — no single view owns
+                            // it, so it belongs in Settings.
+                            Text { text: "LANGUAGE MODEL"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Rectangle {
+                                height: 92px;
+                                border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+                                border-radius: Theme.rad; background: Theme.card-bg;
+                                if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+                                VerticalLayout {
+                                    padding: 14px; spacing: 8px;
+                                    HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Model"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 160px; }
+                                        ThemedDropdown {
+                                            horizontal-stretch: 1;
+                                            model: llm-options;
+                                            current-index <=> llm-index;
+                                            tip: "Used by ⚄ Compose, ✎ Rewrite, transcript refine and dictation";
+                                            selected(i) => { root.pick-llm-model(i); }
+                                        }
+                                    }
+                                    Text {
+                                        text: "Download and delete weights in ◈ Models; this is where the one that runs is chosen.";
+                                        font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                        vertical-alignment: center; wrap: word-wrap;
+                                    }
+                                }
+                            }
+
                             Text { text: "DICTATION"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 92px;
@@ -3045,7 +3265,7 @@ export component AppWindow inherits Window {
                                 padding-left: 60px; padding-right: 12px; spacing: 10px;
                                 Text { text: "NAME"; font-size: 10.5px; font-weight: 700; color: Theme.dim; horizontal-stretch: 1; }
                                 Text { text: "LANG"; font-size: 10.5px; font-weight: 700; color: Theme.dim; width: 44px; }
-                                Text { text: "ENGINE"; font-size: 10.5px; font-weight: 700; color: Theme.dim; width: 96px; }
+                                Text { text: "DEFAULT MODEL"; font-size: 10.5px; font-weight: 700; color: Theme.dim; width: 96px; }
                                 Text { text: "SAMPLES"; font-size: 10.5px; font-weight: 700; color: Theme.dim; width: 62px; horizontal-alignment: right; }
                                 Text { text: "GENS"; font-size: 10.5px; font-weight: 700; color: Theme.dim; width: 46px; horizontal-alignment: right; }
                             }
@@ -3078,7 +3298,7 @@ export component AppWindow inherits Window {
                                                 Text { text: r.lang; font-size: 11.5px; font-family: Theme.mono; color: Theme.fg; } }
                                             VerticalLayout { alignment: center; width: 96px;
                                                 Text { text: r.engine; font-size: 11px; font-family: Theme.mono;
-                                                    color: r.engine == "follows" ? Theme.dim : Theme.acc; overflow: elide; } }
+                                                    color: r.engine == "—" ? Theme.dim : Theme.acc; overflow: elide; } }
                                             VerticalLayout { alignment: center; width: 62px;
                                                 Text { text: r.samples; font-size: 11.5px; font-family: Theme.mono; color: Theme.fg; horizontal-alignment: right; } }
                                             VerticalLayout { alignment: center; width: 46px;
@@ -3123,7 +3343,7 @@ export component AppWindow inherits Window {
                                         Text { text: "LANGUAGE"; font-size: 9.5px; font-weight: 700; color: Theme.dim; }
                                         Text { text: vi-lang; font-size: 12px; font-family: Theme.mono; color: Theme.fg; } }
                                     VerticalLayout { spacing: 1px; horizontal-stretch: 1;
-                                        Text { text: "ENGINE"; font-size: 9.5px; font-weight: 700; color: Theme.dim; }
+                                        Text { text: "DEFAULT MODEL"; font-size: 9.5px; font-weight: 700; color: Theme.dim; }
                                         Text { text: vi-engine; font-size: 12px; font-family: Theme.mono; color: Theme.fg; overflow: elide; preferred-width: 0px; } }
                                     VerticalLayout { spacing: 1px;
                                         Text { text: "GENS"; font-size: 9.5px; font-weight: 700; color: Theme.dim; }
@@ -3215,7 +3435,19 @@ export component AppWindow inherits Window {
                         }
                     }
 
-                    if tab == "models" : ScrollView {
+                    if tab == "models" : mdlsv := ScrollView {
+                        // Bring a coachmarked row into view. `ay` is the row's
+                        // ABSOLUTE y, so (ay - our own absolute y) is already
+                        // its position inside the visible window, scroll
+                        // included — the delta needed is that, minus the 20px
+                        // of breathing room we want above it. Clamped to the
+                        // scrollable range so a row near the end doesn't
+                        // scroll past the bottom of the list.
+                        function scroll-to(ay: length) {
+                            self.viewport-y = min(0px, max(
+                                min(0px, self.visible-height - self.viewport-height),
+                                self.viewport-y - (ay - self.absolute-position.y - 20px)));
+                        }
                         VerticalLayout {
                             // Pack from the top. slint's default `stretch`
                             // alignment hands every spare pixel between the
@@ -3266,11 +3498,19 @@ export component AppWindow inherits Window {
                                     CopyBtn { text: vc-install-error; }
                                 }
                             }
+                            // Inventory, not selection. Every section says, in
+                            // one line, WHERE its model is chosen — the whole
+                            // point of the redesign is that this tab installs
+                            // engines and manages weights, and nothing else.
                             for sec in [
-                                { label: "VOICE & CLONING", cat: "voice" },
-                                { label: "VOICE CONVERSION (⇄ CONVERTER)", cat: "vc" },
-                                { label: "TRANSCRIPTION", cat: "stt" },
-                                { label: "LANGUAGE (COMPOSE / REWRITE)", cat: "llm" },
+                                { label: "VOICE & CLONING", cat: "voice",
+                                  hint: "Chosen per voice in the composer's model dropdown (Text to Speech)." },
+                                { label: "VOICE CONVERSION (⇄ CONVERTER)", cat: "vc",
+                                  hint: "Chosen per conversion in the ⇄ Voice Converter." },
+                                { label: "TRANSCRIPTION", cat: "stt",
+                                  hint: "Chosen in the Transcription view — it also serves dictation and ⇄ transcripts." },
+                                { label: "LANGUAGE (COMPOSE / REWRITE)", cat: "llm",
+                                  hint: "Chosen in ⚙ Settings → LANGUAGE MODEL." },
                             ] : VerticalLayout {
                                 spacing: 8px;
                                 Text {
@@ -3279,6 +3519,12 @@ export component AppWindow inherits Window {
                                     // bottom and swallows the dim color
                                     color: Theme.name == "win95" || Theme.name == "vista"
                                         ? #ffffff : Theme.dim;
+                                }
+                                Text {
+                                    text: sec.hint; font-size: 10.5px; font-family: Theme.mono;
+                                    color: Theme.name == "win95" || Theme.name == "vista"
+                                        ? #cfe6e6 : Theme.dim;
+                                    wrap: word-wrap;
                                 }
                                 if sec.cat == "voice" : VerticalLayout {
                                     spacing: 8px;
@@ -3289,43 +3535,48 @@ export component AppWindow inherits Window {
                                     // would render but do nothing.
                                     for m in voice-models : ModelRow {
                                         m: m;
+                                        coachmark: root.models-coachmark == m.id && m.id != "";
                                         installing: root.vc-install-active == m.setup-id && root.vc-install-active != "";
                                         install-stage: root.vc-install-stage;
-                                        download => { root.download-model(m.id); }
+                                        download => { root.models-coachmark = ""; root.download-model(m.id); }
                                         del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
-                                        activate => { root.activate-model(m.id); }
                                         install-request => { root.vc-install-kind = m.setup-id; }
                                         cancel-request => { root.cancel-vc(m.setup-id); }
+                                        coachmark-placed(ay) => { mdlsv.scroll-to(ay); }
                                     }
                                 }
                                 if sec.cat == "vc" : VerticalLayout {
                                     spacing: 8px;
                                     for m in vc-conv-models : ModelRow {
-                                        m: m; selectable: false;
+                                        m: m;
+                                        coachmark: root.models-coachmark == m.id && m.id != "";
                                         installing: root.vc-install-active == m.setup-id && root.vc-install-active != "";
                                         install-stage: root.vc-install-stage;
-                                        download => { root.download-model(m.id); }
+                                        download => { root.models-coachmark = ""; root.download-model(m.id); }
                                         del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
                                         install-request => { root.vc-install-kind = m.setup-id; }
                                         cancel-request => { root.cancel-vc(m.setup-id); }
+                                        coachmark-placed(ay) => { mdlsv.scroll-to(ay); }
                                     }
                                 }
                                 if sec.cat == "stt" : VerticalLayout {
                                     spacing: 8px;
                                     for m in stt-models : ModelRow {
                                         m: m;
-                                        download => { root.download-model(m.id); }
+                                        coachmark: root.models-coachmark == m.id && m.id != "";
+                                        download => { root.models-coachmark = ""; root.download-model(m.id); }
                                         del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
-                                        activate => { root.activate-model(m.id); }
+                                        coachmark-placed(ay) => { mdlsv.scroll-to(ay); }
                                     }
                                 }
                                 if sec.cat == "llm" : VerticalLayout {
                                     spacing: 8px;
                                     for m in llm-models : ModelRow {
                                         m: m;
-                                        download => { root.download-model(m.id); }
+                                        coachmark: root.models-coachmark == m.id && m.id != "";
+                                        download => { root.models-coachmark = ""; root.download-model(m.id); }
                                         del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
-                                        activate => { root.activate-model(m.id); }
+                                        coachmark-placed(ay) => { mdlsv.scroll-to(ay); }
                                     }
                                 }
                                 Rectangle { height: 6px; }
@@ -3572,7 +3823,7 @@ export component AppWindow inherits Window {
                         }
                         Rectangle {}
                         Text {
-                            text: "Cloned voices synthesize with the active voice engine (see Models).";
+                            text: "Optional. Selecting this voice preselects that model in the composer — you can still change it there, for this session only.";
                             font-size: 10.5px; font-family: Theme.mono; color: Theme.dim; wrap: word-wrap;
                         }
                     }
@@ -4151,6 +4402,54 @@ export component AppWindow inherits Window {
                         clicked => {
                             root.install-vc(vc-install-kind);
                             vc-install-kind = "";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- Vevo2 whisper-medium consent dialog (one-shot) ---
+    // The only multi-GB fetch in Syrinx that no catalog row covers: Vevo2's
+    // singing pipeline pulls whisper-medium as its content encoder, into
+    // Amphion's own cache. There is no Download button to press, so this is the
+    // one place that disk gets spent on purpose. Rust persists the answer
+    // (settings.json, `vevo2_whisper_ack`) and replays the conversion.
+    if vevo2-ack-open : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 460px; height: 260px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text {
+                    text: "Vevo2 needs one more download";
+                    font-size: 15px; font-weight: 700; color: Theme.fg;
+                }
+                Text {
+                    text: "Singing conversion runs the source through Whisper Medium (~1.5 GB) to read its content. It isn't part of the Models catalog — Vevo keeps it in its own cache — so Syrinx asks once instead of fetching it behind your back.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                Text {
+                    text: "It downloads on the first ♫ conversion only, and Syrinx won't ask again.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { vevo2-ack-open = false; } }
+                    TBtn {
+                        label: "Download and convert"; tip: "Allow the one-time Whisper Medium download";
+                        generate: true; min-width: 170px;
+                        clicked => {
+                            vevo2-ack-open = false;
+                            root.vevo2-ack();
                         }
                     }
                 }
