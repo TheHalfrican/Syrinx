@@ -594,6 +594,25 @@ def test_voice_meta_reads_the_engine_off_the_id_or_the_profile(iface):
     assert iface._voice_meta(cloned) == ("luxtts", "en")
 
 
+def test_get_profile_exposes_the_routing_fields_the_app_locks_on(iface):
+    """The app decides whether the composer's engine picker is a real choice
+    from GetProfile alone (no extra RPC): voice_type says preset-vs-cloned, and
+    preset_engine names the one engine a preset can ever speak on. Dropping
+    either from the payload would silently re-offer impossible engine swaps."""
+    preset = call(iface, "CreateProfile", json.dumps({
+        "name": "Preset", "voice_type": "preset", "preset_engine": "kokoro",
+        "preset_voice_id": "af_heart"}))
+    p = json.loads(call(iface, "GetProfile", preset))
+    assert (p["voice_type"], p["preset_engine"]) == ("preset", "kokoro")
+
+    cloned = call(iface, "CreateProfile", json.dumps({
+        "name": "Cloned", "voice_type": "cloned", "default_engine": "luxtts"}))
+    c = json.loads(call(iface, "GetProfile", cloned))
+    # cloned voices carry a *pin*, not a lock — the picker stays live for them
+    assert (c["voice_type"], c["preset_engine"], c["default_engine"]) == (
+        "cloned", "", "luxtts")
+
+
 def test_voice_display_name_falls_back_to_the_id(iface):
     assert asyncio.run(iface._voice_display_name("no-such-profile")) == "no-such-profile"
     pid = call(iface, "CreateProfile", json.dumps({"name": "Named", "voice_type": "cloned"}))

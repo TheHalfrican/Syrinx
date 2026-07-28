@@ -1805,12 +1805,12 @@ fn hardware_line(json: &str) -> String {
 
 /// Re-fetch the catalog + hardware and push into the UI. Also rebuilds the
 /// composer's engine dropdown and the modal's default-model options (usable =
-/// downloaded + supported voice models); returns (model id, engine) pairs in
-/// dropdown order plus the active voice engine name.
+/// downloaded + supported voice models); returns (model id, engine, display)
+/// triples in dropdown order plus the active voice engine name.
 async fn refresh_models(
     ui: &slint::Weak<AppWindow>,
     proxy: &EngineClient,
-) -> (Vec<(String, String)>, String) {
+) -> (Vec<(String, String, String)>, String) {
     let models_json = proxy.list_models().await.unwrap_or_else(|_| "[]".into());
     let hw_json = proxy.hardware().await.unwrap_or_default();
     let (voice, stt, llm, vc_conv) = build_models(&models_json);
@@ -1820,7 +1820,9 @@ async fn refresh_models(
     let vc_missing = missing_vc_engines(&vc_conv);
 
     let arr: Vec<serde_json::Value> = serde_json::from_str(&models_json).unwrap_or_default();
-    let mut models: Vec<(String, String)> = Vec::new(); // (model id, engine)
+    // (model id, engine, catalog display) — the display rides along so an
+    // engine-locked voice can name its engine without a second catalog pass
+    let mut models: Vec<(String, String, String)> = Vec::new();
     let mut eng_names: Vec<SharedString> = Vec::new();
     let mut active_idx: i32 = 0;
     let mut active_engine = String::from("kokoro");
@@ -1832,7 +1834,7 @@ async fn refresh_models(
                 active_idx = models.len() as i32;
                 active_engine = s("engine").to_string();
             }
-            models.push((s("id").to_string(), s("engine").to_string()));
+            models.push((s("id").to_string(), s("engine").to_string(), s("display").to_string()));
             eng_names.push(s("display").into());
         }
     }
@@ -2073,6 +2075,50 @@ fn langs_for_engine(engine: &str) -> Vec<(&'static str, &'static str)> {
         .iter()
         .filter_map(|c| ALL.iter().find(|(_, code)| code == c).copied())
         .collect()
+}
+
+/// The one engine a voice can EVER speak on, if it has one.
+///
+/// Mirrors the engine's own router (`SpeechSynthesizer.synthesize`, and its
+/// twin `Core._voice_meta`): a `builtin:<engine>:<voice>` id and a *preset*
+/// profile always synthesize on their own engine — the active voice model has
+/// no say in it. Only *cloned* profiles float, following their pin or whatever
+/// clone engine is active, and only they get a real engine choice.
+///
+/// `None` = free to move. `profile_json` is GetProfile's payload for a profile
+/// id (ignored for builtins; "" when the lookup failed — an unknown id falls
+/// back to the built-in preset engine on the engine side, but we'd rather
+/// under-lock than lock the composer on a guess).
+fn locked_engine(voice_id: &str, profile_json: &str) -> Option<String> {
+    if let Some(rest) = voice_id.strip_prefix("builtin:") {
+        // builtin:<engine>:<voice> — kokoro, or an extra preset engine
+        let engine = rest.split(':').next().unwrap_or("");
+        return Some(if engine.is_empty() { "kokoro".into() } else { engine.to_string() });
+    }
+    let p: serde_json::Value = serde_json::from_str(profile_json).ok()?;
+    if p.get("voice_type").and_then(|v| v.as_str())? != "preset" {
+        return None;
+    }
+    // blank preset_engine falls through to the built-in preset engine, exactly
+    // as `SpeechSynthesizer.synthesize` does for a preset profile
+    let e = p.get("preset_engine").and_then(|v| v.as_str()).unwrap_or("");
+    Some(if e.is_empty() { "kokoro".into() } else { e.to_string() })
+}
+
+/// Human label for an engine id: the catalog display of a voice model that
+/// runs it ("Kokoro 82M"), else the raw id — an engine whose model row isn't
+/// downloaded (or isn't in the catalog at all) still has to read as something
+/// rather than leave the composer's engine field blank.
+///
+/// Engines with several size rows (qwen 1.7B/0.6B, …) take the first: this
+/// names the *engine*, which is what's locked — the size is a Models-tab
+/// concern and both rows say the same engine.
+fn engine_label(models: &[(String, String, String)], engine: &str) -> String {
+    models
+        .iter()
+        .find(|(_, e, _)| e == engine)
+        .map(|(_, _, d)| d.clone())
+        .unwrap_or_else(|| engine.to_string())
 }
 
 /// Push the language dropdown for `engine`, preselecting `current_code`;
@@ -2701,6 +2747,14 @@ async fn run_session(
             if ui.get_selected_voice().is_empty() {
                 ui.set_selected_voice(default_selected.clone().into());
                 ui.set_selected_voice_name(voice_name(&ui, &default_selected).into());
+            }
+            // Cold launch and reconnect both restore a selection without a
+            // click, so the select-voice callback never fires for it. Run it
+            // by hand or the composer keeps its defaults — a Kokoro preset
+            // would come up offering the (impossible) engine picker.
+            let sel = ui.get_selected_voice();
+            if !sel.is_empty() {
+                ui.invoke_select_voice(sel);
             }
             set_history_model(&ui, hist_items);
             set_captures_model(&ui, capture_items);
@@ -3615,7 +3669,7 @@ async fn run_session(
                     } else {
                         voice_models
                             .get(model_index - 1)
-                            .map(|(_, e)| e.clone())
+                            .map(|(_, e, _)| e.clone())
                             .unwrap_or_default()
                     };
                     ui.upgrade_in_event_loop(|ui| ui.set_cv_error("".into())).ok();
@@ -3865,6 +3919,13 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::SelectVoice { id }) => {
+                    // one GetProfile serves both the language list and the engine
+                    // lock below; builtins have no profile row to fetch at all
+                    let pj = if id.starts_with("builtin:") {
+                        String::new()
+                    } else {
+                        proxy.get_profile(&id).await.unwrap_or_default()
+                    };
                     let (engine, code) = if id.starts_with("builtin:") {
                         // builtin:<engine>:<voice> — kokoro or an extra preset
                         // engine like qwen_custom_voice
@@ -3875,7 +3936,7 @@ async fn run_session(
                             "en".to_string()
                         };
                         (engine, code)
-                    } else if let Ok(pj) = proxy.get_profile(&id).await {
+                    } else if !pj.is_empty() {
                         let p: serde_json::Value = serde_json::from_str(&pj).unwrap_or_default();
                         let de = p.get("default_engine").and_then(|v| v.as_str()).unwrap_or("");
                         let engine = if de.is_empty() { active_engine.clone() } else { de.to_string() };
@@ -3884,14 +3945,29 @@ async fn run_session(
                     } else {
                         ("kokoro".to_string(), "en".to_string())
                     };
+                    // A voice bound to one engine (kokoro presets, preset
+                    // profiles) overrides all of the above: default_engine is
+                    // meaningless there, and the composer must show what will
+                    // actually speak — not the active clone engine.
+                    let lock = locked_engine(&id, &pj);
+                    let engine = lock.clone().unwrap_or(engine);
                     lang_codes = update_composer_langs(&ui, &engine, &code);
                     // the composer's model dropdown mirrors this voice's engine
-                    // (profile pin, else the active model)
+                    // (lock, else profile pin, else the active model); when it's
+                    // locked the dropdown is replaced by a read-only field, so
+                    // the picker never offers an engine the router would ignore
                     let eidx = voice_models
                         .iter()
-                        .position(|(_, e)| *e == engine)
+                        .position(|(_, e, _)| *e == engine)
                         .unwrap_or(0) as i32;
-                    ui.upgrade_in_event_loop(move |ui| ui.set_composer_engine_index(eidx)).ok();
+                    let lock_label = lock
+                        .map(|e| engine_label(&voice_models, &e))
+                        .unwrap_or_default();
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_composer_engine_index(eidx);
+                        ui.set_composer_engine_locked(lock_label.into());
+                    })
+                    .ok();
                 }
                 Some(Cmd::PickLanguage { voice, index }) => {
                     if let Some(code) = lang_codes.get(index) {
@@ -3944,7 +4020,7 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::PickEngine { voice, index }) => {
-                    if let Some((mid, meng)) = voice_models.get(index).cloned() {
+                    if let Some((mid, meng, _)) = voice_models.get(index).cloned() {
                         if !voice.is_empty() && !voice.starts_with("builtin:") {
                             // cloned profile selected: the dropdown pins THIS
                             // voice's engine (same field as the edit modal)
@@ -4039,7 +4115,7 @@ async fn run_session(
                         } else {
                             voice_models
                                 .iter()
-                                .position(|(_, e)| *e == de)
+                                .position(|(_, e, _)| *e == de)
                                 .map(|i| i as i32 + 1)
                                 .unwrap_or(0)
                         };
@@ -5841,6 +5917,63 @@ mod tests {
             let p = kokoro_prefixes(code)[0];
             assert_eq!(kokoro_lang_code(&format!("builtin:kokoro:{p}f_x")), *code);
         }
+    }
+
+    // --- locked_engine / engine_label ------------------------------------
+
+    #[test]
+    fn locked_engine_binds_builtins_to_the_engine_in_their_id() {
+        // the Kokoro Defaults card's voices — the case Noah hit
+        assert_eq!(locked_engine("builtin:kokoro:af_heart", ""), Some("kokoro".into()));
+        // an extra preset engine locks just as hard
+        assert_eq!(
+            locked_engine("builtin:qwen_custom_voice:ethan", ""),
+            Some("qwen_custom_voice".into())
+        );
+        // malformed ids still name an engine rather than blanking the field
+        assert_eq!(locked_engine("builtin:", ""), Some("kokoro".into()));
+        assert_eq!(locked_engine("builtin:tada", ""), Some("tada".into()));
+    }
+
+    #[test]
+    fn locked_engine_binds_preset_profiles_and_frees_cloned_ones() {
+        let preset = r#"{"voice_type":"preset","preset_engine":"kokoro","default_engine":""}"#;
+        assert_eq!(locked_engine("prof:1", preset), Some("kokoro".into()));
+        // a preset row with no engine falls through to the built-in one, the
+        // same way SpeechSynthesizer.synthesize does
+        assert_eq!(
+            locked_engine("prof:1", r#"{"voice_type":"preset"}"#),
+            Some("kokoro".into())
+        );
+        // cloned voices are the ones with a real choice — pinned or not
+        assert_eq!(locked_engine("prof:1", r#"{"voice_type":"cloned"}"#), None);
+        assert_eq!(
+            locked_engine("prof:1", r#"{"voice_type":"cloned","default_engine":"qwen"}"#),
+            None
+        );
+    }
+
+    #[test]
+    fn locked_engine_under_locks_when_it_cannot_tell() {
+        // no profile payload (lookup failed / empty id): leave the dropdown
+        // alone rather than lock the composer on a guess
+        assert_eq!(locked_engine("prof:1", ""), None);
+        assert_eq!(locked_engine("prof:1", "not json"), None);
+        assert_eq!(locked_engine("prof:1", r#"{"name":"Piccolo"}"#), None);
+        assert_eq!(locked_engine("", ""), None);
+    }
+
+    #[test]
+    fn engine_label_prefers_the_catalog_display() {
+        let models = vec![
+            ("kokoro".to_string(), "kokoro".to_string(), "Kokoro 82M".to_string()),
+            ("qwen-tts-1.7B".to_string(), "qwen".to_string(), "Qwen TTS 1.7B".to_string()),
+        ];
+        assert_eq!(engine_label(&models, "kokoro"), "Kokoro 82M");
+        assert_eq!(engine_label(&models, "qwen"), "Qwen TTS 1.7B");
+        // an engine with no usable model row still reads as something
+        assert_eq!(engine_label(&models, "luxtts"), "luxtts");
+        assert_eq!(engine_label(&[], "kokoro"), "kokoro");
     }
 
     // --- profile_err_msg -------------------------------------------------
