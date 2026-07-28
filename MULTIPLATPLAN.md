@@ -838,6 +838,37 @@ install it first when present — an end user without Visual Studio
 cannot build it, and that wall is otherwise the first thing the
 one-click Seed-VC install hits on a stock box.
 
+**2026-07-28 (night) — Seed-VC installed END TO END via the one-click
+path; the webrtcvad wall closed for stock boxes; error UX productized.**
+The install completed twice on this box — once driving VcSetupManager
+directly, once through the full Explorer→app→engine→pwsh chain over
+RPC — including a genuine webrtcvad compile, demucs, pins, and the
+import proof. The earlier failures did NOT reproduce and are now
+corroborated transient: the wheel-build agent independently hit the
+same "Unable to find a compatible Visual Studio installation" ONCE
+mid-testing and could not reproduce it either (suspect: the VS
+installer instance store briefly locked; vswhere returns empty and
+setuptools gives up). Error UX fixes from Noah's live run: NO_COLOR +
+TERM=dumb on the setup child plus ANSI-stripping in the reader (the
+shell that never showed garbage had NO_COLOR set — the app chain
+didn't); _reason scans past PowerShell/pip decoration to the first
+self-announcing error line, capped at 240 chars; the banner hugs its
+text (a wrapping Text advertises unbounded max height, so stretch
+alignment fed it the whole viewport — whole sections fell off-page).
+STOCK-BOX FIX: build-windows.ps1 builds webrtcvad-2.0.10 cp312 as a
+wheel (best-effort locally, greppable WARN; the embeddable python
+CANNOT build it — no Include/ or python312.lib — so a full host 3.12
+is probed, Store stub rejected by execution), release.yml pins
+setup-python 3.12 and HARD-FAILS if the bundle lacks the wheel, and
+setup-seedvc.ps1 pre-installs it inside the seedvc stage so pip's
+resolver never reaches for the sdist (file path, not a pin token —
+guards untouched; .sh deliberately has no counterpart, Linux compiles
+it with gcc without comment). macOS note for phase 3: the compiler
+there comes from the Xcode Command Line Tools — a stock Mac PROMPTS to
+install them on first cc invocation, so Seed-VC's mac story is either
+that prompt or bundling a mac-built webrtcvad wheel like Windows now
+does. Decide when mac packaging exists.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
