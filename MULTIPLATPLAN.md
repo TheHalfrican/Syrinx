@@ -933,6 +933,48 @@ names the catalog's first row where the app-side check prefers a
 downloaded one — reachable only headless. Suites: engine 492 passed
 1 skipped (+30), cargo 93+6+1 (+20), clippy clean throughout.
 
+**2026-07-28 (smoke) — Noah's first two clicks of the redesign found
+and killed two more bugs; one TODO carried to tomorrow.** Click one
+(Download on the freshly-installed Seed-VC row) died at ~3-5% with
+WinError 1314: huggingface_hub memoizes are_symlinks_supported per
+REPO dir, writes the memo optimistically True before the trial
+symlink corrects it, and a parallel file worker reading inside that
+unlocked gap symlinks for real on a privilege-less box (1314 maps to
+neither exception _create_symlink catches). seed-vc is maximally
+exposed — four repos into fresh per-engine cache dirs. Fixed
+(9f76669): the engine settles hub's own probe serially per repo,
+under the fetch lock, before snapshot_download spawns workers — the
+exact function and memo key the workers consult, self-answering so
+Developer-Mode boxes keep native symlinks, unconditional because the
+race lives in the memo, not in Windows. (HF_HUB_DISABLE_SYMLINKS does
+not exist in hub 0.36.2 — verified against source.) The same click
+exposed the LAST log-only failure path: ModelProgress "error" just
+flashed to 0% and reverted. Now it banners — which model, where
+engine.log is (per-OS hint), and that Download resumes; a narrow
+set_models_error so a download failure can't clobber a live install's
+marquee. Click two (the retry) failed HONESTLY: ChunkedEncodingError,
+0 bytes × hub's 5 internal retries on a ~785 MB checkpoint — network/
+CDN, correctly bannered, resumable. WINDOWS.md names both symlink
+racers, dated.
+
+**TODO — NEXT SESSION (Noah, 2026-07-28): download auto-retry.**
+"The engine could absorb a burst of transient network failures itself
+— auto-retry each repo two or three times with a short backoff before
+showing the banner … and when it is happening I would like the text
+above the marquee to reflect that." Shape: retry loop around the
+per-repo fetch inside ModelManager.download (2-3 attempts, short
+backoff, only on transient network errors — ChunkedEncodingError /
+IncompleteRead / timeouts, never on 1314-class or disk errors), and a
+retry indication in the row's progress label. NOTE the wire shape:
+ModelProgress is (model_id, pct, status) with status
+downloading|finalizing|done|error and unknown statuses degrading to a
+plain bar in the app — a "retrying" status string would degrade
+safely on an old app, but the label text above the marquee is
+app-side (main.slint ModelRow downloading block), so the honest
+implementation is a new status token + app mapping. Decide whether
+that counts as a §6 vocabulary change needing a RPC-PROTOCOL prose
+note (no count changes either way).
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
