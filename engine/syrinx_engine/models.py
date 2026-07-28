@@ -7,6 +7,10 @@ by polling the repo's on-disk byte growth against `size_mb`.
 
 Active-model selection (which TTS engine/size, LLM size, STT model the engine
 uses) is persisted to $SYRINX_DATA_DIR/models.json.
+
+This module is also the authority on *readiness*: `require_weights` is the gate
+every generation path passes through so that no model is ever fetched as a side
+effect of pressing Generate (see "the readiness gate", below).
 """
 
 import asyncio
@@ -99,6 +103,9 @@ CATALOG: list = [
     # (ungated unsloth mirror, ~2 MB) is fetched by the backend at load time —
     # listing the repo here would drag in 2.5 GB of unused Llama weights and
     # break cached-detection (tokenizer-only repos have no weight files).
+    # That side-fetch is a *disclosed exception* to the no-silent-downloads rule
+    # below: ~2 MB, unavoidable without vendoring a tokenizer, and accepted on
+    # exactly those terms — nothing else in the catalog may fetch behind a back.
     ModelSpec("tada-1b", "TADA 1B", "voice", "tada", "1B",
               ["HumeAI/tada-1b", "HumeAI/tada-codec"], 14000,
               "Llama-3.2-1B speech-LM, 700s+ coherent audio. English.",
@@ -345,6 +352,109 @@ def is_repo_cached(repo: str, base: "Path | None" = None) -> bool:
 
 def is_cached(m: "ModelSpec") -> bool:
     return all(is_repo_cached(r, _cache_root(m, r)) for r in m.repos)
+
+
+# --- the readiness gate: no weights nobody asked for ------------------------
+#
+# Disk space is spent by explicit choice, never as a side effect of pressing
+# Generate. Every ML library under this engine will happily fetch multi-GB
+# weights on first use, which is how a single ⇄ Convert click could quietly
+# cost 9 GB — so the components ask this gate before they load anything.
+#
+# The gate is deliberately shy. It refuses only when it can name the exact
+# catalog row AND that row's files are missing; an engine or handle it doesn't
+# recognize (a raw HF repo, a hand-set $SYRINX_* override) passes straight
+# through. Guessing which row a stranger meant, and then refusing on the guess,
+# would break every legitimate off-catalog model for no safety gained.
+
+
+class ModelNotDownloaded(RuntimeError):
+    """Weights the user never chose to download, refused instead of fetched.
+
+    ``str(exc)`` is a complete, actionable sentence: it is shown verbatim in the
+    app's generation-error banner, so nothing downstream may truncate or reword
+    it (see ``core._failure_text``).
+    """
+
+
+def spec_for(category: str, engine: str, size: str = ""):
+    """The catalog row for a (category, engine, size) triple — None if unknown.
+
+    *size* is matched against :attr:`ModelSpec.size` first and, failing that,
+    against the row's repo ids, because the components hold different handles on
+    the same row: the TTS router remembers ``"1.7B"`` while the Transcriber
+    remembers the faster-whisper repo it was handed.
+
+    ``""`` means "this component never recorded a size", and the answer is the
+    catalog's FIRST row for that engine — which is the variant a backend built
+    with ``size=""`` loads (qwen 1.7B, tada 1B, whisper base.en). Keep the
+    catalog ordered that way or this quietly starts naming the wrong row.
+
+    ``None`` is an answer, not a failure: see the section note above.
+    """
+    rows = [m for m in CATALOG if m.category == category and m.engine == engine]
+    if not rows:
+        return None
+    if not size:
+        return rows[0]
+    for m in rows:
+        if m.size == size:
+            return m
+    for m in rows:
+        if size in m.repos:
+            return m
+    return None
+
+
+def downloaded_engines(category: str) -> set:
+    """Engine names in *category* with at least one fully-downloaded row.
+
+    Engine-level on purpose — the callers ask "can this engine speak at all?",
+    and a row half-fetched (one of two repos) is not an engine.
+    """
+    return {m.engine for m in CATALOG if m.category == category and is_cached(m)}
+
+
+# The ⇄ converter picks an ENGINE and a MODE; the catalog holds ROWS, and the
+# two are not one-to-one — vevo_timbre is Vevo-Timbre for speech and Vevo2 for
+# singing, sharing one engine name, one venv and one Amphion clone. This map is
+# the single place that correspondence is written down (the app mirrors it in
+# VC_SPEECH_ROWS/VC_MUSIC_ROWS), and it is what finally makes vevo2-singing's
+# row state consultable at all. Only the pairs the ⇄ view can actually produce
+# are listed: chatterbox_vc has no music pipeline, so it has no music entry.
+VC_ROW_FOR = {
+    ("chatterbox_vc", "speech"): "chatterbox-vc",
+    ("seed_vc", "speech"): "seed-vc",
+    ("seed_vc", "music"): "seed-vc",
+    ("vevo_timbre", "speech"): "vevo-timbre",
+    ("vevo_timbre", "music"): "vevo2-singing",
+}
+
+
+def _size_hint(m: "ModelSpec") -> str:
+    """The download's cost in the unit a human recognizes. Under a gigabyte,
+    "0.1 GB" reads as a rounding error rather than as a real file to fetch."""
+    if m.size_mb >= 1024:
+        return f"{m.size_mb / 1024:.1f} GB"
+    return f"{m.size_mb} MB"
+
+
+def require_weights(category: str, engine: str, size: str = "",
+                    model_id: str = "") -> None:
+    """Refuse to run on weights that were never downloaded.
+
+    *model_id* names the row outright, for callers that already know it (the ⇄
+    converter, via :data:`VC_ROW_FOR`); everyone else describes the row and lets
+    :func:`spec_for` find it. Raises :class:`ModelNotDownloaded`; a no-op when
+    the row is unknown or already on disk.
+    """
+    m = spec(model_id) if model_id else spec_for(category, engine, size)
+    if m is None or is_cached(m):
+        return
+    raise ModelNotDownloaded(
+        f"{m.display} isn't downloaded yet — open Models and click Download "
+        f"on its row ({_size_hint(m)})."
+    )
 
 
 # --- honest download totals -------------------------------------------------

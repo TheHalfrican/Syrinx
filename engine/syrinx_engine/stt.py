@@ -15,6 +15,8 @@ import shutil
 import sys
 from pathlib import Path
 
+from . import models
+
 log = logging.getLogger("syrinx.engine.stt")
 
 
@@ -126,6 +128,13 @@ class Transcriber:
     async def load(self) -> None:
         if self._model is not None:
             return
+        # faster-whisper downloads whatever size it is handed on first use —
+        # which is how one dictation click used to spend 1.5 GB of someone
+        # else's disk. A catalogued size that isn't on disk is refused here,
+        # with the row to click; a raw HF repo (SYRINX_WHISPER_MODEL, or a
+        # model set by hand) isn't in the catalog and passes through unguarded,
+        # because we cannot know its cost and will not guess at it.
+        models.require_weights("stt", "whisper", size=self.model_size)
         await asyncio.to_thread(self._load_sync)
 
     def _load_sync(self) -> None:

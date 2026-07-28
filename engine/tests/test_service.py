@@ -589,9 +589,15 @@ def test_voice_meta_reads_the_engine_off_the_id_or_the_profile(iface):
         "preset_voice_id": "af_heart", "language": "fr"}))
     assert iface._voice_meta(preset) == ("kokoro", "fr")
 
+    # a cloned voice reports the COMPOSER's engine, never its own pin: the pin
+    # is an app-side seed for the dropdown, and a history row that credited it
+    # would be naming an engine that didn't speak. Nothing has been picked here,
+    # so the router's default cloning engine is the honest answer.
     cloned = call(iface, "CreateProfile", json.dumps({
         "name": "Cloned", "voice_type": "cloned", "default_engine": "luxtts"}))
-    assert iface._voice_meta(cloned) == ("luxtts", "en")
+    assert iface._voice_meta(cloned) == ("qwen", "en")
+    iface._tts.set_voice_engine("chatterbox")
+    assert iface._voice_meta(cloned) == ("chatterbox", "en")
 
 
 def test_get_profile_exposes_the_routing_fields_the_app_locks_on(iface):

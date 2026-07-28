@@ -31,10 +31,10 @@ from .stt import Transcriber
 from .profiles import ProfileStore
 from .history import CaptureStore, HistoryStore, SourceClipStore
 from .llm import PersonalityLLM
-from .models import ModelManager, spec as model_spec, detect_hardware
+from .models import ModelManager, ModelNotDownloaded, spec as model_spec, detect_hardware
 from .recording import RecordingManager
 from .vcsetup import SETUP_IDS, VcSetupManager
-from . import audio, effects, settings as engine_settings
+from . import audio, effects, models, settings as engine_settings
 
 log = logging.getLogger("syrinx.engine.service")
 
@@ -52,6 +52,11 @@ def _failure_text(e: Exception, model: str) -> str:
     importable on a torch-free box."""
     if type(e).__name__ == "OutOfMemoryError":
         return f"out of GPU memory loading {model} — try a smaller model size in the Models tab"
+    if isinstance(e, ModelNotDownloaded):
+        # Our own prose, written for this banner and already complete. The clamp
+        # below is aimed at torch's allocator dumps; applied here it would eat
+        # "…click Download on its row (9.0 GB)." — the only actionable half.
+        return str(e)
     return str(e)[:200]
 
 
@@ -304,8 +309,11 @@ class EngineCore:
         if prof is None:
             return "", "en"
         if prof.voice_type == "cloned":
-            # unpinned cloned voices synthesize with the active clone engine
-            engine = prof.default_engine or self._tts.clone_engine
+            # One authority: a cloned voice speaks on whatever the composer
+            # picked (clone_engine), full stop. The profile's default_engine is
+            # an app-side SEED for that dropdown now — reading it here would let
+            # a history row claim an engine that never spoke a syllable of it.
+            engine = self._tts.clone_engine
         else:
             engine = prof.preset_engine or ""
         return engine, (prof.language or "en")
@@ -376,6 +384,16 @@ class EngineCore:
                 if music and not hasattr(be, "convert_music"):
                     raise ValueError(f"{be.engine_name} does not support music mode")
                 be.check_source(audio_path)  # cheap cap check before any load
+                # No silent multi-GB fetch: every ⇄ engine will pull its own
+                # weights on first convert if asked to load without them. Refuse
+                # here, BEFORE load() touches the network, naming the row to
+                # download. The engine name alone doesn't identify that row —
+                # vevo_timbre is Vevo-Timbre for speech and Vevo2 for singing —
+                # so the (engine, mode) pair does the pointing.
+                models.require_weights(
+                    "vc", be.engine_name,
+                    model_id=models.VC_ROW_FOR.get((be.engine_name, mode), ""),
+                )
                 self._emit("GenerationProgress", gen_id, "loading model", 0.0)
                 await be.load()
                 if music:

@@ -14,6 +14,8 @@ import logging
 import os
 import re
 
+from . import models
+
 log = logging.getLogger("syrinx.engine.llm")
 
 _MODELS = {
@@ -184,6 +186,11 @@ class PersonalityLLM:
     async def load(self) -> None:
         if self._model is not None:
             return
+        # Same gate the TTS and STT stacks pass: from_pretrained would fetch the
+        # repo on first Compose, and 7.7 GB is not a surprise anyone should get
+        # from clicking ✎. A raw repo in $SYRINX_LLM_MODEL isn't catalogued and
+        # passes through — the size names in _MODELS are what this can vouch for.
+        models.require_weights("llm", "qwen_llm", size=self.model_size)
         await asyncio.to_thread(self._load_sync)
 
     def _load_sync(self) -> None:

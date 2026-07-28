@@ -18,8 +18,17 @@ from syrinx_engine import models
 from syrinx_engine.backends import VoiceInfo
 from syrinx_engine.core import EngineCore
 from syrinx_engine.service import EngineInterface
+from test_models import fake_repo
 
 RATE = 24_000
+
+
+def cache_model(model_id):
+    """Materialize a catalog row's weights wherever models.py looks for them
+    (seed-vc keeps its own two-tier cache under the data dir)."""
+    m = models.spec(model_id)
+    for repo in m.repos:
+        fake_repo(models._cache_root(m, repo) or models._hf_cache(), repo)
 
 
 def tone(secs=0.2, amp=0.5):
@@ -148,6 +157,14 @@ def iface(fake_sd):
     e._stt = FakeSTT()
     e._llm = FakeLLM()
     return e
+
+
+@pytest.fixture
+def vc_ready():
+    """Seed-VC's weights on disk. Conversions are refused before load() when
+    they aren't (asserted on its own, below) — every other conversion test is
+    about what happens once that gate has passed."""
+    cache_model("seed-vc")
 
 
 @pytest.fixture
@@ -313,11 +330,25 @@ def test_a_gpu_oom_becomes_an_actionable_message(iface, signals, monkeypatch):
                       "try a smaller model size in the Models tab"]
 
 
-def test_speak_through_a_profile_records_its_engine_and_language(iface):
+def test_a_download_refusal_reaches_the_banner_whole(iface):
+    """The 200-char clamp exists for torch's allocator dumps. Applied to our
+    own prose it would eat "…click Download on its row (9.0 GB)." — the only
+    half of the sentence anyone can act on."""
+    from syrinx_engine.core import _failure_text
+
+    long_one = models.ModelNotDownloaded("x" * 400 + " — open Models")
+    assert _failure_text(long_one, "seed_vc") == str(long_one)
+    # and the clamp is still there for everything else
+    assert len(_failure_text(RuntimeError("y" * 400), "seed_vc")) == 200
+
+
+def test_speak_through_a_profile_records_the_engine_that_actually_spoke(iface):
+    """The history row names the composer's engine, not the profile's pin. The
+    pin used to win here — so a row could credit LuxTTS for audio Qwen made."""
     pid = profile(iface, "Nail", language="fr", default_engine="luxtts")
     drive(iface, "Speak", "bonjour", pid)
     row = json.loads(drive(iface, "ListHistory"))[0]
-    assert (row["voice_name"], row["engine"], row["language"]) == ("Nail", "luxtts", "fr")
+    assert (row["voice_name"], row["engine"], row["language"]) == ("Nail", "qwen", "fr")
 
 
 def test_a_history_save_failure_does_not_sink_the_generation(iface, signals, monkeypatch):
@@ -339,7 +370,7 @@ def cloned_with_sample(iface, make_wav, name="Piccolo"):
     return pid
 
 
-def test_convert_voice_stores_a_replayable_recipe(iface, make_wav, signals):
+def test_convert_voice_stores_a_replayable_recipe(iface, make_wav, signals, vc_ready):
     pid = cloned_with_sample(iface, make_wav)
     src = make_wav("src.wav", secs=1.0)
     gen_id = drive(iface, "ConvertVoice", str(src), pid, "seed_vc", "take 1",
@@ -359,7 +390,7 @@ def test_convert_voice_stores_a_replayable_recipe(iface, make_wav, signals):
     assert (recipe["mtime"], recipe["size"]) == (int(st.st_mtime), st.st_size)
 
 
-def test_music_mode_marks_the_row_and_forwards_the_worker_stages(iface, make_wav, signals):
+def test_music_mode_marks_the_row_and_forwards_the_worker_stages(iface, make_wav, signals, vc_ready):
     pid = cloned_with_sample(iface, make_wav)
     src = make_wav("song.wav", secs=1.0)
     drive(iface, "ConvertVoice", str(src), pid, "seed_vc", "", "", "music", -12)
@@ -393,7 +424,7 @@ def test_music_mode_on_an_engine_without_it_is_refused(iface, make_wav, signals)
 
 
 def test_a_gpu_oom_during_conversion_names_the_conversion_engine(
-    iface, make_wav, signals, monkeypatch
+    iface, make_wav, signals, monkeypatch, vc_ready
 ):
     pid = cloned_with_sample(iface, make_wav)
 
@@ -406,6 +437,37 @@ def test_a_gpu_oom_during_conversion_names_the_conversion_engine(
     errors = [s for _g, s, _p in signals["GenerationProgress"] if s.startswith("error:")]
     assert errors == ["error: out of GPU memory loading seed_vc — "
                       "try a smaller model size in the Models tab"]
+
+
+def test_a_convert_against_an_undownloaded_row_never_reaches_the_load(
+    iface, make_wav, signals
+):
+    """The ⇄ engines used to fetch multi-GB weights on the first conversion —
+    disk spent without anyone choosing to spend it. The refusal has to land
+    BEFORE load(), which is the only place that fetch could start."""
+    pid = cloned_with_sample(iface, make_wav)
+    drive(iface, "ConvertVoice", str(make_wav("src.wav")), pid, "seed_vc", "", "",
+          "speech", 0)
+    errors = [s for _g, s, _p in signals["GenerationProgress"] if s.startswith("error:")]
+    assert errors == ["error: Seed-VC isn't downloaded yet — open Models and "
+                      "click Download on its row (9.0 GB)."]
+    assert iface._tts.vc.loaded is False
+
+
+def test_music_mode_asks_about_the_singing_row_not_the_speech_one(
+    iface, make_wav, signals
+):
+    """vevo_timbre is two catalog rows behind one engine name; the mode is what
+    says which one is about to be loaded."""
+    iface._tts.vc = FakeVC()
+    iface._tts.vc.engine_name = "vevo_timbre"
+    pid = cloned_with_sample(iface, make_wav)
+    drive(iface, "ConvertVoice", str(make_wav("song.wav")), pid, "vevo_timbre", "",
+          "", "music", 0)
+    errors = [s for _g, s, _p in signals["GenerationProgress"] if s.startswith("error:")]
+    # music mode on vevo_timbre is the Vevo2 row, not Vevo-Timbre's
+    assert errors == ["error: Vevo2 (singing) isn't downloaded yet — open Models "
+                      "and click Download on its row (2.8 GB)."]
 
 
 # --- speech pitch fine-tune (pre-shift) ----------------------------------
@@ -442,7 +504,7 @@ def _median_hz(data, sr):
     return float(np.median(vals))
 
 
-def test_speech_semitones_preshift_hands_the_backend_a_shifted_source(iface, make_wav):
+def test_speech_semitones_preshift_hands_the_backend_a_shifted_source(iface, make_wav, vc_ready):
     import math
 
     vc = _RecordingVC()
@@ -458,7 +520,7 @@ def test_speech_semitones_preshift_hands_the_backend_a_shifted_source(iface, mak
     assert up == pytest.approx(4, abs=0.6)  # pitched ~+4 st
 
 
-def test_speech_semitones_zero_passes_the_original_source_untouched(iface, make_wav):
+def test_speech_semitones_zero_passes_the_original_source_untouched(iface, make_wav, vc_ready):
     vc = _RecordingVC()
     iface._tts.vc = vc
     pid = cloned_with_sample(iface, make_wav)
@@ -468,7 +530,7 @@ def test_speech_semitones_zero_passes_the_original_source_untouched(iface, make_
     assert vc.speech_paths == [str(src)]
 
 
-def test_music_mode_never_preshifts_the_source(iface, make_wav):
+def test_music_mode_never_preshifts_the_source(iface, make_wav, vc_ready):
     vc = _RecordingVC()
     iface._tts.vc = vc
     pid = cloned_with_sample(iface, make_wav)
@@ -517,7 +579,7 @@ def test_regenerate_of_a_tts_row_respeaks_it(iface):
     assert iface._tts.calls[-1][0] == "say it again"
 
 
-def test_regenerate_of_a_conversion_row_reruns_the_conversion(iface, make_wav):
+def test_regenerate_of_a_conversion_row_reruns_the_conversion(iface, make_wav, vc_ready):
     pid = cloned_with_sample(iface, make_wav)
     src = make_wav("src.wav", secs=1.0)
     drive(iface, "ConvertVoice", str(src), pid, "seed_vc", "take 1", "words", "speech", 3)

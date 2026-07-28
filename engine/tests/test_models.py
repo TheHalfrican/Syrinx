@@ -312,6 +312,126 @@ def test_descriptions_no_longer_send_people_to_a_shell_script():
     assert not any(".sh" in m.description for m in models.CATALOG)
 
 
+# --- the readiness gate: no weights nobody asked for ---------------------
+#
+# Disk space is only ever spent by explicit choice, so every generation path
+# asks require_weights first. The gate's whole design is "name the exact row or
+# say nothing" — half of these tests are about the cases where it must stay out
+# of the way.
+
+
+def test_spec_for_resolves_a_row_in_every_category():
+    assert models.spec_for("voice", "qwen", "0.6B").id == "qwen-tts-0.6B"
+    assert models.spec_for("voice", "qwen_custom_voice", "1.7B").id == "qwen-custom-voice-1.7B"
+    assert models.spec_for("stt", "whisper", "large-v3").id == "whisper-large"
+    assert models.spec_for("llm", "qwen_llm", "4B").id == "qwen3-4b"
+    assert models.spec_for("vc", "seed_vc").id == "seed-vc"
+
+
+def test_spec_for_with_no_size_names_the_variant_the_backend_would_load():
+    """"" is what a component that never recorded a size hands over, and a
+    backend built with size="" loads its default variant — which the catalog
+    lists first for every multi-size engine. If that ordering ever changes, the
+    gate starts naming a row the user isn't about to load."""
+    assert models.spec_for("voice", "qwen").id == "qwen-tts-1.7B"
+    assert models.spec_for("voice", "qwen_custom_voice").id == "qwen-custom-voice-1.7B"
+    assert models.spec_for("voice", "tada").id == "tada-1b"
+    assert models.spec_for("stt", "whisper").id == "whisper-base"
+    assert models.spec_for("voice", "kokoro").id == "kokoro"  # single-row engine
+
+
+def test_spec_for_also_answers_to_a_repo_id():
+    """Components hold different handles on the same row: the TTS router
+    remembers "1.7B", the Transcriber remembers the repo it was handed."""
+    assert models.spec_for("stt", "whisper", "Systran/faster-whisper-small").id == "whisper-small"
+    assert models.spec_for("llm", "qwen_llm", "Qwen/Qwen3-4B").id == "qwen3-4b"
+
+
+def test_spec_for_returns_none_rather_than_guessing():
+    assert models.spec_for("voice", "qwen", "9B") is None
+    assert models.spec_for("voice", "not-an-engine") is None
+    assert models.spec_for("stt", "whisper", "openai/whisper-tiny") is None
+    assert models.spec_for("nope", "kokoro") is None
+    # the engine name alone isn't enough — the category has to match too
+    assert models.spec_for("stt", "kokoro") is None
+
+
+def test_require_weights_stays_out_of_the_way_for_an_unknown_spec():
+    """A raw HF repo passes straight through. We can't know its size, and
+    refusing on a hunch would break every legitimately hand-set model."""
+    models.require_weights("stt", "whisper", size="openai/whisper-tiny")
+    models.require_weights("llm", "qwen_llm", size="Qwen/Qwen3-32B")
+    models.require_weights("voice", "not-an-engine")
+    models.require_weights("vc", "seed_vc", model_id="not-a-row")
+
+
+def test_require_weights_names_the_row_and_what_it_costs():
+    with pytest.raises(models.ModelNotDownloaded) as e:
+        models.require_weights("voice", "qwen", "0.6B")
+    assert str(e.value) == (
+        "Qwen TTS 0.6B isn't downloaded yet — open Models and click Download "
+        "on its row (2.3 GB)."
+    )
+
+
+def test_a_sub_gigabyte_row_is_quoted_in_megabytes():
+    """"0.1 GB" reads as a rounding error rather than a file to fetch."""
+    with pytest.raises(models.ModelNotDownloaded, match=r"\(140 MB\)"):
+        models.require_weights("stt", "whisper", "base.en")
+
+
+def test_require_weights_passes_once_the_weights_are_on_disk(hf_cache):
+    for repo in models.spec("whisper-base").repos:
+        fake_repo(hf_cache, repo)
+    models.require_weights("stt", "whisper", "base.en")
+
+
+def test_an_explicit_row_id_wins_over_the_engine_lookup():
+    """vevo_timbre is two rows; only the caller knows which mode it's in."""
+    with pytest.raises(models.ModelNotDownloaded, match="Vevo2"):
+        models.require_weights("vc", "vevo_timbre", model_id="vevo2-singing")
+    with pytest.raises(models.ModelNotDownloaded, match="Vevo-Timbre"):
+        models.require_weights("vc", "vevo_timbre")
+
+
+def test_downloaded_engines_reads_the_cache(hf_cache):
+    assert models.downloaded_engines("voice") == set()
+    for repo in models.spec("kokoro").repos:
+        fake_repo(hf_cache, repo)
+    for repo in models.spec("qwen-custom-voice-0.6B").repos:
+        fake_repo(hf_cache, repo)
+    assert models.downloaded_engines("voice") == {"kokoro", "qwen_custom_voice"}
+    assert models.downloaded_engines("stt") == set()
+    assert models.downloaded_engines("nope") == set()
+
+
+def test_a_half_fetched_multi_repo_row_is_not_a_downloaded_engine(hf_cache):
+    """TADA is weights + codec; one of the two is not an engine you can run."""
+    fake_repo(hf_cache, models.spec("tada-1b").repos[0])
+    assert "tada" not in models.downloaded_engines("voice")
+    fake_repo(hf_cache, models.spec("tada-1b").repos[1])
+    assert "tada" in models.downloaded_engines("voice")
+
+
+def test_vc_row_for_covers_every_engine_and_mode_the_converter_produces():
+    """The ⇄ view picks an engine and a mode; the catalog holds rows, and the
+    two aren't one-to-one. Every ⇄ engine has to be reachable from this map, and
+    so does every ⇄ row — vevo2-singing's row state was consulted by nothing at
+    all before it existed. chatterbox_vc has no music entry because it has no
+    music pipeline, so the view can never ask for that pair."""
+    assert models.VC_ROW_FOR == {
+        ("chatterbox_vc", "speech"): "chatterbox-vc",
+        ("seed_vc", "speech"): "seed-vc",
+        ("seed_vc", "music"): "seed-vc",
+        ("vevo_timbre", "speech"): "vevo-timbre",
+        ("vevo_timbre", "music"): "vevo2-singing",
+    }
+    vc_rows = {m.id for m in models.CATALOG if m.category == "vc"}
+    vc_engines = {m.engine for m in models.CATALOG if m.category == "vc"}
+    assert set(models.VC_ROW_FOR.values()) == vc_rows
+    assert {engine for engine, _mode in models.VC_ROW_FOR} == vc_engines
+
+
 # --- seed-vc's own two-tier cache ---------------------------------------
 
 
