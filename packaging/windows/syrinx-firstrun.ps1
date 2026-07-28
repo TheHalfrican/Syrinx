@@ -76,7 +76,12 @@ Ok 'torch'
 # (qwen-tts, transformers). torch is already satisfied above, so pip's default
 # only-if-needed strategy leaves the CUDA/CPU build in place.
 Log 'Installing the ML stack (kokoro, faster-whisper, pedalboard, qwen-tts, numba)'
-$mlSpec = if ($Wheel) { "$($Wheel.FullName)[qwen]" } else { 'kokoro>=0.9.2', 'misaki[en]', 'faster-whisper', 'pedalboard', 'qwen-tts>=0.0.5', 'transformers>=4.36.0' }
+# The OUTER @() is load-bearing, twice over: splatting a SCALAR string
+# enumerates it char-by-char (pip gets ~100 one-character args and dies on the
+# drive colon), and an @() INSIDE the if doesn't help — statement output rides
+# the pipeline, which unrolls a one-element array back to a scalar before
+# assignment. Both PS editions. Wrap the whole if.
+$mlSpec = @(if ($Wheel) { "$($Wheel.FullName)[qwen]" } else { 'kokoro>=0.9.2', 'misaki[en]', 'faster-whisper', 'pedalboard', 'qwen-tts>=0.0.5', 'transformers>=4.36.0' })
 & $PyExe -m pip install --no-warn-script-location @mlSpec 'numba>=0.60'
 if ($LASTEXITCODE -ne 0) { Die 'ML stack install failed' }
 
