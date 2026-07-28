@@ -594,7 +594,10 @@ component ModelRow inherits Rectangle {
     callback activate();
     callback install-request();
     callback cancel-request();
-    height: 64px;
+    // 64px unless the description needs more lines (vevo2's disclaimer was the
+    // first to overflow) — col.preferred-height measures the WRAPPED text at
+    // its actual width, so the row grows exactly as much as the text needs
+    height: max(64px, col.preferred-height + 24px);
     border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
     background: Theme.card-bg;
     if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
@@ -604,7 +607,7 @@ component ModelRow inherits Rectangle {
             width: 10px; height: 10px; y: parent.height / 2 - 5px; border-radius: 5px;
             background: m.active ? Theme.acc : (m.downloaded ? #3ca35a : (m.downloading ? Theme.wave : Theme.brd));
         }
-        VerticalLayout {
+        col := VerticalLayout {
             alignment: center; spacing: 2px; horizontal-stretch: 1;
             HorizontalLayout {
                 spacing: 8px;
@@ -622,7 +625,7 @@ component ModelRow inherits Rectangle {
                 }
                 Rectangle {}
             }
-            Text { text: m.description; font-size: 10.5px; color: Theme.dim; overflow: elide; }
+            Text { text: m.description; font-size: 10.5px; color: Theme.dim; wrap: word-wrap; preferred-width: 0px; }
             if m.warning != "" : Text { text: "⚠ " + m.warning; font-size: 9.5px; color: #d9922b; overflow: elide; }
         }
         Rectangle {
