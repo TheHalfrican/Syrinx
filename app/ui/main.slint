@@ -676,7 +676,7 @@ component ModelRow inherits Rectangle {
                 // the engine's one-time local install — independent of the
                 // weights, so it sits beside Download/Delete, not instead of them
                 if m.needs-setup : TBtn {
-                    label: "Install…"; tip: "Set this engine up on this computer"; generate: true;
+                    label: "Install Engine"; tip: "Set this engine up on this computer"; generate: true;
                     clicked => { root.install-request(); }
                 }
                 if m.downloaded && m.supported && !m.active && selectable : TBtn {
@@ -687,7 +687,10 @@ component ModelRow inherits Rectangle {
                     label: "Delete"; tip: "Remove the downloaded weights from disk";
                     clicked => { root.del(); }
                 }
-                if !m.downloaded && m.supported : TBtn {
+                // weights are useless without the engine, so a needs-setup row
+                // gates Download behind Install Engine — one clear next step
+                // (Noah, 2026-07-28) instead of two competing buttons
+                if !m.downloaded && m.supported && !m.needs-setup : TBtn {
                     label: "Download"; tip: "Fetch the weights (" + m.size-label + ")"; generate: true;
                     clicked => { root.download(); }
                 }
