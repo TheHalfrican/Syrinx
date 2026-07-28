@@ -308,7 +308,7 @@ visible failure rather than an empty result.
 | `ListModels` | `[]` | string (JSON array) | Model catalog (id, display, category, size, status…). |
 | `Hardware` | `[]` | string (JSON) | Detected hardware (cores, ram_gb, gpu, gpu_name, vram_gb). `vram_gb` is 0 when there's no CUDA GPU or torch is absent. |
 | `DownloadModel` | `[model_id: string]` | boolean | Start a download (progress via `ModelProgress`); `false` if unknown id. |
-| `InstallVcEngine` | `[setup_id: string]` | boolean | Start the one-time isolated-venv setup for a conversion engine (`"seedvc"`\|`"vevo"`); progress via `VcSetupProgress`. `false` = unknown id **or** that setup is already running (see §15). |
+| `InstallVcEngine` | `[setup_id: string]` | boolean | Start the one-time isolated-venv setup for an optional engine (`"seedvc"`\|`"vevo"`\|`"luxtts"` — the vocabulary grows with the engine's SETUPS table, so read it off `ListModels` rows rather than hardcoding it); progress via `VcSetupProgress`. `false` = unknown id **or** that setup is already running (see §15). |
 | `CancelVcSetup` | `[setup_id: string]` | boolean | Kill a running `InstallVcEngine`; `true` if something was cancelled. |
 | `DeleteModel` | `[model_id: string]` | → null | Delete a downloaded model's files. |
 | `SetActiveModel` | `[model_id: string]` | string (category) | Make a model active for its category; returns the category. |
@@ -713,8 +713,10 @@ capture. The app's first consumer is the ⚙ Settings "Test mic" toggle
 ## 15. One-click VC engine install
 
 Two transport-agnostic methods (present on BOTH transports — the drift guards
-require it) that let the Models view install a voice-conversion engine for the
-user instead of telling them to run a shell script. Seed-VC (GPL-3.0) and Vevo's
+require it) that let the Models view install an optional isolated-venv engine
+for the user instead of telling them to run a shell script. The mechanism was
+built for the voice converters and now also carries LuxTTS, a TTS engine whose
+dependencies simply refuse to share the main venv. Seed-VC (GPL-3.0) and Vevo's
 Amphion checkpoints (CC-BY-NC) are deliberately **never bundled**; what ships is
 the *installer*, and it only runs after in-app consent. This extends the §4.10
 table (both methods are listed there); progress arrives as the §6
@@ -725,7 +727,10 @@ table (both methods are listed there); progress arrives as the §6
 | `InstallVcEngine` | `[setup_id: str]` | boolean | Start the one-time setup for `setup_id`. `true` = accepted, and the caller will now receive `VcSetupProgress` for that id until a terminal status. `false` = **rejected**, for exactly two reasons: the id is not in the vocabulary, or that setup is already running. No exception, no partial state — a rejected call has no side effects at all, which is what makes a double-clicked button safe. |
 | `CancelVcSetup` | `[setup_id: str]` | boolean | Kill a running setup. `true` = a child process was actually killed; `false` = nothing was running under that id (including an unknown id). |
 
-**`setup_id` vocabulary.** Exactly two values: `"seedvc"` and `"vevo"`. They are
+**`setup_id` vocabulary.** Three values today: `"seedvc"`, `"vevo"` and
+`"luxtts"`. The list is not closed — it is exactly the engine's `SETUPS` table
+and grows with it whenever another engine gains a setup-script pair, so a client
+must treat it as data rather than an enum. They are
 *setup* ids, not model ids — one setup can serve several catalog rows, and
 `"vevo"` does: the Models view's vevo-timbre and vevo2-singing rows both hang off
 the shared `vevo_timbre` engine, so a single `"vevo"` install clears the
@@ -758,7 +763,7 @@ without the client knowing anything about engine paths.
 `setup-<stem>.sh` (POSIX) or `setup-<stem>.ps1` (win32) by walking up from its
 own package directory — which covers both a checkout (`engine/`) and an
 installed bundle (`engine\.venv\Lib\site-packages\…` → `engine\`, so the Windows
-bundle ships the two `.ps1` files). POSIX spawns `bash <script>`; win32 spawns
+bundle ships the `.ps1` files). POSIX spawns `bash <script>`; win32 spawns
 `pwsh` when it is present and falls back to `powershell.exe` (5.1) otherwise,
 always `-NoProfile -ExecutionPolicy Bypass -File`. If no script is found the
 method still returns `true` and the failure arrives as a clean `"error"` —

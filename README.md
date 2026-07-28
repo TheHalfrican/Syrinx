@@ -67,10 +67,11 @@ cargo run -p syrinx-app    # spawns + supervises the engine itself (no service n
 ```
 
 Build the app only (`-p syrinx-app`) on Windows — `syrinx-dictate` is
-Linux-only by design. The ⇄ conversion engines install on demand via
-`engine/setup-seedvc.ps1` / `setup-vevo.ps1` (mirrors of the `.sh` scripts;
-MSVC Build Tools required for a few source-built deps). An NSIS installer
-comes from `scripts/build-windows.ps1` — see `packaging/WINDOWS.md`.
+Linux-only by design. The isolated-venv engines install on demand via
+`engine/setup-seedvc.ps1` / `setup-vevo.ps1` / `setup-luxtts.ps1` (mirrors of
+the `.sh` scripts; MSVC Build Tools required for a few source-built deps, and
+Git for the two that clone from source). An NSIS installer comes from
+`scripts/build-windows.ps1` — see `packaging/WINDOWS.md`.
 
 Add to your Hyprland config (see `packaging/hyprland.conf`):
 
@@ -85,13 +86,17 @@ destination is a real, working view. Daily-drivable on a CPU-only machine;
 a CUDA GPU makes the heavy engines fast rather than possible.
 
 **Windows (2026-07-24): the full studio runs natively** — validated
-end-to-end on CUDA: all TTS engines except LuxTTS (blocked upstream by
-piper-phonemize's missing Windows wheels), all three voice converters
-including ♫ music mode, STT, the personality LLM, effects, mic recording,
-and the Library — with the app spawning and supervising the engine itself.
-Not yet on Windows (phase 3): system-audio capture (WASAPI loopback) and
-dictation; those buttons hide themselves there. Linux behavior is
-byte-identical by construction — the contract tests enforce it.
+end-to-end on CUDA: every TTS engine catalogued at the time, all three
+voice converters including ♫ music mode, STT, the personality LLM,
+effects, mic recording, and the Library — with the app spawning and
+supervising the engine itself.
+LuxTTS, the one engine that used to be Windows-blocked (upstream
+piper-phonemize ships no Windows wheel), installs there too as of
+2026-07-28: `setup-luxtts.ps1` takes its phonemizer from the maintained
+k2-fsa wheel index, so every catalogued engine is now installable on
+Windows. Not yet on Windows (phase 3): system-audio capture (WASAPI
+loopback) and dictation; those buttons hide themselves there. Linux
+behavior is byte-identical by construction — the contract tests enforce it.
 
 - **Text-to-speech** across seven engines: Kokoro presets (language-filtered),
   and zero-shot cloning with Qwen TTS (1.7B/0.6B), Qwen CustomVoice, LuxTTS
@@ -128,10 +133,13 @@ byte-identical by construction — the contract tests enforce it.
   refinement, live engine knobs, default export folder.
 - Multiple full-chrome UI themes (Matrix TTY, Win95, Frutiger Aero among them).
 
-The isolated conversion engines set up with one command each:
-`engine/setup-seedvc.sh` and `engine/setup-vevo.sh` (CUDA auto-detected;
-Seed-VC is GPL-3.0 and Vevo's weights are CC-BY-NC, so both live outside the
-main engine venv and their weights download on first use).
+The isolated-venv engines set up with one command each:
+`engine/setup-seedvc.sh`, `engine/setup-vevo.sh` and
+`engine/setup-luxtts.sh` (CUDA auto-detected; Seed-VC is GPL-3.0 and Vevo's
+weights are CC-BY-NC, LuxTTS pulls its phonemizer wheel and two pinned git
+revisions from outside PyPI — so each lives outside the main engine venv and
+their weights download on first use). The Models tab runs the matching
+script for you: one click per engine, same pins, no shell.
 
 ## Install as a desktop app (beta)
 

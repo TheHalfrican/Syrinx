@@ -48,7 +48,7 @@ effectively met.
 | **IPC: D-Bus (zbus / dbus_next)** | Linux session bus | Linux-native | **Keep on Linux.** Add a second transport (JSON-RPC over localhost) selected on Win/mac (see below) |
 | Engine ML core (torch/transformers/faster-whisper/kokoro/pedalboard) | CPU/CUDA | ✅ pip-installable on all three | Device matrix (below) |
 | Voice conversion: ChatterboxVC | in-engine (s3gen half of Chatterbox) | ✅ same torch stack | Device matrix (below) |
-| Isolated-venv workers (LuxTTS · Seed-VC · Vevo) | subprocess, JSON-over-stdio, one venv each | ✅ pattern is portable | LuxTTS: verify k2 wheels per-OS. Seed-VC: pip package, portable (pins encoded in setup-seedvc.sh). Vevo/Vevo2: **git clone of Amphion + undeclared deps** — see risks |
+| Isolated-venv workers (LuxTTS · Seed-VC · Vevo) | subprocess, JSON-over-stdio, one venv each | ✅ pattern is portable | LuxTTS: k2 is **moot** — not a dependency of current LuxTTS master; what actually has to hold per-OS is `piper_phonemize==1.4.7` (k2-fsa *icefall* find-links index) plus the two git SHAs, all encoded in setup-luxtts.sh/.ps1. Seed-VC: pip package, portable (pins encoded in setup-seedvc.sh). Vevo/Vevo2: **git clone of Amphion + undeclared deps** — see risks |
 | ♫ music mode (demucs split → convert → remix) | demucs inside the seedvc AND vevo venvs | ✅ demucs is pip/portable | Device matrix (below); remix/octave-shift math is pure numpy/librosa |
 | ✂ trim + FileEnvelope + PlayFileAt | engine-side soundfile/wave slicing | ✅ pure Python | none |
 | History / source clips / conversion recipes | sqlite + wav files + JSON columns | ✅ | none |
@@ -144,7 +144,7 @@ still on D-Bus; the transport contract tests pass on both wrappers.
 |---|---|---|---|
 | Kokoro | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU / MPS |
 | Qwen-TTS | CUDA ✅ | CUDA ✅ (Base + CustomVoice, 1.7B & 0.6B) | MPS (verify) / CPU — consider MLX port later |
-| LuxTTS (venv) | CPU ✅ / CUDA (k2 cuda wheels) | ❌ blocked (2026-07-24): piper-phonemize ships no win wheels/sdist; k2 CPU wheels for win_amd64 EXIST and work (exact HANDOFF pin verified) — revisit if piper-phonemize gains Windows support | verify k2 mac wheels (CPU) |
+| LuxTTS (venv) | CPU ✅ / CUDA (plain pip torch) | ✅ one-click install (2026-07-28) via the `setup-luxtts.ps1`/`.sh` pair: the `piper_phonemize==1.4.7` cp312 win_amd64 wheel comes off the k2-fsa **icefall** find-links index (PyPI upstream ships no Windows wheel/sdist — that was the 2026-07-24 blocker), and LuxTTS/LinaCodec install from pinned git SHAs on the ysharma3501 fork | verify piper_phonemize on the icefall index for arm64 mac — no k2 question anymore |
 | faster-whisper (CTranslate2) | CPU ✅ / CUDA ✅ | CPU / CUDA ✅ (base/large/turbo — see cu12 DLL gotcha, Findings 2026-07-24 sweep) | CPU (no Metal in CT2 — still fast) |
 | Qwen3 LLM | CPU ✅ / CUDA fp16 ✅ | CUDA fp16 | **MPS fp16** (add "mps" to llm.py device pick) |
 | Chatterbox VC (⇄) | CPU ✅ / CUDA ✅ | CPU / CUDA | MPS (verify — same stack as Chatterbox TTS) |
@@ -162,9 +162,12 @@ Notes:
 - Device selection is already centralized (`detect_device()`, per-module
   `torch.cuda.is_available()`): extend each with an MPS branch — a few lines.
 - `models.py` hardware detection: report MPS/Metal as the GPU on mac.
-- The k2 wheel index (k2-fsa.github.io) is the load-bearing dependency to
-  verify per-OS *before* promising LuxTTS there; Qwen-TTS is the primary
-  cloning engine on GPU boxes regardless.
+- The load-bearing per-OS dependency for LuxTTS is **piper_phonemize**, not k2 —
+  k2 is absent from current LuxTTS master's requirements. Its wheel comes from
+  the k2-fsa *icefall* find-links index (cp37–cp314 win_amd64, espeak-ng-data
+  and DLLs bundled in the wheel), verified on Windows 2026-07-28 and still
+  unverified on mac; that index is the thing to check *before* promising LuxTTS
+  on a new OS. Qwen-TTS is the primary cloning engine on GPU boxes regardless.
 
 ### 2.2 Packaging
 
@@ -184,7 +187,8 @@ Notes:
   clone-outside-the-app flow. Vevo/Vevo2 and Seed-VC checkpoints are
   CC-BY-NC: auto-downloaded per user, never redistributed.
 - The setup scripts are the source of truth for venv pins (`setuptools<81`,
-  `huggingface_hub<1.0`, `transformers==4.57.x`, numba/k2, the undeclared
+  `huggingface_hub<1.0`, `transformers==4.57.x`, `piper_phonemize==1.4.7` off
+  the icefall find-links index, LuxTTS's two git SHAs, the undeclared
   Amphion deps) — per-OS packaging must encode the same pins, and each script's
   setup-time import proof is the pattern to keep: a bad combination must fail
   at install, not at first conversion.
@@ -207,8 +211,11 @@ Notes:
 
 ## Risks / open questions
 
-- **k2 wheel coverage** on Windows/mac (LuxTTS). Mitigation: LuxTTS is
-  optional; Qwen-TTS covers cloning on GPU machines.
+- **piper_phonemize wheel coverage on mac** (LuxTTS) — Windows is settled
+  (icefall find-links index, proven 2026-07-28); the same index is what a mac
+  build would have to serve, and the documented fallback if it ever goes dark is
+  PyPI's `piper-phonemize-fix`. k2 is no longer part of this risk at all.
+  Mitigation: LuxTTS is optional; Qwen-TTS covers cloning on GPU machines.
 - **Qwen-TTS on MPS** — unverified; may need CPU fallback or an MLX-based
   backend for Apple Silicon.
 - **The Amphion clone (Vevo/Vevo2)** is the least portable piece: research
@@ -868,6 +875,32 @@ there comes from the Xcode Command Line Tools — a stock Mac PROMPTS to
 install them on first cc invocation, so Seed-VC's mac story is either
 that prompt or bundling a mac-built webrtcvad wheel like Windows now
 does. Decide when mac packaging exists.
+
+**2026-07-28 (late) — LuxTTS joins the one-click installs; the Windows
+matrix has no ❌ left.** Noah asked whether the webrtcvad wheel trick
+could rescue LuxTTS; the probe found something better — no build
+needed at all. PyPI's piper-phonemize is dead upstream (no sdist, no
+win wheels; the `zipvoice` name on PyPI is an unrelated stub), but
+LuxTTS's own requirements point at csukuangfj's (k2-fsa) icefall
+find-links index, which ships maintained cp37–cp314 win_amd64 wheels
+with espeak-ng + its data bundled inside — proven on this box
+(1.4.7 cp312 installs, phonemizes; full dep chain dry-runs to wheels,
+zero compiles; k2 itself is NOT a dep of current master, mooting the
+audit's old "verify k2 wheels" line). Landed: setup-luxtts.{sh,ps1}
+(stages venv→torch→phonemize→luxtts→pins→verify — phonemize FIRST so
+pip never consults the dead upstream; both git repos hard-pinned to
+SHAs because upstream publishes no tags; LinaCodec installed
+explicitly because pip ignores [tool.uv.sources]); the luxtts SETUPS
+row (landmark zipvoice, needs_git); backends/luxtts.py resolving its
+interpreter at use time; the voice section gaining the install wiring
+it never had; the consent dialog's third case (honest copy: LuxTTS's
+opt-in reason is isolation + third-party fetch, not a license
+restriction); HANDOFF-4090's §6 recipe corrected (it was wrong on
+every OS — freeze the 4090's existing .venv-luxtts before rebuilding
+from the .sh there). NOT yet proven: an actual Windows synthesis ear
+test (install is one click away on this box; Noah runs it organically
+with the other staged engines). Suites: engine 462 passed 1 skipped
+(+5 guards incl. exact-SHA pins), cargo 73+6+1, clippy clean.
 
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
