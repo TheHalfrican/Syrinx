@@ -8,11 +8,17 @@
 # pin-drift guard (engine/tests/test_setup_pins.py) fails CI if the two scripts'
 # version pins diverge, so this port cannot silently rot.
 #
-# Two DELIBERATE per-OS divergences (not pin changes, so the guard ignores them):
+# Three DELIBERATE per-OS divergences (not pin changes, so the guard ignores them):
 #   1. Torch index: on Linux plain `pip install torch` is the CUDA build; on
 #      Windows plain pip torch is CPU-only, so the CUDA branch here uses the
 #      cu130 wheel index (matches engine/.venv's torch 2.13.0+cu130).
 #   2. The venv interpreter lives in Scripts\python.exe, not bin/python.
+#   3. The seedvc stage pre-installs a bundled webrtcvad wheel when one is
+#      present. Windows-only on purpose: webrtcvad publishes no cp312 Windows
+#      wheel and a stock Windows box has no MSVC to build the sdist, whereas
+#      every Linux target has gcc and compiles it without comment — so
+#      setup-seedvc.sh deliberately has no counterpart. It installs a file path,
+#      never a name<op>version token, so the pin guard is untouched.
 #
 # Installer: prefers `uv` when on PATH (matches how the Linux 4090 box is built
 # per HANDOFF-4090 — dramatically faster resolves/builds), falls back to plain
@@ -90,6 +96,24 @@ if ($hasGpu) {
 }
 
 Write-Host '== syrinx-stage: seedvc'
+# seed-vc pulls resemblyzer, which requires webrtcvad>=2.0.10 — a 2017 sdist
+# with no cp312 Windows wheel on PyPI. Left alone, pip downloads that sdist and
+# tries to compile C, which fails on a stock box with no MSVC and takes the
+# whole one-click install down with it. The installed bundle therefore ships a
+# CI-built wheel at <install>\engine\wheels (scripts/build-windows.ps1, and the
+# release workflow hard-fails if it is missing). Installing it FIRST is the
+# resolver trick: by the time seed-vc's dependency graph is resolved, pip sees
+# webrtcvad already satisfied and never reaches for the sdist at all.
+#
+# A dev checkout has no engine\wheels — skip silently there. Dev boxes are the
+# one place a compiler is a fair assumption, and the sdist build is the fallback.
+$vadWheel = Get-ChildItem (Join-Path $PSScriptRoot 'wheels') -Filter 'webrtcvad-*.whl' `
+    -ErrorAction SilentlyContinue | Select-Object -First 1
+if ($vadWheel) {
+    Write-Host "== pre-installing bundled $($vadWheel.Name) (no compiler needed)"
+    Install-Pkgs $vadWheel.FullName
+}
+
 Install-Pkgs seed-vc
 
 # music mode: demucs separates the vocal stem inside this same worker venv

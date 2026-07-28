@@ -65,6 +65,16 @@ jobs:
             --disable-interactivity
           if ($LASTEXITCODE -ne 0) { throw "winget install ChrisBagwell.SoX failed ($LASTEXITCODE)" }
 
+      # build-windows.ps1 needs a full CPython 3.12 to compile the bundled
+      # webrtcvad wheel (the one-click Seed-VC prereq): the *embeddable* runtime
+      # it ships has no Include\ or libs\python312.lib, so it cannot build C
+      # extensions itself. The runner's preinstalled Python is not
+      # version-guaranteed, and the wheel's cp312 ABI tag must match the embedded
+      # interpreter — so pin 3.12 explicitly rather than hoping.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
       # Everything else the script needs is self-contained: it downloads the
       # python.org 3.12 *embeddable* zip and get-pip.py itself (no python on PATH
       # required), bootstraps pip into that embedded runtime, installs the
@@ -72,6 +82,23 @@ jobs:
       # -SkipCargo reuses target/release/syrinx-app.exe from the cached build above.
       - name: Build Windows bundle (dist/syrinx-windows-x64)
         run: pwsh scripts/build-windows.ps1 -SkipCargo
+
+      # The bundled webrtcvad wheel is the entire reason one-click Seed-VC
+      # (RPC-PROTOCOL §15) can work on a stock box: webrtcvad is a 2017 sdist
+      # with no cp312 Windows wheel, and an end-user machine has no compiler.
+      # build-windows.ps1 builds it BEST-EFFORT — a dev box without MSVC gets
+      # only a warning — but this runner has MSVC and a pinned 3.12, so a miss
+      # here is a real failure that would ship an installer broken for every
+      # user who clicks Install. Fail the job instead of shipping it.
+      - name: Verify bundled webrtcvad wheel
+        run: |
+          $dir = 'dist\syrinx-windows-x64\engine\wheels'
+          $whl = Get-ChildItem $dir -Filter 'webrtcvad-*.whl' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+          if (-not $whl) {
+            throw "no webrtcvad-*.whl in $dir — the bundle would force stock boxes to compile it from source"
+          }
+          Write-Host "bundled $($whl.Name)"
 
       # The winget NSIS package needs elevation and fails headless (proven), so
       # fetch the PINNED portable NSIS zip from SourceForge and run its makensis

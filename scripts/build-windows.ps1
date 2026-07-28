@@ -142,6 +142,78 @@ if ($LASTEXITCODE -ne 0) { Die 'engine install failed' }
 if (-not (Test-Path $EngineExe)) { Die "console script not generated at $EngineExe" }
 Ok $EngineExe
 
+# ------------------------------------------- 4b. webrtcvad wheel (best-effort)
+# The Models view's one-click Seed-VC install (RPC-PROTOCOL §15) runs
+# engine/setup-seedvc.ps1, and seed-vc -> resemblyzer -> webrtcvad>=2.0.10.
+# webrtcvad is a 2017 sdist with NO cp312 Windows wheels on PyPI, so pip
+# compiles it from C — which a stock end-user box, having no MSVC, cannot do.
+# Build it HERE, on a machine that has a compiler, and ship the .whl in the
+# bundle; setup-seedvc.ps1 installs it before seed-vc so pip's resolver sees the
+# requirement already satisfied and never reaches for the sdist.
+#
+# Bundling a wheel is a license question, and this one is clean: webrtcvad is
+# BSD-3, so it may ride along in the bundle. That is exactly the distinction
+# that keeps Seed-VC itself (GPL-3.0) OUT of it — seed-vc stays an
+# installer-fetched, per-user artifact (see the setup-script copy in step 7).
+#
+# NOT built with $PyExe: the python.org *embeddable* zip ships no Include\ and
+# no libs\python312.lib, so cl.exe dies on "Cannot open include file:
+# 'Python.h'" (verified). The wheel need only be ABI-compatible, and any
+# CPython 3.12 win_amd64 emits an identical cp312-cp312-win_amd64 tag, so
+# borrow a full 3.12 from the host instead.
+#
+# BEST-EFFORT: a dev box may have neither a 3.12 nor MSVC. Warn (greppable
+# "WARN webrtcvad wheel not built") and carry on — setup-seedvc.ps1 keeps its
+# compile-from-source path for precisely that case. CI must never miss this
+# silently, so .github/workflows/release.yml hard-fails when the built bundle
+# has no webrtcvad wheel.
+if (Get-ChildItem $WheelDir -Filter 'webrtcvad-*.whl' -ErrorAction SilentlyContinue) {
+    Ok 'webrtcvad wheel already present'
+} else {
+    Log 'Building the webrtcvad wheel for the bundle (one-click Seed-VC prereq)'
+    $PyTag = ($PythonVersion.Split('.')[0..1]) -join '.'
+
+    # Probe candidates by *running* them: on a stock Windows box `python` is
+    # usually the Microsoft Store app-execution alias, which prints "Python was
+    # not found" and exits 9009 rather than being a Python at all.
+    $Candidates = @()
+    if (Get-Command py -ErrorAction SilentlyContinue) {
+        $launched = & py "-$PyTag" -c "import sys; print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $launched) { $Candidates += "$launched".Trim() }
+    }
+    foreach ($name in @("python$PyTag", 'python')) {
+        $found = Get-Command $name -ErrorAction SilentlyContinue
+        if ($found) { $Candidates += $found.Source }
+    }
+    # A dev checkout's own engine venv is a 3.12 by construction — last resort.
+    $Candidates += (Join-Path $EngineSrc '.venv\Scripts\python.exe')
+
+    $BuilderPy = $null
+    foreach ($cand in $Candidates) {
+        if (-not $cand -or -not (Test-Path $cand)) { continue }
+        $got = & $cand -c "import sys; print('%d.%d' % sys.version_info[:2])" 2>$null
+        if ($LASTEXITCODE -eq 0 -and "$got".Trim() -eq $PyTag) { $BuilderPy = $cand; break }
+    }
+
+    if (-not $BuilderPy) {
+        Write-Host "  WARN webrtcvad wheel not built — no CPython $PyTag found to compile it" -ForegroundColor Yellow
+    } else {
+        # Built WITH build isolation, unlike the engine wheel above: $BuilderPy is
+        # a host interpreter we do not own, so we must not pip-install a build
+        # backend into it — isolation puts setuptools in a throwaway env instead.
+        # --no-deps keeps $WheelDir to exactly the wheels the bundle means to ship.
+        & $BuilderPy -m pip wheel webrtcvad==2.0.10 --no-deps -w $WheelDir
+        $rc = $LASTEXITCODE
+        $Vad = Get-ChildItem $WheelDir -Filter 'webrtcvad-*.whl' -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($rc -ne 0 -or -not $Vad) {
+            Write-Host '  WARN webrtcvad wheel not built — compile failed (no MSVC?); stock boxes will fall back to building it from source' -ForegroundColor Yellow
+        } else {
+            Ok $Vad.Name
+        }
+    }
+}
+
 # ---------------------------------------------------------------- 5. import proof (required)
 Log 'Proof: import syrinx_engine with base deps (torch-free)'
 & $PyExe -c "import syrinx_engine, syrinx_engine.rpc, syrinx_engine.paths, syrinx_engine.settings; print('syrinx_engine', syrinx_engine.__version__, 'imports OK (torch-free)')"
