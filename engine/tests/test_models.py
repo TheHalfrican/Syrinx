@@ -12,7 +12,7 @@ import types
 
 import pytest
 
-from syrinx_engine import models
+from syrinx_engine import models, vcsetup
 
 FAKE_HW = {"cores": 8, "ram_gb": 32.0, "gpu": True, "gpu_name": "Test GPU",
            "vram_gb": 24.0}
@@ -183,21 +183,39 @@ def test_min_vram_gb_rides_along_in_status(monkeypatch):
 
 
 # --- isolated-venv warnings ---------------------------------------------
+#
+# The probe lives in vcsetup now, so these point vcsetup's engine_dir() at a
+# tmp tree. They also create the INTERPRETER, not just the venv directory: a
+# torn install leaves the directory behind, and the old directory-existence
+# check happily called that "ready".
 
 
-def test_vc_setup_warning_points_at_the_setup_script(monkeypatch, tmp_path):
-    """seed_vc / vevo_timbre live in their own venvs — no venv, no conversion."""
-    monkeypatch.setattr(models, "_ENGINE_DIR", tmp_path)
-    assert models._vc_setup_warning(models.spec("seed-vc")) == "run engine/setup-seedvc.sh first"
-    assert models._vc_setup_warning(models.spec("vevo-timbre")) == "run engine/setup-vevo.sh first"
-    assert models._vc_setup_warning(models.spec("vevo2-singing")) == "run engine/setup-vevo.sh first"
+def make_venv(root, name):
+    """Fabricate the per-OS venv interpreter vcsetup probes for."""
+    if sys.platform == "win32":
+        exe = root / name / "Scripts" / "python.exe"
+    else:
+        exe = root / name / "bin" / "python"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("")
+    return exe
+
+
+def test_vc_setup_warning_asks_for_the_one_time_setup(monkeypatch, tmp_path):
+    """seed_vc / vevo_timbre live in their own venvs — no venv, no conversion.
+    The string is OS-agnostic and names the Install button, not a .sh path."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    assert models._vc_setup_warning(models.spec("seed-vc")) == models.VC_SETUP_NEEDED
+    assert models._vc_setup_warning(models.spec("vevo-timbre")) == models.VC_SETUP_NEEDED
+    assert models._vc_setup_warning(models.spec("vevo2-singing")) == models.VC_SETUP_NEEDED
+    assert models.VC_SETUP_NEEDED == "one-time setup needed — click Install"
     assert models._vc_setup_warning(models.spec("kokoro")) == ""
 
 
 def test_vc_setup_warning_clears_once_the_venvs_exist(monkeypatch, tmp_path):
-    monkeypatch.setattr(models, "_ENGINE_DIR", tmp_path)
-    (tmp_path / ".venv-seedvc").mkdir()
-    (tmp_path / ".venv-vevo").mkdir()
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    make_venv(tmp_path, ".venv-seedvc")
+    make_venv(tmp_path, ".venv-vevo")
     amphion = tmp_path / "Amphion"
     amphion.mkdir()
     monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(amphion))
@@ -208,18 +226,47 @@ def test_vc_setup_warning_clears_once_the_venvs_exist(monkeypatch, tmp_path):
 def test_vevo_warning_when_the_amphion_clone_is_missing(monkeypatch, tmp_path):
     """The worker needs the clone, not just the venv — a restored data dir
     can have one without the other."""
-    monkeypatch.setattr(models, "_ENGINE_DIR", tmp_path)
-    (tmp_path / ".venv-vevo").mkdir()
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    make_venv(tmp_path, ".venv-vevo")
     monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(tmp_path / "nope"))
-    assert models._vc_setup_warning(models.spec("vevo-timbre")) == "run engine/setup-vevo.sh first"
+    assert models._vc_setup_warning(models.spec("vevo-timbre")) == models.VC_SETUP_NEEDED
 
 
 def test_setup_warning_wins_over_the_hardware_warning(monkeypatch, tmp_path):
-    monkeypatch.setattr(models, "_ENGINE_DIR", tmp_path)
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
     monkeypatch.setattr(models, "detect_hardware", lambda: {"cores": 2, "ram_gb": 2.0,
                                                             "gpu": False, "gpu_name": ""})
     row = {r["id"]: r for r in models.ModelManager().status()}["seed-vc"]
-    assert row["warning"] == "run engine/setup-seedvc.sh first"
+    assert row["warning"] == models.VC_SETUP_NEEDED
+
+
+def test_status_rows_carry_setup_id_and_needs_setup(monkeypatch, tmp_path):
+    """The app keys its Install button off these two fields, so every row has
+    them: "" / False for anything that isn't an isolated-venv engine, and both
+    vevo rows share the single "vevo" setup (one install clears the pair)."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    monkeypatch.setattr(models, "detect_hardware", lambda: FAKE_HW)
+    by_id = {r["id"]: r for r in models.ModelManager().status()}
+    assert all("setup_id" in r and "needs_setup" in r for r in by_id.values())
+    assert by_id["kokoro"]["setup_id"] == "" and by_id["kokoro"]["needs_setup"] is False
+    assert by_id["chatterbox-vc"]["setup_id"] == ""  # in-process, no venv to build
+    assert by_id["seed-vc"]["setup_id"] == "seedvc"
+    assert by_id["vevo-timbre"]["setup_id"] == "vevo"
+    assert by_id["vevo2-singing"]["setup_id"] == "vevo"
+    assert all(by_id[i]["needs_setup"] is True
+               for i in ("seed-vc", "vevo-timbre", "vevo2-singing"))
+
+    # installing seed-vc clears only its own row
+    make_venv(tmp_path, ".venv-seedvc")
+    by_id = {r["id"]: r for r in models.ModelManager().status()}
+    assert by_id["seed-vc"]["needs_setup"] is False
+    assert by_id["vevo-timbre"]["needs_setup"] is True
+
+
+def test_descriptions_no_longer_send_people_to_a_shell_script():
+    """The .sh phrasing was a dead end for non-developers and a nonexistent
+    path on Windows."""
+    assert not any(".sh" in m.description for m in models.CATALOG)
 
 
 # --- seed-vc's own two-tier cache ---------------------------------------

@@ -15,24 +15,17 @@ import asyncio
 import json
 import logging
 import os
-import sys
 from pathlib import Path
 
 from . import detect_device
 from .chatterbox import combined_ref_wav
 from .chatterbox_vc import check_source_cap
+from .. import vcsetup
 from ..paths import data_dir, worker_log_path
 
 log = logging.getLogger("syrinx.engine.vc.vevo")
 
 _HERE = Path(__file__).resolve()
-_ENGINE_DIR = _HERE.parents[2]  # .../engine
-# venv layout is per-OS: POSIX puts the interpreter in bin/python, Windows in
-# Scripts/python.exe. The Linux string is byte-identical to before this seam.
-if sys.platform == "win32":
-    _VEVO_PY = _ENGINE_DIR / ".venv-vevo" / "Scripts" / "python.exe"
-else:
-    _VEVO_PY = _ENGINE_DIR / ".venv-vevo" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "vevo_worker.py"
 _STDERR_LOG = worker_log_path("vevo")
 
@@ -66,14 +59,19 @@ class VevoTimbreBackend:
     async def _ensure_worker(self) -> None:
         if self._proc is not None and self._proc.returncode is None:
             return
-        if not _VEVO_PY.exists():
+        # Resolved per launch, never cached at import: the Models tab can build
+        # this venv while the engine is running, and the user should be able to
+        # convert immediately afterwards without restarting Syrinx.
+        vevo_py = vcsetup.venv_python("vevo")
+        if vevo_py is None:
             raise RuntimeError(
-                "Vevo is not installed on this machine — run engine/setup-vevo.sh"
+                "Vevo isn't installed yet — open Models and click Install "
+                "on the Vevo-Timbre row."
             )
         _STDERR_LOG.parent.mkdir(parents=True, exist_ok=True)
         errfile = open(_STDERR_LOG, "ab")
         self._proc = await asyncio.create_subprocess_exec(
-            str(_VEVO_PY), str(_WORKER),
+            str(vevo_py), str(_WORKER),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=errfile,

@@ -51,18 +51,27 @@ function Install-Pkgs {
     }
 }
 
+# Where the venv goes. SYRINX_VC_VENV_DIR is how the app relocates it out of an
+# installed tree: the engine ships at engine\.venv\Lib\site-packages, and a venv
+# nested under THAT overflows MAX_PATH the moment pip unpacks torch. Unset means
+# beside this script, which is what a developer running it by hand has always got.
+$VenvRoot = if ($env:SYRINX_VC_VENV_DIR) { $env:SYRINX_VC_VENV_DIR } else { $PSScriptRoot }
+$Venv = Join-Path $VenvRoot '.venv-seedvc'
+
 # Create the venv. SYRINX_SEEDVC_PYTHON overrides the interpreter (a full path
 # to python.exe); otherwise the Windows `py` launcher selects 3.12.
+Write-Host '== syrinx-stage: venv'
 if ($env:SYRINX_SEEDVC_PYTHON) {
-    Invoke-Checked $env:SYRINX_SEEDVC_PYTHON -m venv .venv-seedvc
+    Invoke-Checked $env:SYRINX_SEEDVC_PYTHON -m venv $Venv
 } else {
-    Invoke-Checked py -3.12 -m venv .venv-seedvc
+    Invoke-Checked py -3.12 -m venv $Venv
 }
 
-$PY = Join-Path $PSScriptRoot '.venv-seedvc\Scripts\python.exe'
+$PY = Join-Path $Venv 'Scripts\python.exe'
 if ($UV) { Write-Host "== using uv ($UV)" } else { Write-Host '== uv not found — using pip' }
 if (-not $UV) { Invoke-Checked $PY -m pip install -U pip }
 
+Write-Host '== syrinx-stage: torch'
 $hasGpu = $false
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     & nvidia-smi *> $null
@@ -80,16 +89,20 @@ if ($hasGpu) {
         --index-url https://download.pytorch.org/whl/cpu
 }
 
+Write-Host '== syrinx-stage: seedvc'
 Install-Pkgs seed-vc
 
 # music mode: demucs separates the vocal stem inside this same worker venv
+Write-Host '== syrinx-stage: demucs'
 Install-Pkgs demucs
 
 # huggingface_hub 1.x removed the proxies/resume_download kwargs that
 # BigVGAN's _from_pretrained (inside seed-vc) still requires, and
 # transformers 5.x demands hub>=1.5 — pin the pair to the 4.x era.
+Write-Host '== syrinx-stage: pins'
 Install-Pkgs 'transformers==4.57.3' 'huggingface_hub<1.0'
 
+Write-Host '== syrinx-stage: verify'
 # Setup-time import proof: a bad combination must fail HERE, not at first
 # conversion. Written to a temp file and executed (avoids piping a script to
 # python's stdin, which on Windows can race numpy's C-extension DLL load).

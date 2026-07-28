@@ -57,6 +57,14 @@ function Install-Pkgs {
     }
 }
 
+# Where the venv goes. SYRINX_VC_VENV_DIR is how the app relocates it out of an
+# installed tree: the engine ships at engine\.venv\Lib\site-packages, and a venv
+# nested under THAT overflows MAX_PATH the moment pip unpacks torch. Unset means
+# beside this script, which is what a developer running it by hand has always got.
+$VenvRoot = if ($env:SYRINX_VC_VENV_DIR) { $env:SYRINX_VC_VENV_DIR } else { $PSScriptRoot }
+$Venv = Join-Path $VenvRoot '.venv-vevo'
+
+Write-Host '== syrinx-stage: amphion'
 # Amphion clone location: override wins; else follow paths.py's data dir
 # (SYRINX_DATA_DIR override, else %LOCALAPPDATA%\syrinx\syrinx) + \vevo\Amphion.
 if ($env:SYRINX_VEVO_AMPHION) {
@@ -78,16 +86,18 @@ if (-not (Test-Path -LiteralPath (Join-Path $AMPHION_DIR '.git'))) {
 
 # Create the venv. SYRINX_VEVO_PYTHON overrides the interpreter (a full path
 # to python.exe); otherwise the Windows `py` launcher selects 3.12.
+Write-Host '== syrinx-stage: venv'
 if ($env:SYRINX_VEVO_PYTHON) {
-    Invoke-Checked $env:SYRINX_VEVO_PYTHON -m venv .venv-vevo
+    Invoke-Checked $env:SYRINX_VEVO_PYTHON -m venv $Venv
 } else {
-    Invoke-Checked py -3.12 -m venv .venv-vevo
+    Invoke-Checked py -3.12 -m venv $Venv
 }
 
-$PY = Join-Path $PSScriptRoot '.venv-vevo\Scripts\python.exe'
+$PY = Join-Path $Venv 'Scripts\python.exe'
 if ($UV) { Write-Host "== using uv ($UV)" } else { Write-Host '== uv not found — using pip' }
 if (-not $UV) { Invoke-Checked $PY -m pip install -U pip }
 
+Write-Host '== syrinx-stage: torch'
 $hasGpu = $false
 if (Get-Command nvidia-smi -ErrorAction SilentlyContinue) {
     & nvidia-smi *> $null
@@ -110,6 +120,7 @@ if ($hasGpu) {
 # matches the transformers 4.x era (same lesson as the seed-vc venv).
 # transformers is 4.57 NOT Amphion's pinned 4.41: their main-branch code
 # builds LlamaRotaryEmbedding(config=…), an API that postdates their own pin.
+Write-Host '== syrinx-stage: deps'
 Install-Pkgs `
     'numpy==1.26.*' 'scipy==1.12.*' 'transformers==4.57.3' `
     'accelerate==0.24.1' 'huggingface_hub<1.0' `
@@ -127,6 +138,7 @@ Install-Pkgs `
 # parselmouth/torchcrepe: vevo2_utils → evaluation.metrics.f0 → utils.f0,
 # both undeclared by Amphion (the setup-time import below proves the set).
 
+Write-Host '== syrinx-stage: verify'
 # Setup-time import proof: imports the real pipeline so a bad combination fails
 # HERE, not at first conversion. Written to a temp file and executed.
 $proof = @'

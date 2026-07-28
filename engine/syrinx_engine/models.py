@@ -19,9 +19,16 @@ from dataclasses import dataclass
 from fnmatch import fnmatch
 from pathlib import Path
 
+from . import vcsetup
 from .profiles import _data_dir
 
 log = logging.getLogger("syrinx.engine.models")
+
+# What the ⇄ rows say when their isolated venv hasn't been built yet. OS-agnostic
+# on purpose: the old text named engine/setup-vevo.sh, which is both a dead end
+# for anyone who never opens a terminal and a path that doesn't exist on Windows.
+# The Install button in the Models tab is now the answer, so the string points there.
+VC_SETUP_NEEDED = "one-time setup needed — click Install"
 
 
 @dataclass
@@ -144,8 +151,8 @@ CATALOG: list = [
     ModelSpec("seed-vc", "Seed-VC", "vc", "seed_vc", "",
               ["Plachta/Seed-VC", "funasr/campplus",
                "nvidia/bigvgan_v2_22khz_80band_256x", "openai/whisper-small"], 9250,
-              "Diffusion conversion, speech + singing (f0). Isolated venv: run "
-              "engine/setup-seedvc.sh once.",
+              "Diffusion conversion, speech + singing (f0). Runs in its own "
+              "isolated environment — one-time setup.",
               gpu_recommended=True, min_ram_gb=6.0, supported=True, min_vram_gb=3.0,
               # skip the tf/flax duplicates of whisper-small
               patterns=["*.safetensors", "*.bin", "*.pt", "*.pth", "*.json",
@@ -153,7 +160,7 @@ CATALOG: list = [
     ModelSpec("vevo-timbre", "Vevo-Timbre", "vc", "vevo_timbre", "",
               ["amphion/Vevo"], 2650,
               "Amphion's timbre-only converter — keeps the source delivery most "
-              "literally. Isolated venv: run engine/setup-vevo.sh once. "
+              "literally. Runs in its own isolated environment — one-time setup. "
               "Non-commercial weights.",
               gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=3.5,
               patterns=["tokenizer/vq8192/*", "acoustic_modeling/Vq8192ToMels/*",
@@ -165,7 +172,7 @@ CATALOG: list = [
               "Amphion's Vevo2 singing converter — the alternative ♫ engine "
               "(Seed-VC articulates lyrics better and stays the default); "
               "first conversion also fetches whisper-medium (~1.5 GB). "
-              "Isolated venv: run engine/setup-vevo.sh once. "
+              "Runs in its own isolated environment — one-time setup. "
               "Non-commercial weights.",
               gpu_recommended=True, min_ram_gb=8.0, supported=True, min_vram_gb=5.5,
               patterns=["tokenizer/contentstyle_fvq16384_12.5hz/*",
@@ -277,9 +284,6 @@ _SEEDVC_CACHE = {
     "openai/whisper-small": "checkpoints/hf_cache",
 }
 
-_ENGINE_DIR = Path(__file__).resolve().parents[1]
-
-
 def _cache_root(m, repo: str):
     """Cache base for a spec's repo (None = the default HF cache)."""
     if m is not None and m.id == "seed-vc":
@@ -298,23 +302,26 @@ def _repo_bytes(repo: str, base: "Path | None" = None) -> int:
     return sum(f.stat().st_size for f in blobs.glob("*") if f.is_file())
 
 
-def _amphion_dir() -> "Path":
-    """Mirror vevo_worker.py's resolution: env override, else the data dir."""
-    override = os.environ.get("SYRINX_VEVO_AMPHION")
-    return Path(override) if override else _data_dir() / "vevo" / "Amphion"
+# Kept as a name here because vevo_worker.py and this module have to agree about
+# where the clone is; the resolution itself lives with the rest of the setup
+# knowledge in vcsetup.py.
+_amphion_dir = vcsetup.amphion_dir
+
+
+def _setup_id(m: "ModelSpec") -> str:
+    """The setup that unblocks this row ("" = nothing to install)."""
+    return vcsetup.ENGINE_TO_SETUP.get(m.engine, "")
 
 
 def _vc_setup_warning(m: "ModelSpec") -> str:
-    """Conversion engines that live in isolated venvs need a one-time setup."""
-    if m.engine == "seed_vc" and not (_ENGINE_DIR / ".venv-seedvc").exists():
-        return "run engine/setup-seedvc.sh first"
-    if m.engine == "vevo_timbre" and (
-        # the worker needs BOTH the venv and the Amphion clone (a restored
-        # data dir can have one without the other — 2026-07-24 field report)
-        not (_ENGINE_DIR / ".venv-vevo").exists()
-        or not _amphion_dir().exists()
-    ):
-        return "run engine/setup-vevo.sh first"
+    """Conversion engines that live in isolated venvs need a one-time setup.
+
+    Delegating the "is it there?" question to vcsetup means the warning, the
+    Install button and the backends all read the same probe — the old copy here
+    checked for the venv *directory* and called a torn install "ready"."""
+    setup_id = _setup_id(m)
+    if setup_id and not vcsetup.installed(setup_id):
+        return VC_SETUP_NEEDED
     return ""
 
 
@@ -421,8 +428,13 @@ class ModelManager:
     # status -------------------------------------------------------------
     def status(self) -> list:
         hw = detect_hardware()
-        return [
-            {
+        rows = []
+        for m in CATALOG:
+            # setup_id/needs_setup drive the row's Install button; the warning
+            # stays the human sentence. Weights and engine are independent — a
+            # row can need setup AND still be downloaded, or vice versa.
+            setup_warning = _vc_setup_warning(m)
+            rows.append({
                 "id": m.id, "display": m.display, "category": m.category,
                 "engine": m.engine, "size": m.size, "size_mb": m.size_mb,
                 "description": m.description, "gpu_recommended": m.gpu_recommended,
@@ -431,10 +443,11 @@ class ModelManager:
                 "downloaded": is_cached(m),
                 "downloading": m.id in self._downloading,
                 "active": self._active.get(m.category) == m.id,
-                "warning": _vc_setup_warning(m) or hardware_warning(m, hw),
-            }
-            for m in CATALOG
-        ]
+                "setup_id": _setup_id(m),
+                "needs_setup": bool(setup_warning),
+                "warning": setup_warning or hardware_warning(m, hw),
+            })
+        return rows
 
     # download / delete --------------------------------------------------
     async def download(self, model_id: str, on_progress) -> bool:

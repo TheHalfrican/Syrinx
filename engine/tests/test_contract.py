@@ -23,7 +23,7 @@ from _contract import DbusAdapter, RpcAdapter, EngineCallError
 DOCUMENTED_SIGNALS = {
     "GenerationProgress", "AudioLevel", "RecordingLevel", "PlaybackInfo",
     "PlaybackProgress", "LlmResult", "TranscribeProgress", "TranscribeResult",
-    "ModelProgress", "SpeakStarted", "SpeakEnded",
+    "ModelProgress", "VcSetupProgress", "SpeakStarted", "SpeakEnded",
 }
 
 
@@ -90,6 +90,27 @@ async def exercise_download_signal_flow(a):
     await a.wait_for("ModelProgress")
     progs = [p for (n, p) in a.notifications if n == "ModelProgress"]
     assert progs == [["kokoro", 0.5, "downloading"], ["kokoro", 1.0, "done"]]
+
+
+async def exercise_vc_setup_signal_flow(a):
+    async def fake_install(setup_id, on_progress):
+        on_progress(setup_id, "creating the isolated environment…", "running", "")
+        on_progress(setup_id, "done", "done", "")
+        return True
+
+    a.core._vcsetup.install = fake_install
+    assert await a.call("InstallVcEngine", "seedvc") is True
+    await a.wait_for("VcSetupProgress")
+    progs = [p for (n, p) in a.notifications if n == "VcSetupProgress"]
+    assert progs == [
+        ["seedvc", "creating the isolated environment…", "running", ""],
+        ["seedvc", "done", "done", ""],
+    ]
+    # the fake never releases the claim, so this stands in for a second click
+    # arriving while a real install is still running: refused, no second task
+    assert await a.call("InstallVcEngine", "seedvc") is False
+    # nothing is actually running, so there is nothing for Cancel to kill
+    assert await a.call("CancelVcSetup", "seedvc") is False
 
 
 async def exercise_transcribe_file_signal_flow(a):
@@ -166,6 +187,7 @@ EXERCISES = [
     exercise_file_envelope_unreadable,
     exercise_void_method_returns_null,
     exercise_download_signal_flow,
+    exercise_vc_setup_signal_flow,
     exercise_transcribe_file_signal_flow,
     exercise_transcribe_file_failure_is_flagged,
     exercise_llm_failure_is_flagged,
@@ -201,7 +223,7 @@ def test_method_surface_matches_across_wrappers():
     iface = EngineInterface()
     dbus_methods = {m.name for m in ServiceInterface._get_methods(iface)}
     assert rpc_methods == dbus_methods
-    assert len(rpc_methods) == 70  # 66 + 4 recording methods (§14)
+    assert len(rpc_methods) == 72  # 68 + 4 recording
     # the 4 transport-only methods have no D-Bus analog (spec §0)
     assert not (set(TRANSPORT_METHODS) & dbus_methods)
 
@@ -223,7 +245,7 @@ def test_properties_map_to_getters():
 # --- D-Bus shim delegation sweep -----------------------------------------
 #
 # Every @method() on EngineInterface is a one-line delegation to the core. This
-# drives all 66 of them through the shim (with the ML boundary faked) so the
+# drives all 72 of them through the shim (with the ML boundary faked) so the
 # wrapper cannot silently rot — a delegation that stops calling its core method,
 # or a method whose signature drifts from the core's, fails here.
 
@@ -266,6 +288,10 @@ def _sweep_args(iface):
         "ListModels": (),
         "Hardware": (),
         "DownloadModel": ("nope",),
+        # an unknown setup_id must return False without side effects — the
+        # id guard runs before the claim, so nothing is reserved or spawned
+        "InstallVcEngine": ("nope",),
+        "CancelVcSetup": ("nope",),
         "DeleteModel": ("nope",),
         "SetActiveModel": ("nope",),
         "ListHistory": (),

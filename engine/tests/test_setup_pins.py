@@ -47,6 +47,16 @@ def _pair(stem: str) -> tuple[set[str], set[str]]:
     return sh, ps1
 
 
+# The phase markers the engine's installer reads off stdout to drive the app's
+# stage text. Comments are stripped first for the same reason the pin scan does
+# it: a marker quoted in prose is documentation, not a marker.
+_STAGE_RE = re.compile(r"==\s*syrinx-stage:\s*([A-Za-z0-9_.-]+)")
+
+
+def _stages(script: Path) -> set[str]:
+    return set(_STAGE_RE.findall(_strip_comments(script.read_text(encoding="utf-8"))))
+
+
 def test_seedvc_setup_scripts_exist():
     assert (_ENGINE_DIR / "setup-seedvc.sh").is_file()
     assert (_ENGINE_DIR / "setup-seedvc.ps1").is_file()
@@ -77,3 +87,33 @@ def test_vevo_pins_match():
     }
     assert expected <= sh, f"vevo .sh lost expected pins: {expected - sh}"
     assert sh == ps1, f"vevo pin drift: only in .sh={sh - ps1}, only in .ps1={ps1 - sh}"
+
+
+# --- one-click install seams (engine/syrinx_engine/vcsetup.py drives these) ---
+
+
+_EXPECTED_STAGES = {
+    "setup-seedvc": {"venv", "torch", "seedvc", "demucs", "pins", "verify"},
+    "setup-vevo": {"amphion", "venv", "torch", "deps", "verify"},
+}
+
+
+def test_stage_markers_match_across_each_pair():
+    """The app's progress text comes from these markers, so a phase added to one
+    OS's script and not the other would silently stall the stage display there —
+    the same class of rot the pin guard above catches."""
+    for stem, expected in _EXPECTED_STAGES.items():
+        sh = _stages(_ENGINE_DIR / f"{stem}.sh")
+        ps1 = _stages(_ENGINE_DIR / f"{stem}.ps1")
+        assert sh == expected, f"{stem}.sh stage drift: {sh ^ expected}"
+        assert sh == ps1, (
+            f"{stem} stage drift: only in .sh={sh - ps1}, only in .ps1={ps1 - sh}")
+
+
+def test_every_script_honors_the_venv_dir_override():
+    """Without this the Windows installer cannot move the venv off the deeply
+    nested installed tree, and MAX_PATH kills the torch unpack."""
+    for stem in _EXPECTED_STAGES:
+        for ext in (".sh", ".ps1"):
+            text = (_ENGINE_DIR / (stem + ext)).read_text(encoding="utf-8")
+            assert "SYRINX_VC_VENV_DIR" in _strip_comments(text), f"{stem}{ext}"

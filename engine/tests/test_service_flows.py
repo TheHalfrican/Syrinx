@@ -726,6 +726,8 @@ def test_every_signal_marshals_its_payload():
     assert e.TranscribeProgress(4, "partial") == [4, "partial"]
     assert e.TranscribeResult(4, "final", False) == [4, "final", False]
     assert e.ModelProgress("kokoro", 0.5, "downloading") == ["kokoro", 0.5, "downloading"]
+    assert e.VcSetupProgress("seedvc", "installing PyTorch…", "running", "") == [
+        "seedvc", "installing PyTorch…", "running", ""]
     assert e.SpeakStarted(9) == 9
     assert e.SpeakEnded(9) == 9
 

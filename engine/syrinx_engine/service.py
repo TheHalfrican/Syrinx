@@ -165,6 +165,14 @@ class EngineInterface(ServiceInterface):
         return await self._core.DownloadModel(model_id)
 
     @method()
+    async def InstallVcEngine(self, setup_id: "s") -> "b":  # noqa: F821
+        return await self._core.InstallVcEngine(setup_id)
+
+    @method()
+    async def CancelVcSetup(self, setup_id: "s") -> "b":  # noqa: F821
+        return await self._core.CancelVcSetup(setup_id)
+
+    @method()
     async def DeleteModel(self, model_id: "s") -> None:  # noqa: F821
         await self._core.DeleteModel(model_id)
 
@@ -451,6 +459,14 @@ class EngineInterface(ServiceInterface):
     @signal()
     def ModelProgress(self, model_id, pct, status) -> "sds":  # noqa: F821
         return [model_id, pct, status]
+
+    @signal()
+    def VcSetupProgress(self, setup_id, stage, status, detail) -> "ssss":  # noqa: F821
+        # §15. status is running|done|error|cancelled — no percentage, because
+        # pip gives nothing measurable to normalize against; progress is the
+        # human `stage` label instead. detail is "" while running and carries a
+        # one-line reason plus the setup log's path on error.
+        return [setup_id, stage, status, detail]
 
     @signal()
     def SpeakStarted(self, gen_id) -> "u":  # noqa: F821

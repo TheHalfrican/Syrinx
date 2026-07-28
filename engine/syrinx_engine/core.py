@@ -33,6 +33,7 @@ from .history import CaptureStore, HistoryStore, SourceClipStore
 from .llm import PersonalityLLM
 from .models import ModelManager, spec as model_spec, detect_hardware
 from .recording import RecordingManager
+from .vcsetup import SETUP_IDS, VcSetupManager
 from . import audio, effects, settings as engine_settings
 
 log = logging.getLogger("syrinx.engine.service")
@@ -126,6 +127,7 @@ class EngineCore:
         self._llm = PersonalityLLM()  # lazy — loads on first Compose/Rewrite
         self._models = ModelManager()
         self._recorder = RecordingManager()  # mic capture (Win/mac; §14)
+        self._vcsetup = VcSetupManager()  # one-click ⇄ engine installs (§15)
         # apply persisted active-model choices to the lazy components
         if (s := self._models.active_spec("llm")):
             self._llm.set_model(s.size)
@@ -641,6 +643,34 @@ class EngineCore:
 
         asyncio.create_task(run())
         return True
+
+    async def InstallVcEngine(self, setup_id) -> bool:
+        """Build a conversion engine's isolated venv (§15). True = started.
+
+        The guard order matters. Rejecting an unknown id *before* touching the
+        manager is what makes an unknown id a pure no-op, and `claim` is a
+        synchronous check-and-set taken here rather than inside the task, so a
+        double-clicked Install button cannot start two runs.
+        """
+        if setup_id not in SETUP_IDS:
+            return False
+        if not self._vcsetup.claim(setup_id):
+            return False
+
+        async def run() -> None:
+            await self._vcsetup.install(
+                setup_id,
+                lambda sid, stage, status, detail: self._emit(
+                    "VcSetupProgress", sid, stage, status, detail
+                ),
+            )
+
+        asyncio.create_task(run())
+        return True
+
+    async def CancelVcSetup(self, setup_id) -> bool:
+        """Kill a running setup. True = something was actually killed."""
+        return self._vcsetup.cancel(setup_id)
 
     async def DeleteModel(self, model_id) -> None:
         self._models.delete(model_id)
