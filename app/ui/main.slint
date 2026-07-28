@@ -3096,6 +3096,15 @@ export component AppWindow inherits Window {
 
                     if tab == "models" : ScrollView {
                         VerticalLayout {
+                            // Pack from the top. slint's default `stretch`
+                            // alignment hands every spare pixel between the
+                            // content and the viewport to whichever children
+                            // can grow — which on a tall window means gaps
+                            // injected *inside* the list rather than left at
+                            // the bottom where they belong. Below the content
+                            // height this is a no-op (the solver shrinks
+                            // identically either way).
+                            alignment: start;
                             padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 8px;
                             for sec in [
                                 { label: "VOICE & CLONING", cat: "voice" },
@@ -3131,7 +3140,20 @@ export component AppWindow inherits Window {
                                     // instead of centred on a growing block.
                                     if vc-install-error != "" : HorizontalLayout {
                                         spacing: 6px;
-                                        Text {
+                                        // Hug the wrapped text. A wrapping Text
+                                        // reports NO maximum height, and the ⧉
+                                        // column beside it (alignment: start, so
+                                        // the button cannot cap the row at 16px)
+                                        // reports none either — so this banner
+                                        // was the one growable thing in the whole
+                                        // Models list and swallowed the entire
+                                        // spare page under the message. Pinning
+                                        // the height to what the text actually
+                                        // needs at its real width makes min ==
+                                        // max, so there is nothing left to grow
+                                        // into — and it re-measures on reflow.
+                                        height: vcerr.preferred-height;
+                                        vcerr := Text {
                                             text: "⚠ " + vc-install-error;
                                             font-size: 10px; color: #d9922b; wrap: word-wrap;
                                             horizontal-stretch: 1; preferred-width: 0px;

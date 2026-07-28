@@ -445,6 +445,42 @@ _LINE_SPLIT = re.compile(rb"[\r\n]")
 # Long-path failures are the one setup error whose fix the user cannot guess.
 _LONG_PATH_HINTS = ("206", "path too long", "filename or extension is too long")
 
+# Belt and braces for the NO_COLOR/TERM pair below: a child that colours its
+# output anyway must not get escape bytes into the log file or the app's error
+# banner — a 2026-07-28 field failure surfaced as "[31;1m[0m[36;1m…" in the UI.
+# Two arms, and deliberately no more: CSI (``ESC [`` … final byte) is every
+# colour and cursor sequence anything in this pipeline emits, and OSC
+# (``ESC ]`` … BEL or ST) is the window-title strings a shell writes.
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[ -/]*[@-~]|\x1b\].*?(?:\x07|\x1b\\)")
+
+# PowerShell frames a failed native command with a caret diagram and a
+# "Program … ended with non-zero exit code" line, and pip closes a failed wheel
+# build with two boilerplate lines of its own. Every one of them is printed
+# AFTER the sentence that says what actually broke, so "the last line" — which
+# is what this used to report — reliably picks the least useful one. Skip them
+# while scanning back for the real error.
+_DECORATION = re.compile(
+    r"""^\s*(
+          \|                                  #      | Program "python.exe" ended…
+        | Line\s*\|                           # Line |
+        | \d+\s*\|                            #   35 |     & $Args[0] @(…)
+        | ~+\s*$                              #      |     ~~~~~~~~~
+        | \S*NativeCommandExitException       # …the exception class + script:line
+        | \[end\ of\ output\]                 # pip's failed-build wrapper
+        | note:\ This\ error\ originates\ from\ a\ subprocess
+    )""",
+    re.VERBOSE | re.IGNORECASE,
+)
+
+# The line worth putting in a banner announces itself. Scanning backwards for
+# this beats the last line whenever a build tool summarises after it fails.
+_ERROR_LINE = re.compile(r"^\s*(error|fatal)\b", re.IGNORECASE)
+
+# The banner is one line of chrome in a scrolling list, not a log viewer: past
+# this the message stops being readable and starts being a wall (and the log
+# path appended after it is the actionable half).
+_MAX_REASON = 240
+
 
 class VcSetupManager:
     """Owns the at-most-one-per-id, one-at-a-time execution of the setups."""
@@ -540,6 +576,15 @@ class VcSetupManager:
             "PIP_DISABLE_PIP_VERSION_CHECK": "1",
             "UV_NO_PROGRESS": "1",
             "GIT_TERMINAL_PROMPT": "0",
+            # Colour is for a terminal, and this child has none: its output
+            # goes to a log file and — one line of it — to an error banner.
+            # Proven in the field on 2026-07-28: the same failing install run
+            # from a harness shell that had NO_COLOR set logged plain text,
+            # while the app's chain (which did not) put raw "[31;1m" escapes
+            # in the banner. PowerShell 7.2+ switches $PSStyle to plain text
+            # on NO_COLOR; pip, uv and git honour one or both of these.
+            "NO_COLOR": "1",
+            "TERM": "dumb",
             # Pass the resolved clone location explicitly. setup-vevo.sh derives
             # its own default from $HOME and ignores SYRINX_DATA_DIR, so without
             # this the script and the worker could disagree about where Amphion
@@ -574,7 +619,10 @@ class VcSetupManager:
         with open(log_path, "a", encoding="utf-8", errors="replace") as logf:
 
             def handle(raw: bytes) -> None:
-                line = raw.decode("utf-8", "replace").rstrip()
+                # Strip escapes before anything else sees the line: the log,
+                # the stage-marker match and the banner tail all want text.
+                # (A coloured "== syrinx-stage:" would not even match.)
+                line = _ANSI.sub("", raw.decode("utf-8", "replace")).rstrip()
                 if not line:
                     return
                 logf.write(line + "\n")
@@ -621,9 +669,27 @@ class VcSetupManager:
 
 
 def _reason(tail: "deque[str]", rc: int) -> str:
-    """One line of *why*, from the child's last meaningful output."""
-    last = next((line for line in reversed(tail) if line.strip()), "")
-    reason = last or f"the setup script exited with code {rc}"
+    """One line of *why*, from the child's last meaningful output.
+
+    Three passes, best first, because the useful sentence is almost never the
+    last thing a failing install prints: a self-announced ``error:``/``fatal``
+    line that is not shell decoration, else the last real line, else the exit
+    code. The 2026-07-28 field failure is the case that forced this — its last
+    line was PowerShell's ``| Program "python.exe" ended with non-zero exit
+    code: 1``, three lines below the ``error: failed-wheel-build-for-install``
+    that actually names the problem.
+    """
+    lines = [ln for ln in tail if ln.strip() and not _DECORATION.match(ln)]
+    reason = next((ln.strip() for ln in reversed(lines) if _ERROR_LINE.match(ln)), "")
+    if not reason and lines:
+        reason = lines[-1].strip()
+    if not reason:
+        reason = f"the setup script exited with code {rc}"
+    # Truncate here, not at the end: the log path and the MAX_PATH advice are
+    # appended after this and are the parts the user acts on, so they must
+    # never be what falls off the end.
+    if len(reason) > _MAX_REASON:
+        reason = reason[:_MAX_REASON - 1].rstrip() + "…"
     joined = " ".join(tail).lower()
     if any(h in joined for h in _LONG_PATH_HINTS):
         # ~18 characters of MAX_PATH headroom at the default location; a long

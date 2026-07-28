@@ -524,6 +524,121 @@ def test_a_max_path_failure_suggests_the_venv_dir_override(monkeypatch, tmp_path
     assert "SYRINX_VC_VENV_DIR" in events[-1][3]
 
 
+# --- no ANSI, ever -------------------------------------------------------
+
+
+# A coloured pip/PowerShell transcript: a red "ERROR", a cursor-position
+# sequence, a bare reset, and a window-title OSC string. The 2026-07-28 field
+# report showed exactly this reaching the app's banner as "[31;1m[0m…".
+ANSI_SCRIPT = r"""
+import sys
+E = "\x1b"
+sys.stdout.write(E + "]0;pip install seed-vc" + "\x07")
+sys.stdout.write(E + "[2K" + E + "[36;1m== syrinx-stage: torch" + E + "[0m\n")
+sys.stdout.write(E + "[31;1mERROR: Failed building wheel for webrtcvad" + E + "[0m\n")
+sys.stdout.flush()
+raise SystemExit(1)
+"""
+
+
+def test_ansi_escapes_never_reach_the_log_or_the_banner(
+        monkeypatch, tmp_path, setup_log):
+    """A coloured child must not put terminal control bytes in either sink —
+    and a coloured stage marker must still be recognised as a stage."""
+    ok, events = run_install(monkeypatch, tmp_path, ANSI_SCRIPT)
+    assert ok is False
+    text = log_for(setup_log, "seedvc").read_text(encoding="utf-8")
+    assert "\x1b" not in text
+    assert "== syrinx-stage: torch" in text
+    assert "ERROR: Failed building wheel for webrtcvad" in text
+    # the colouring did not hide the marker from the stage parser
+    stages = [stage for (_id, stage, status, _d) in events if status == "running"]
+    assert stages == [vcsetup.STAGE_LABELS["torch"]]
+    detail = events[-1][3]
+    assert "\x1b" not in detail
+    assert detail.startswith("ERROR: Failed building wheel for webrtcvad")
+
+
+def test_the_child_environment_asks_for_plain_text(monkeypatch, tmp_path, setup_log):
+    """Stripping is the safety net; not being coloured in the first place is
+    the fix. The harness shell that never showed garbage had NO_COLOR set."""
+    body = (
+        "import json, os, sys\n"
+        "sys.stdout.write(json.dumps({k: os.environ.get(k) for k in ("
+        "'NO_COLOR','TERM')}) + '\\n')\n"
+    )
+    ok, _events = run_install(monkeypatch, tmp_path, body)
+    assert ok is True
+    import json
+
+    seen = json.loads(log_for(setup_log, "seedvc").read_text(encoding="utf-8").strip())
+    assert seen["NO_COLOR"] == "1"
+    assert seen["TERM"] == "dumb"
+
+
+# --- picking the line that says why --------------------------------------
+
+
+# Verbatim from the 2026-07-28 field report: pip's summary, then PowerShell's
+# caret diagram, then the "ended with non-zero exit code" decoration that the
+# old last-line rule put in the banner.
+FIELD_TAIL = [
+    "Building wheel for webrtcvad (pyproject.toml): finished with status 'error'",
+    "ERROR: Failed building wheel for webrtcvad",
+    "Failed to build webrtcvad",
+    "error: failed-wheel-build-for-install",
+    "Failed to build installable wheels for some pyproject.toml based projects",
+    "webrtcvad",
+    "NativeCommandExitException: C:\\Users\\x\\syrinx\\engine\\setup-seedvc.ps1:35",
+    "Line |",
+    "  35 |      & $Args[0] @($Args[1..($Args.Count - 1)])",
+    "     |      ~~~~~~~~~",
+    '     | Program "python.exe" ended with non-zero exit code: 1 (0x00000001).',
+]
+
+
+def test_the_reason_skips_the_powershell_decoration():
+    """Scanning back, the first self-announced error line that is not shell
+    decoration wins — here pip's own `error:` summary line."""
+    from collections import deque
+
+    assert vcsetup._reason(deque(FIELD_TAIL), 1) == "error: failed-wheel-build-for-install"
+
+
+def test_a_tail_of_nothing_but_decoration_falls_back_to_the_exit_code():
+    from collections import deque
+
+    assert "exited with code 1" in vcsetup._reason(deque(FIELD_TAIL[6:]), 1)
+
+
+def test_a_tail_with_no_error_line_uses_the_last_real_line():
+    from collections import deque
+
+    tail = deque(["cloning Amphion", "fatal-looking but not", "Line |", "     | boom"])
+    assert vcsetup._reason(tail, 2) == "fatal-looking but not"
+
+
+def test_a_novel_length_reason_is_ellipsized_before_the_hints():
+    """The banner sits in a scrolling list; 240 characters is where a message
+    stops being readable, and the log path appended after it must survive."""
+    from collections import deque
+
+    tail = deque(["ERROR: " + "backtracking " * 60])
+    reason = vcsetup._reason(tail, 1)
+    assert len(reason) <= vcsetup._MAX_REASON
+    assert reason.endswith("…")
+    assert reason.startswith("ERROR: backtracking")
+
+
+def test_the_max_path_hint_survives_the_cap():
+    from collections import deque
+
+    tail = deque(["ERROR: " + "x" * 400 + " [Errno 206] path too long"])
+    reason = vcsetup._reason(tail, 1)
+    assert "SYRINX_VC_VENV_DIR" in reason
+    assert "…" in reason
+
+
 def test_a_missing_script_is_a_clean_error(monkeypatch, tmp_path):
     monkeypatch.setattr(vcsetup, "_IS_WIN", False)
     monkeypatch.setattr(vcsetup, "script_path", lambda sid: None)
