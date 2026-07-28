@@ -406,6 +406,58 @@ component ThemedDropdown inherits Rectangle {
     }
 }
 
+// --- read-only twin of ThemedDropdown: same slot, same height, no chevron ---
+// For a value that is real but not a choice (the composer's engine field when
+// the selected voice can only ever speak on one engine). Showing a flat field
+// rather than dropping the element keeps the dropdown row's geometry still AND
+// keeps the engine on screen — the user still sees it's Kokoro, they're just
+// not offered swaps the engine's router would ignore.
+component LockedField inherits Rectangle {
+    in property <string> label;
+    in property <string> tip;         // hover tooltip; "" = none
+    property <bool> win95: Theme.name == "win95";
+    height: 30px;
+    border-radius: Theme.rad;
+    border-width: win95 ? 0px : 1px;
+    border-color: Theme.brd;
+    background: win95 ? #ffffff : Theme.chip-bg;
+    if win95 : Bevel { width: 100%; height: 100%; sunken: true; }
+    HorizontalLayout {
+        padding-left: 10px; padding-right: 10px;
+        Text {
+            text: label; font-size: 12px; color: Theme.dim; font-family: Theme.font;
+            vertical-alignment: center; overflow: elide; horizontal-stretch: 1;
+        }
+    }
+    // hover-only: no clicked handler, so the field is inert by construction
+    lta := TouchArea { }
+    // tooltip above the field (the row is bottom-anchored, so below is offscreen);
+    // x/y bindings keep it out of the field's layout info, same trick as TBtn
+    tipbox := Rectangle {
+        x: 0;
+        y: -self.height - 5px;
+        height: 20px;
+        width: ltt.preferred-width + 14px;
+        opacity: 0;
+        background: win95 ? #ffffe1 : #10151be6;
+        border-width: 1px; border-color: win95 ? #000000 : #ffffff33;
+        border-radius: win95 ? 0px : 4px;
+        ltt := Text {
+            x: 7px; height: 100%;
+            text: tip; font-size: 10px; font-family: Theme.font;
+            color: win95 ? #000000 : #ffffff;
+            vertical-alignment: center;
+        }
+    }
+    states [
+        tip-shown when lta.has-hover && tip != "" : {
+            tipbox.opacity: 1;
+            in { animate tipbox.opacity { duration: 100ms; delay: 1200ms; } }
+            out { animate tipbox.opacity { duration: 80ms; } }
+        }
+    ]
+}
+
 // --- "Kokoro Defaults" card: bundled presets collapsed behind a dropdown ---
 component KokoroCard inherits Rectangle {
     in property <string> selected;
@@ -674,30 +726,35 @@ component ModelRow inherits Rectangle {
                     Rectangle { x: 0; width: parent.width * m.progress; height: 100%; border-radius: 3px; background: Theme.gen-bg; }
                 }
             }
-            if !installing && !m.downloading : HorizontalLayout {
-                alignment: end; spacing: 6px;
-                // the engine's one-time local install — independent of the
-                // weights, so it sits beside Download/Delete, not instead of them
-                if m.needs-setup : TBtn {
-                    label: "Install Engine"; tip: "Set this engine up on this computer"; generate: true;
-                    clicked => { root.install-request(); }
+            // centered like the two progress states above — bare buttons in a
+            // grown row otherwise pin to the top (Noah, 2026-07-28)
+            if !installing && !m.downloading : VerticalLayout {
+                alignment: center;
+                HorizontalLayout {
+                    alignment: end; spacing: 6px;
+                    // the engine's one-time local install — independent of the
+                    // weights, so it sits beside Download/Delete, not instead of them
+                    if m.needs-setup : TBtn {
+                        label: "Install Engine"; tip: "Set this engine up on this computer"; generate: true;
+                        clicked => { root.install-request(); }
+                    }
+                    if m.downloaded && m.supported && !m.active && selectable : TBtn {
+                        label: "Use"; tip: "Make this the active model";
+                        clicked => { root.activate(); }
+                    }
+                    if m.downloaded : TBtn {
+                        label: "Delete"; tip: "Remove the downloaded weights from disk";
+                        clicked => { root.del(); }
+                    }
+                    // weights are useless without the engine, so a needs-setup row
+                    // gates Download behind Install Engine — one clear next step
+                    // (Noah, 2026-07-28) instead of two competing buttons
+                    if !m.downloaded && m.supported && !m.needs-setup : TBtn {
+                        label: "Download"; tip: "Fetch the weights (" + m.size-label + ")"; generate: true;
+                        clicked => { root.download(); }
+                    }
+                    if !m.downloaded && !m.supported : Text { text: "no backend yet"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
                 }
-                if m.downloaded && m.supported && !m.active && selectable : TBtn {
-                    label: "Use"; tip: "Make this the active model";
-                    clicked => { root.activate(); }
-                }
-                if m.downloaded : TBtn {
-                    label: "Delete"; tip: "Remove the downloaded weights from disk";
-                    clicked => { root.del(); }
-                }
-                // weights are useless without the engine, so a needs-setup row
-                // gates Download behind Install Engine — one clear next step
-                // (Noah, 2026-07-28) instead of two competing buttons
-                if !m.downloaded && m.supported && !m.needs-setup : TBtn {
-                    label: "Download"; tip: "Fetch the weights (" + m.size-label + ")"; generate: true;
-                    clicked => { root.download(); }
-                }
-                if !m.downloaded && !m.supported : Text { text: "no backend yet"; font-size: 10px; font-family: Theme.mono; color: Theme.dim; vertical-alignment: center; }
             }
         }
     }
@@ -890,6 +947,12 @@ export component AppWindow inherits Window {
     in-out property <int> composer-lang-index: 0;
     in property <[string]> composer-engines;
     in-out property <int> composer-engine-index: 0;
+    // Engine-locked voice: the human name of the ONE engine the selected voice
+    // can speak on ("" = free to move, normal dropdown). Kokoro presets and any
+    // preset profile route to their own engine no matter what the active voice
+    // model is, so offering the picker there offers a swap that never happens.
+    // SET FROM RUST (select-voice) — derived from the voice id / profile row.
+    in property <string> composer-engine-locked: "";
     in property <[string]> composer-effects: ["No effects"];
     in-out property <int> composer-effect-index: 0;
     in-out property <int> composer-style-index: 0;  // delivery direction (index into app-side STYLES)
@@ -1552,11 +1615,18 @@ export component AppWindow inherits Window {
                                             current-index <=> composer-lang-index;
                                             selected(i) => { root.pick-language(i); }
                                         }
-                                        ThemedDropdown {
+                                        if composer-engine-locked == "" : ThemedDropdown {
                                             up: true; horizontal-stretch: 1;
                                             model: composer-engines;
                                             current-index <=> composer-engine-index;
                                             selected(i) => { root.pick-engine(i); }
+                                        }
+                                        // bound to one engine — same slot, but a flat
+                                        // read-only field instead of an offer
+                                        if composer-engine-locked != "" : LockedField {
+                                            horizontal-stretch: 1;
+                                            label: composer-engine-locked;
+                                            tip: "This voice only runs on " + composer-engine-locked;
                                         }
                                         // delivery direction — labels must match STYLES in main.rs;
                                         // hidden when the voice's engine ignores instructs
