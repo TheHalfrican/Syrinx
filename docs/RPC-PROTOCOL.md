@@ -208,7 +208,7 @@ name. `→ null` means a void reply (`{"result":null}`).
 | `CreateProfile` | `[spec_json: string]` | string (profile_id) | Create a profile from a JSON spec. |
 | `ListProfiles` | `[]` | string (JSON array) | Profile summaries. |
 | `GetProfile` | `[profile_id: string]` | string (JSON, `""` if not found) | Full profile. |
-| `UpdateProfile` | `[profile_id: string, patch_json: string]` | → null | Apply a JSON patch of editable fields. |
+| `UpdateProfile` | `[profile_id: string, patch_json: string]` | → null | Apply a JSON patch of editable fields. `default_engine` is a client-side seed for the composer's dropdown; the router no longer consults it at generation time. |
 | `DeleteProfile` | `[profile_id: string]` | → null | Delete a profile + its samples. |
 | `SetProfileAvatar` | `[profile_id: string, src: string, mode: string, sx: integer, sy: integer, sw: integer, sh: integer]` | → null | Attach avatar + crop rect. `mode` `"circle"`/`"panel"`; empty `src` re-crops. |
 | `ExportProfile` | `[profile_id: string, dest: string]` | → null | Write a portable `.zip`. |
@@ -311,7 +311,7 @@ visible failure rather than an empty result.
 | `InstallVcEngine` | `[setup_id: string]` | boolean | Start the one-time isolated-venv setup for an optional engine (`"seedvc"`\|`"vevo"`\|`"luxtts"` — the vocabulary grows with the engine's SETUPS table, so read it off `ListModels` rows rather than hardcoding it); progress via `VcSetupProgress`. `false` = unknown id **or** that setup is already running (see §15). |
 | `CancelVcSetup` | `[setup_id: string]` | boolean | Kill a running `InstallVcEngine`; `true` if something was cancelled. |
 | `DeleteModel` | `[model_id: string]` | → null | Delete a downloaded model's files. |
-| `SetActiveModel` | `[model_id: string]` | string (category) | Make a model active for its category; returns the category. |
+| `SetActiveModel` | `[model_id: string]` | string (category) | Make a model active for its category; returns the category. For `"voice"` this is the active cloning model — driven by the composer's engine dropdown, the single selection authority (the Models tab is inventory-only). `"vc"` remains a no-op: the converter picks per conversion. |
 | `GetSettings` | `[]` | string (JSON `{stored,effective}`) | Persisted engine settings + effective values. |
 | `SetSetting` | `[key: string, value_json: string]` | → null | Set one engine setting (JSON-encoded value; `null` clears). |
 | `Cancel` | `[gen_id: integer]` | → null | Cancel an in-flight generation. |

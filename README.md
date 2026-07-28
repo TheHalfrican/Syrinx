@@ -127,8 +127,10 @@ behavior is byte-identical by construction — the contract tests enforce it.
   streaming partials, LLM transcript refinement, and persistent text captures.
 - **Dictation pill** (`syrinx-dictate toggle`) with an LLM cleanup pass
   toggleable from Settings (or `--refine`).
-- **Models tab**: download and hot-switch STT / LLM / voice engines, plus
-  weight management for the conversion models.
+- **Models tab**: install engines and manage downloaded weights. Choosing
+  what runs happens where you use it — the composer's dropdown for voices,
+  the Transcription view for Whisper, Settings for the LLM — and nothing
+  downloads without an explicit click.
 - **Settings**: persisted theme, PipeWire capture-device pickers, dictation
   refinement, live engine knobs, default export folder.
 - Multiple full-chrome UI themes (Matrix TTY, Win95, Frutiger Aero among them).
@@ -137,9 +139,10 @@ The isolated-venv engines set up with one command each:
 `engine/setup-seedvc.sh`, `engine/setup-vevo.sh` and
 `engine/setup-luxtts.sh` (CUDA auto-detected; Seed-VC is GPL-3.0 and Vevo's
 weights are CC-BY-NC, LuxTTS pulls its phonemizer wheel and two pinned git
-revisions from outside PyPI — so each lives outside the main engine venv and
-their weights download on first use). The Models tab runs the matching
-script for you: one click per engine, same pins, no shell.
+revisions from outside PyPI — so each lives outside the main engine venv).
+The Models tab runs the matching script for you: one click per engine, same
+pins, no shell — and weights are always an explicit download, never a side
+effect of generating.
 
 ## Install as a desktop app (beta)
 

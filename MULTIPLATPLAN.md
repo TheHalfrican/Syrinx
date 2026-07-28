@@ -902,6 +902,37 @@ test (install is one click away on this box; Noah runs it organically
 with the other staged engines). Suites: engine 462 passed 1 skipped
 (+5 guards incl. exact-SHA pins), cargo 73+6+1, clippy clean.
 
+**2026-07-28 (close) — the selection redesign lands: one authority per
+category, and disk is only ever spent on purpose.** Noah's design,
+executed whole: the Models tab is inventory only (Use is gone from
+every row; the chip reads IN USE with per-section hints naming the
+real authority); the composer's dropdown IS voice selection
+(SetActiveModel with the row's id — engine AND size travel, killing
+the 0.6B-picked-1.7B-spoke bug by construction); STT picks live in
+the Transcription view, LLM in a Settings LANGUAGE MODEL card; the ⇄
+view already had per-conversion pickers and now reads real row state
+(vevo2-singing's own row is finally consulted). Profile
+default_engine is demoted to an app-side SEED — selecting a voice
+pre-selects its pin, dropdown changes are session-only, the composer
+NEVER writes the profile (the old dropdown silently rewrote
+default_engine and, worse, offered kokoro to cloned voices, which
+crashed generation — both dead). Cloned voices are offered
+cloning-capable rows only; locked presets keep the read-only label;
+list_voices gates CustomVoice presets on downloaded-not-active so
+they survive Use's death. Requirement 7 productized: require_weights
+refuses any generation whose weights aren't on disk with an
+actionable sentence, the app pre-checks every dispatch and raises a
+ModelNeededNotice whose "Open Models →" coachmarks the exact row
+(scroll-into-view with a sanctioned no-scroll fallback); exemptions,
+all accepted by Noah and documented in code: kokoro's warmup (price
+of entry), TADA's ~2 MB tokenizer, vevo2's out-of-catalog
+whisper-medium behind a one-shot persisted consent dialog. Known
+residuals, deliberate: history ↻ TTS rows still don't pin their
+engine (coherence follow-up); engine-side require_weights(size="")
+names the catalog's first row where the app-side check prefers a
+downloaded one — reachable only headless. Suites: engine 492 passed
+1 skipped (+30), cargo 93+6+1 (+20), clippy clean throughout.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~

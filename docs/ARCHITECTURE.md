@@ -115,8 +115,11 @@ via PipeWire and emits only lightweight `AudioLevel` samples for visualization.
 - Engine always separate (a hot D-Bus service) — UI responsiveness won.
 - Model storage: `~/.local/share/syrinx/` (`SYRINX_DATA_DIR` overrides);
   active-model choices persist in `models.json`; downloads via the Models tab.
-- Backend switching: live, no restart — the Models tab hot-swaps STT / LLM /
-  voice engines (`SetActiveModel`); heavyweight cloning engines run as
-  isolated-venv worker subprocesses (LuxTTS is the template).
+- Backend switching: live, no restart (`SetActiveModel`) — driven by the
+  per-surface pickers (composer dropdown for voice, Transcription view for
+  STT, Settings for LLM; the ⇄ converter picks per conversion). The Models
+  tab is inventory only: install engines, download/delete weights.
+  Heavyweight cloning engines run as isolated-venv worker subprocesses
+  (LuxTTS is the template).
 - Ops slower than the ~25 s D-Bus reply timeout return a request id and
   deliver results via signals (`LlmResult`, `TranscribeResult`, …).
