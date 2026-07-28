@@ -2196,8 +2196,23 @@ fn vc_setup_ui(status: &str) -> VcSetupUi {
     }
 }
 
-/// Put a VC-engine install failure in front of the user: the marquee stops and
-/// the Models tab's ⇄ section grows a ⚠ banner. Always visible — an install
+/// Human-readable name for a `VcSetupProgress` setup id, for failure banners.
+/// Split out from the event handler so the vocabulary is unit-testable, and
+/// written as a match rather than an if/else so a future engine degrades
+/// readably (the raw id) instead of being mislabelled as the last arm.
+fn setup_display_name(setup_id: &str) -> &str {
+    match setup_id {
+        "seedvc" => "Seed-VC",
+        "vevo" => "Vevo",
+        "luxtts" => "LuxTTS",
+        // an id we don't have copy for yet: the raw id still names the thing
+        // that failed, which beats naming the wrong engine
+        other => other,
+    }
+}
+
+/// Put an engine install failure in front of the user: the marquee stops and
+/// the Models tab grows a ⚠ banner above its sections. Always visible — an install
 /// that dies silently is indistinguishable from one that never started.
 fn set_install_error(ui: &slint::Weak<AppWindow>, msg: String) {
     ui.upgrade_in_event_loop(move |ui| {
@@ -3015,7 +3030,7 @@ async fn run_session(
                         }
                         VcSetupUi::Error => {
                             tracing::error!("vc setup failed: {setup_id}: {detail}");
-                            let label = if setup_id == "seedvc" { "Seed-VC" } else { "Vevo" };
+                            let label = setup_display_name(&setup_id);
                             // detail carries the reason and the log path
                             let msg = if detail.is_empty() {
                                 format!("{label} install failed.")
@@ -5618,6 +5633,24 @@ mod tests {
         // in a state nothing ever clears
         for s in ["", "queued", "waiting", "DONE", "canceled", "unknown"] {
             assert_eq!(vc_setup_ui(s), VcSetupUi::Running);
+        }
+    }
+
+    // --- setup_display_name ----------------------------------------------
+
+    #[test]
+    fn setup_display_name_covers_the_setup_vocabulary() {
+        assert_eq!(setup_display_name("seedvc"), "Seed-VC");
+        assert_eq!(setup_display_name("vevo"), "Vevo");
+        assert_eq!(setup_display_name("luxtts"), "LuxTTS");
+    }
+
+    #[test]
+    fn setup_display_name_falls_back_to_the_raw_id() {
+        // a future engine must never be mislabelled as an existing one — the
+        // banner says "<id> install failed", which is honest if unpolished
+        for s in ["", "chatterbox", "SEEDVC", "unknown"] {
+            assert_eq!(setup_display_name(s), s);
         }
     }
 

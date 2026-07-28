@@ -3227,6 +3227,45 @@ export component AppWindow inherits Window {
                             // identically either way).
                             alignment: start;
                             padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 8px;
+                            // a failed (or refused) engine install — the
+                            // detail carries the reason and the log path.
+                            // Hoisted above the section loop: the error string
+                            // is a single global, and engines that install
+                            // from this tab live in more than one section
+                            // (LuxTTS is a voice row, Seed-VC/Vevo are ⇄ rows),
+                            // so rendering it per-section would either strand
+                            // some failures with no surface or double-draw the
+                            // others. One instance, top of the list.
+                            // Unlike the other banners this one WRAPS
+                            // rather than elides (the log path is the
+                            // actionable half and must stay readable),
+                            // so the ⧉ is pinned to the first line
+                            // instead of centred on a growing block.
+                            if vc-install-error != "" : HorizontalLayout {
+                                spacing: 6px;
+                                // Hug the wrapped text. A wrapping Text
+                                // reports NO maximum height, and the ⧉
+                                // column beside it (alignment: start, so
+                                // the button cannot cap the row at 16px)
+                                // reports none either — so this banner
+                                // was the one growable thing in the whole
+                                // Models list and swallowed the entire
+                                // spare page under the message. Pinning
+                                // the height to what the text actually
+                                // needs at its real width makes min ==
+                                // max, so there is nothing left to grow
+                                // into — and it re-measures on reflow.
+                                height: vcerr.preferred-height;
+                                vcerr := Text {
+                                    text: "⚠ " + vc-install-error;
+                                    font-size: 10px; color: #d9922b; wrap: word-wrap;
+                                    horizontal-stretch: 1; preferred-width: 0px;
+                                }
+                                VerticalLayout {
+                                    alignment: start;
+                                    CopyBtn { text: vc-install-error; }
+                                }
+                            }
                             for sec in [
                                 { label: "VOICE & CLONING", cat: "voice" },
                                 { label: "VOICE CONVERSION (⇄ CONVERTER)", cat: "vc" },
@@ -3243,47 +3282,24 @@ export component AppWindow inherits Window {
                                 }
                                 if sec.cat == "voice" : VerticalLayout {
                                     spacing: 8px;
+                                    // engine-install wiring mirrors the ⇄ section
+                                    // below: voice rows can need a one-time
+                                    // setup too (LuxTTS), and without these the
+                                    // row's generic "Install Engine" button
+                                    // would render but do nothing.
                                     for m in voice-models : ModelRow {
                                         m: m;
+                                        installing: root.vc-install-active == m.setup-id && root.vc-install-active != "";
+                                        install-stage: root.vc-install-stage;
                                         download => { root.download-model(m.id); }
                                         del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
                                         activate => { root.activate-model(m.id); }
+                                        install-request => { root.vc-install-kind = m.setup-id; }
+                                        cancel-request => { root.cancel-vc(m.setup-id); }
                                     }
                                 }
                                 if sec.cat == "vc" : VerticalLayout {
                                     spacing: 8px;
-                                    // a failed (or refused) engine install — the
-                                    // detail carries the reason and the log path.
-                                    // Unlike the other banners this one WRAPS
-                                    // rather than elides (the log path is the
-                                    // actionable half and must stay readable),
-                                    // so the ⧉ is pinned to the first line
-                                    // instead of centred on a growing block.
-                                    if vc-install-error != "" : HorizontalLayout {
-                                        spacing: 6px;
-                                        // Hug the wrapped text. A wrapping Text
-                                        // reports NO maximum height, and the ⧉
-                                        // column beside it (alignment: start, so
-                                        // the button cannot cap the row at 16px)
-                                        // reports none either — so this banner
-                                        // was the one growable thing in the whole
-                                        // Models list and swallowed the entire
-                                        // spare page under the message. Pinning
-                                        // the height to what the text actually
-                                        // needs at its real width makes min ==
-                                        // max, so there is nothing left to grow
-                                        // into — and it re-measures on reflow.
-                                        height: vcerr.preferred-height;
-                                        vcerr := Text {
-                                            text: "⚠ " + vc-install-error;
-                                            font-size: 10px; color: #d9922b; wrap: word-wrap;
-                                            horizontal-stretch: 1; preferred-width: 0px;
-                                        }
-                                        VerticalLayout {
-                                            alignment: start;
-                                            CopyBtn { text: vc-install-error; }
-                                        }
-                                    }
                                     for m in vc-conv-models : ModelRow {
                                         m: m; selectable: false;
                                         installing: root.vc-install-active == m.setup-id && root.vc-install-active != "";
@@ -4098,12 +4114,20 @@ export component AppWindow inherits Window {
             VerticalLayout {
                 padding: 18px; spacing: 10px;
                 Text {
-                    text: vc-install-kind == "seedvc" ? "Install Seed-VC" : "Install Vevo";
+                    text: vc-install-kind == "seedvc" ? "Install Seed-VC"
+                        : vc-install-kind == "luxtts" ? "Install LuxTTS"
+                        : "Install Vevo";
                     font-size: 15px; font-weight: 700; color: Theme.fg;
                 }
                 Text {
+                    // why each engine is opt-in rather than bundled. Seed-VC and
+                    // Vevo have licence reasons; LuxTTS does not (it's
+                    // Apache/MIT-family), so its line says the true reason —
+                    // isolation plus a fetch from someone else's releases.
                     text: vc-install-kind == "seedvc"
                             ? "Seed-VC is GPL-3.0 licensed, so Syrinx doesn't ship it. Installing puts it on this computer only, in its own isolated environment."
+                        : vc-install-kind == "luxtts"
+                            ? "LuxTTS and its phonemizer aren't bundled with Syrinx — they install here, on this computer, into an isolated environment, fetched from their maintainers' releases."
                             : "Vevo's Amphion code is MIT, but its model checkpoints are CC-BY-NC: personal, non-commercial use. They stay on this computer and are never redistributed.";
                     font-size: 12px; color: Theme.dim; wrap: word-wrap;
                 }
@@ -4112,7 +4136,9 @@ export component AppWindow inherits Window {
                     font-size: 12px; color: Theme.dim; wrap: word-wrap;
                 }
                 if root.is-windows : Text {
-                    text: "If this PC has no suitable Python, Syrinx will install Python 3.12 — and, for Vevo, Git — via winget first. Windows may show one approval prompt for Git.";
+                    // Vevo and LuxTTS both install from git+https, so the Git
+                    // clause can no longer name Vevo alone.
+                    text: "If this PC has no suitable Python, Syrinx will install Python 3.12 — and, for Vevo and LuxTTS, Git — via winget first. Windows may show one approval prompt for Git.";
                     font-size: 12px; color: Theme.dim; wrap: word-wrap;
                 }
                 Rectangle {}
