@@ -749,6 +749,69 @@ bundled embeddable python has no venv module — winget
 proven: an actual conversion (checkpoints auto-download at first ⇄
 run; CPU box, expect slow — 76 s on the 4090 incl. weights).
 
+**2026-07-28 (later still) — one-click VC engine install: the four gaps
+above are closed by product, not workaround, and a fifth was found in
+design.** Landing in this change: `InstallVcEngine(setup_id) -> b` +
+`CancelVcSetup(setup_id) -> b` and the `VcSetupProgress(setup_id, stage,
+status, detail)` signal (`ssss`), driven from a new
+`engine/syrinx_engine/vcsetup.py` (stdlib + `.paths` only) that runs the
+existing per-OS setup scripts as a supervised child and streams their
+`== syrinx-stage:` markers to the Models view; the row's dead-end
+warning becomes an "Install…" button behind a consent dialog that states
+the license terms (Seed-VC GPL-3.0 isolation; Vevo MIT code but CC-BY-NC
+checkpoints, personal use, never redistributed). Surface goes 70/11 →
+**72 methods / 12 signals**, lib.rs 84 → 87 fn; spec'd as RPC-PROTOCOL
+§15. Two setup ids, `"seedvc"` and `"vevo"` — the latter clears both
+vevo-timbre and vevo2-singing (shared `vevo_timbre` engine). Gap (1) is
+closed in `scripts/build-windows.ps1` step 7: both `setup-*.ps1` are
+copied into `<bundle>\engine\`, which the NSIS `File /r "${BUNDLE}\*"`
+picks up with no `.nsi` change — installers, not payload, so the license
+boundary is exactly where it was. Gap (2): the `.sh`-hardcoding dies
+entirely rather than growing a win32 branch — one OS-agnostic string,
+"one-time setup needed — click Install", with the backends' errors
+pointing at the Models row instead of a shell command; `status()` rows
+gain `setup_id`/`needs_setup` so the app never hardcodes the mapping.
+Gap (3) gets the real fix the workaround note called for: on win32 the
+venv defaults to the SHORT data-dir path (`SYRINX_VC_VENV_DIR` =
+`%LOCALAPPDATA%\syrinx\syrinx\<sub>`), so pip's ~160-char torch
+dist-info licenses tree never nests under site-packages. That makes this
+box's junction **unnecessary but harmless** — its target IS the new
+default path, so the resolver finds the same interpreter with or without
+it (keep it: it keeps the pre-change state bisectable). Resolution also
+moves from the venv *directory* to the *interpreter*
+(`Scripts\python.exe` / `bin/python`), closing the dir-vs-interpreter
+divergence a half-built venv could exploit. Gap (4) is productized: the
+win32 resolver probes `SYRINX_*_PYTHON` → `py -3.12` → the usual fixed
+install paths → PATH, requiring a real `import venv, ensurepip` at 3.12
+(which rejects both the Store stub and the bundled embeddable), and only
+then winget-installs `Python.Python.3.12` per-user and silently. NEW
+fifth gap found in design and unremarked on the day: a stock Windows box
+has no **git** either, and `setup-vevo.ps1` clones Amphion — so vevo
+gets a `Git.Git` winget pre-flight (probe `git --version`, install,
+re-probe `%PROGRAMFILES%\Git\cmd\git.exe`, prepend to the child PATH).
+That one **may raise a UAC prompt**; accepted by Noah, and the consent
+dialog says so before anything runs. Linux stays **byte-identical**, and
+the argument is explicit rather than hopeful: the scripts' only new
+construct is `VENV="${SYRINX_VC_VENV_DIR:+$SYRINX_VC_VENV_DIR/}.venv-x"`,
+which with the var unset expands to the literal `.venv-x` the scripts
+already used, and the engine sets that var on win32 only — same venv,
+same location, same commands on the reference platform. The one
+deliberate Linux behavior change is that the engine now passes
+`SYRINX_VEVO_AMPHION=amphion_dir()` explicitly: `setup-vevo.sh` falls
+back to a hardcoded `$HOME/.local/share/syrinx/vevo/Amphion` and
+therefore ignored `SYRINX_DATA_DIR`, a latent divergence from every
+other engine path — identical when `SYRINX_DATA_DIR` is unset (the
+normal case), correct when it is not. v1 includes **Cancel**
+(`CancelVcSetup` kills the child and emits `"cancelled"`, not an error
+banner; the scripts are idempotent so a re-Install resumes), a
+whole-install timeout (`SYRINX_VC_SETUP_TIMEOUT`, default 5400 s), a
+`SYRINX_VC_SETUP_DIR` script-location escape hatch, and a per-setup log
+at `worker_log_path("setup-<id>")` whose path is appended to any error
+detail. Progress is stage-based, never a percentage — pip output isn't
+measurable and pretending otherwise is a lying progress bar. macOS
+inherits the POSIX `.sh` path design-ready but **unvalidated** — no Mac
+has run this; it stays a phase-3 item.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~

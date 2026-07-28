@@ -166,6 +166,18 @@ Log 'Copying launcher / icon / first-run bootstrap'
 Copy-Item (Join-Path $PkgWin 'syrinx-launch.vbs')   $BundleDir
 Copy-Item (Join-Path $PkgWin 'syrinx-firstrun.ps1') $BundleDir
 Copy-Item (Join-Path $PkgWin 'syrinx.ico')          $BundleDir
+
+# The two VC-engine setup scripts ride along so the Models view's one-click
+# "Install…" (RPC-PROTOCOL §15) has something to run on an installed tree — the
+# engine resolves them by walking up from its package dir to <bundle>\engine\.
+# These are *installers*, not payload: they only fetch, into a per-user isolated
+# venv, what the user opts into. Seed-VC (GPL-3.0) and Vevo's Amphion/CC-BY-NC
+# checkpoints are still never bundled, so the license boundary is untouched.
+$EngineBundleDir = Join-Path $BundleDir 'engine'
+Copy-Item (Join-Path $EngineSrc 'setup-seedvc.ps1') $EngineBundleDir
+Copy-Item (Join-Path $EngineSrc 'setup-vevo.ps1')   $EngineBundleDir
+Ok 'VC setup scripts (setup-seedvc.ps1, setup-vevo.ps1)'
+
 $ver = (Select-String -Path (Join-Path $RepoRoot 'Cargo.toml') -Pattern '^version\s*=\s*"([^"]+)"' |
         Select-Object -First 1).Matches.Groups[1].Value
 Set-Content (Join-Path $BundleDir 'VERSION') "syrinx $ver (windows-x64, python $PythonVersion)" -Encoding ascii

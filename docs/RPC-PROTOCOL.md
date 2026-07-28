@@ -23,9 +23,9 @@ document, not one implementation.
 
 | | Count | Source of truth |
 |---|---|---|
-| Methods | **70** | 70 `@method()` in `service.py`; 70 `fn` (of 84) in `lib.rs` — the §4 table's 66 plus §14's 4 recording methods |
+| Methods | **72** | 72 `@method()` in `service.py`; 72 `fn` (of 87) in `lib.rs` — the §4 table's 68 plus §14's 4 recording methods |
 | Read-only properties | **3** | `ModelLoaded`, `ModelLoadError`, `Backend` → become `GetModelLoaded` / `GetModelLoadError` / `GetBackend` + `PropertiesChanged` |
-| Signals | **11** | 11 `@signal()` → become server→client notifications |
+| Signals | **12** | 12 `@signal()` → become server→client notifications |
 | Transport-only RPC methods | **5** | `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`, `GetProtocolVersion` (no D-Bus analog; properties/handshake are native there) |
 
 `lib.rs` and `service.py` are **in sync** — every method name, arity, and
@@ -308,6 +308,8 @@ visible failure rather than an empty result.
 | `ListModels` | `[]` | string (JSON array) | Model catalog (id, display, category, size, status…). |
 | `Hardware` | `[]` | string (JSON) | Detected hardware (cores, ram_gb, gpu, gpu_name, vram_gb). `vram_gb` is 0 when there's no CUDA GPU or torch is absent. |
 | `DownloadModel` | `[model_id: string]` | boolean | Start a download (progress via `ModelProgress`); `false` if unknown id. |
+| `InstallVcEngine` | `[setup_id: string]` | boolean | Start the one-time isolated-venv setup for a conversion engine (`"seedvc"`\|`"vevo"`); progress via `VcSetupProgress`. `false` = unknown id **or** that setup is already running (see §15). |
+| `CancelVcSetup` | `[setup_id: string]` | boolean | Kill a running `InstallVcEngine`; `true` if something was cancelled. |
 | `DeleteModel` | `[model_id: string]` | → null | Delete a downloaded model's files. |
 | `SetActiveModel` | `[model_id: string]` | string (category) | Make a model active for its category; returns the category. |
 | `GetSettings` | `[]` | string (JSON `{stored,effective}`) | Persisted engine settings + effective values. |
@@ -371,6 +373,7 @@ D-Bus signature. Broadcast to all authenticated connections.
 | `TranscribeProgress` | `[req_id: integer, partial: string]` | `us` | Live partial transcript from `TranscribeFile`. |
 | `TranscribeResult` | `[req_id: integer, text: string, error: boolean]` | `usb` | Final transcript from `TranscribeFile`. `error` `true` = the stt stack raised (with `text` `""`); this is **distinct** from a legitimately-empty transcript (`error` `false`, `text` `""`) so the app can show "transcription failed" vs. "no speech detected". |
 | `ModelProgress` | `[model_id: string, pct: number, status: string]` | `sds` | Download progress; `status` `"downloading"`\|`"finalizing"`\|`"done"`\|`"error"`. `"finalizing"` = on-disk bytes reached the expected total but the fetch is still working (checksums/renames/trailing files); `pct` stays capped at `0.999` until `"done"`. |
+| `VcSetupProgress` | `[setup_id: string, stage: string, status: string, detail: string]` | `ssss` | Progress of a one-click conversion-engine install (§15). `setup_id` is `"seedvc"` or `"vevo"` — the Models view's two Vevo rows (vevo-timbre, vevo2-singing) share the single `"vevo"` setup, so both clear together. `status` is `"running"`\|`"done"`\|`"error"`\|`"cancelled"`. There is deliberately **no percentage**: `stage` is a human-readable label (e.g. `"installing PyTorch — the big one (several GB)…"`) that a client shows **verbatim** rather than mapping through a table, because the setup scripts' phases are not measurable (see §15). `detail` is `""` while running and on `done`/`cancelled`; on `"error"` it is a one-line reason followed by `" · log: <path>"` so the user can open the full transcript. |
 | `SpeakStarted` | `[gen_id: integer]` | `u` | A generation's playback lifecycle began. |
 | `SpeakEnded` | `[gen_id: integer]` | `u` | A generation's playback lifecycle ended. |
 
@@ -561,6 +564,7 @@ pub enum EngineEvent {
     TranscribeProgress { req_id: u32, partial: String },
     TranscribeResult   { req_id: u32, text: String, error: bool },
     ModelProgress      { model_id: String, pct: f64, status: String },
+    VcSetupProgress    { setup_id: String, stage: String, status: String, detail: String },
     SpeakStarted       { gen_id: u32 },
     SpeakEnded         { gen_id: u32 },
 
@@ -585,15 +589,15 @@ Notes for the Rust client:
 
 ## 11. Appendix B — Completeness check
 
-- `service.py`: **70** `@method()`, **11** `@signal()`, **3** `@dbus_property`.
-- `lib.rs`: **84** `fn` = **70** methods + **11** signals + **3** properties.
-- §4's method table lists **66** methods (4.1–4.10:
-  4+11+3+3+5+8+16+4+4+8 = **66**) and §14 adds the **4** recording methods for
-  the **70** total; §6 lists all **11** signals; §5 covers both properties.
+- `service.py`: **72** `@method()`, **12** `@signal()`, **3** `@dbus_property`.
+- `lib.rs`: **87** `fn` = **72** methods + **12** signals + **3** properties.
+- §4's method table lists **68** methods (4.1–4.10:
+  4+11+3+3+5+8+16+4+4+10 = **68**) and §14 adds the **4** recording methods for
+  the **72** total; §6 lists all **12** signals; §5 covers both properties.
 - **No `lib.rs` ↔ `service.py` mismatch** was found: names (PascalCase in
   `service.py`, snake_case-of-the-same in `lib.rs`), arities, and signatures
   correspond one-to-one. (The design brief's "68 methods / ~50 methods" figures
-  are approximate; the exact current count is **70**.)
+  are approximate; the exact current count is **72**.)
 - `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`,
   `GetProtocolVersion` are RPC-transport-only additions with no D-Bus method analog (D-Bus uses native
   properties and has no app-level auth or version handshake).
@@ -703,3 +707,93 @@ thread and the engine hops it onto the event loop before emitting (the same hop
 capture. The app's first consumer is the ⚙ Settings "Test mic" toggle
 (Win/mac): it starts a recording purely for the meter and always ends it with
 `CancelRecording`, so a test leaves no file behind.
+
+---
+
+## 15. One-click VC engine install
+
+Two transport-agnostic methods (present on BOTH transports — the drift guards
+require it) that let the Models view install a voice-conversion engine for the
+user instead of telling them to run a shell script. Seed-VC (GPL-3.0) and Vevo's
+Amphion checkpoints (CC-BY-NC) are deliberately **never bundled**; what ships is
+the *installer*, and it only runs after in-app consent. This extends the §4.10
+table (both methods are listed there); progress arrives as the §6
+`VcSetupProgress` notification.
+
+| Method | Params | Returns | Semantics |
+|---|---|---|---|
+| `InstallVcEngine` | `[setup_id: str]` | boolean | Start the one-time setup for `setup_id`. `true` = accepted, and the caller will now receive `VcSetupProgress` for that id until a terminal status. `false` = **rejected**, for exactly two reasons: the id is not in the vocabulary, or that setup is already running. No exception, no partial state — a rejected call has no side effects at all, which is what makes a double-clicked button safe. |
+| `CancelVcSetup` | `[setup_id: str]` | boolean | Kill a running setup. `true` = a child process was actually killed; `false` = nothing was running under that id (including an unknown id). |
+
+**`setup_id` vocabulary.** Exactly two values: `"seedvc"` and `"vevo"`. They are
+*setup* ids, not model ids — one setup can serve several catalog rows, and
+`"vevo"` does: the Models view's vevo-timbre and vevo2-singing rows both hang off
+the shared `vevo_timbre` engine, so a single `"vevo"` install clears the
+"one-time setup needed — click Install" warning on both. Catalog rows carry the
+mapping explicitly (`ListModels` rows gained `setup_id` and `needs_setup`), so a
+client never has to hardcode which model belongs to which setup.
+
+**Stages, not percentages.** `VcSetupProgress` carries no `pct`, and this is a
+contract decision rather than an omission: the work is `pip`/`git` output, which
+is not measurable in any way worth showing — the wheel list is resolved
+mid-flight, one dependency (torch) dwarfs the rest, and pip's own byte counters
+restart per wheel. So the engine reports a **stage**: the setup scripts print
+`== syrinx-stage: <token>` markers on stdout, the engine maps each token to a
+human sentence, and the client renders that sentence **verbatim** next to an
+indeterminate marquee. Clients MUST NOT parse or switch on `stage`; the token
+sets belong to the scripts and will grow. `status` is the only vocabulary a
+client may branch on — `"running"` | `"done"` | `"error"` | `"cancelled"` — and
+an unrecognized value MUST be treated as `"running"` (forward-compat, the same
+rule `ModelProgress` follows).
+
+**The log is the real diagnostic.** Every line the script emits — stdout and
+stderr, combined, `\r` progress rewrites split as their own lines — is appended
+to a per-setup log file at the engine's usual per-OS worker-log path,
+`worker_log_path("setup-<setup_id>")`. On failure the engine emits `"error"`
+with `detail` = the last meaningful line of output, then `" · log: <path>"`
+appended, so the visible banner explains *and* points at the full transcript
+without the client knowing anything about engine paths.
+
+**Script selection is per-OS.** The engine locates
+`setup-<stem>.sh` (POSIX) or `setup-<stem>.ps1` (win32) by walking up from its
+own package directory — which covers both a checkout (`engine/`) and an
+installed bundle (`engine\.venv\Lib\site-packages\…` → `engine\`, so the Windows
+bundle ships the two `.ps1` files). POSIX spawns `bash <script>`; win32 spawns
+`pwsh` when it is present and falls back to `powershell.exe` (5.1) otherwise,
+always `-NoProfile -ExecutionPolicy Bypass -File`. If no script is found the
+method still returns `true` and the failure arrives as a clean `"error"` —
+"this build shipped without the setup scripts" — rather than a silent no-op.
+
+**Environment overrides** (all optional; unset ⇒ today's behavior, byte for
+byte):
+
+| Var | Meaning |
+|---|---|
+| `SYRINX_VC_VENV_DIR` | Parent directory for the `.venv-<stem>` the script creates. Unset ⇒ the script's own directory, which is what Linux and macOS use. The engine sets it on **win32 only**, to a short per-user data-dir path, because a venv nested under an installed `site-packages` tree overflows `MAX_PATH` while pip writes deep dependency paths. |
+| `SYRINX_VC_SETUP_DIR` | Escape hatch: look for the setup scripts here instead of walking ancestors. |
+| `SYRINX_VC_SETUP_TIMEOUT` | Whole-install timeout in seconds (default **5400**). Exceeding it kills the child and reports `"error"`. |
+
+**Windows prerequisite bootstrap.** A stock Windows box has neither a
+venv-capable Python nor Git, so on win32 (and only after the user has consented
+in the app's dialog, which says so explicitly) the engine may install them via
+winget before running the script: `Python.Python.3.12` when no probed
+interpreter satisfies `import venv, ensurepip` at 3.12, and — for `"vevo"`,
+whose script clones Amphion — `Git.Git` when `git --version` fails. The Python
+install is silent and per-user; the Git install **may raise one UAC prompt**.
+"Already installed" exit codes count as success, so the bootstrap is idempotent.
+If either is still missing afterwards the setup fails with an actionable
+`"error"` (e.g. install Python 3.12 from python.org, then click Install again)
+rather than a stack trace.
+
+**Cancel semantics.** `CancelVcSetup` kills the child process and the engine
+emits one final `VcSetupProgress` with `status` `"cancelled"`; there is no
+`"error"` alongside it, because a cancel is not a failure and a client should
+quietly return the row to its pre-install state rather than raise a banner. The
+setup scripts are idempotent, so a cancelled install leaves at worst a partial
+venv that the next Install run completes. At most one setup runs at a time
+engine-wide: a second `InstallVcEngine` for the *other* id is accepted and
+queues (its first `"running"` stage says it is waiting), while a second call for
+the *same* id is the `false` rejection above.
+
+With these two methods and one signal the surface is now **72** methods /
+**12** signals.
