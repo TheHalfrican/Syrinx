@@ -185,19 +185,27 @@ def test_min_vram_gb_rides_along_in_status(monkeypatch):
 # --- isolated-venv warnings ---------------------------------------------
 #
 # The probe lives in vcsetup now, so these point vcsetup's engine_dir() at a
-# tmp tree. They also create the INTERPRETER, not just the venv directory: a
-# torn install leaves the directory behind, and the old directory-existence
-# check happily called that "ready".
+# tmp tree. They also fabricate what a FINISHED setup leaves — interpreter AND
+# landmark package — because neither one alone means "ready": a cancel mid-venv
+# leaves the directory, and a failure after the torch stage leaves a working
+# interpreter with none of the engine's own packages behind it.
 
 
-def make_venv(root, name):
-    """Fabricate the per-OS venv interpreter vcsetup probes for."""
+def make_venv(root, name, landmark=True):
+    """Fabricate the per-OS venv vcsetup probes for. ``landmark=False`` makes the
+    torn install whose warning must NOT clear."""
+    venv = root / name
+    setup = next(s for s in vcsetup.SETUPS.values() if name == f".venv-{s.venv}")
     if sys.platform == "win32":
-        exe = root / name / "Scripts" / "python.exe"
+        exe = venv / "Scripts" / "python.exe"
+        site = venv / "Lib" / "site-packages"
     else:
-        exe = root / name / "bin" / "python"
+        exe = venv / "bin" / "python"
+        site = venv / "lib" / "python3.12" / "site-packages"
     exe.parent.mkdir(parents=True)
     exe.write_text("")
+    if landmark:
+        (site / setup.landmark).mkdir(parents=True)
     return exe
 
 
@@ -221,6 +229,20 @@ def test_vc_setup_warning_clears_once_the_venvs_exist(monkeypatch, tmp_path):
     monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(amphion))
     assert models._vc_setup_warning(models.spec("seed-vc")) == ""
     assert models._vc_setup_warning(models.spec("vevo-timbre")) == ""
+
+
+def test_a_torn_venv_keeps_its_warning_and_its_install_button(monkeypatch, tmp_path):
+    """2026-07-28: setup-seedvc.ps1 died at the `pip install seed-vc` stage, so
+    the venv+torch stages had already produced an interpreter. The row went
+    green and the Install button vanished for an engine that cannot load — the
+    one state where a stale "ready" is worse than no install at all."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    monkeypatch.setattr(models, "detect_hardware", lambda: FAKE_HW)
+    make_venv(tmp_path, ".venv-seedvc", landmark=False)
+    assert models._vc_setup_warning(models.spec("seed-vc")) == models.VC_SETUP_NEEDED
+    # needs_setup is what actually re-shows the button, so assert the row too
+    row = {r["id"]: r for r in models.ModelManager().status()}["seed-vc"]
+    assert row["needs_setup"] is True
 
 
 def test_vevo_warning_when_the_amphion_clone_is_missing(monkeypatch, tmp_path):

@@ -63,16 +63,21 @@ class _Setup:
     py_env: str      # env var the script reads for its base interpreter
     subdir: str      # per-setup slice of the data dir (venv root on Windows)
     engine: str      # models.ModelSpec.engine this setup unblocks
+    landmark: str    # site-packages dir only a finished critical stage leaves
     needs_git: bool  # the script clones something and needs git on PATH
 
 
 SETUPS: "dict[str, _Setup]" = {
+    # landmark seed_vc: dropped by the `pip install seed-vc` stage, which runs
+    # after venv+torch — the exact stage a 2026-07-28 field failure died in.
     "seedvc": _Setup("seedvc", "seedvc", "seedvc", "SYRINX_SEEDVC_PYTHON",
-                     "seedvc", "seed_vc", needs_git=False),
+                     "seedvc", "seed_vc", "seed_vc", needs_git=False),
     # vevo covers BOTH catalog rows (vevo-timbre and vevo2-singing) — they share
     # the engine name, the venv and the Amphion clone, so one install clears both.
+    # landmark torchcrepe: part of the single big `deps` install, and one of the
+    # packages the worker proved Amphion imports without declaring.
     "vevo": _Setup("vevo", "vevo", "vevo", "SYRINX_VEVO_PYTHON",
-                   "vevo", "vevo_timbre", needs_git=True),
+                   "vevo", "vevo_timbre", "torchcrepe", needs_git=True),
 }
 
 SETUP_IDS = tuple(SETUPS)
@@ -198,11 +203,46 @@ def venv_python(setup_id: str) -> "Path | None":
     return None
 
 
+def site_packages(venv_dir: Path) -> "list[Path]":
+    """Every ``site-packages`` inside *venv_dir*, per-OS.
+
+    Windows pins the one location; POSIX buries it under the minor version, so
+    glob rather than ask what the interpreter *we are running* is — the setup
+    venv is built by a different (possibly different-version) Python than the
+    engine's own, and hard-coding ours would miss it.
+    """
+    if _IS_WIN:
+        return [venv_dir / "Lib" / "site-packages"]
+    return sorted(venv_dir.glob("lib/python*/site-packages"))
+
+
+def _has_landmark(s: _Setup, python: Path) -> bool:
+    """Did the setup's critical install stage actually finish in this venv?
+
+    ``python.parent.parent`` is the venv root for both layouts (``bin/python``,
+    ``Scripts\\python.exe``), so this asks the venv the interpreter was found
+    in — not whichever candidate we would prefer today.
+    """
+    return any((sp / s.landmark).is_dir() for sp in site_packages(python.parent.parent))
+
+
 def installed(setup_id: str) -> bool:
-    """Is this conversion engine actually usable right now?"""
+    """Is this conversion engine actually usable right now?
+
+    The interpreter alone is not the answer. ``setup-seedvc.ps1`` creates the
+    venv and installs torch in stages *before* the one that installs seed-vc
+    itself, so a failure there (2026-07-28 field report) left a perfectly good
+    python.exe behind — the Models row cleared its warning and hid the Install
+    button for an engine the worker could not import. Requiring a landmark
+    package directory closes that window: pip is all-or-nothing per command, so
+    any package from the critical command proves the whole command ran.
+    """
     if setup_id not in SETUPS:
         return False
-    if venv_python(setup_id) is None:
+    python = venv_python(setup_id)
+    if python is None:
+        return False
+    if not _has_landmark(SETUPS[setup_id], python):
         return False
     # The Vevo worker needs BOTH the venv and the Amphion clone; a restored data
     # dir can have one without the other (2026-07-24 field report).

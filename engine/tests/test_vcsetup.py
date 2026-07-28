@@ -136,6 +136,29 @@ def test_script_path_picks_the_flavor_for_the_os(monkeypatch, tmp_path, windows)
 # --- venv probing --------------------------------------------------------
 
 
+def make_venv(root, name, landmark=True):
+    """Fabricate a venv the way a FINISHED setup leaves it: interpreter plus the
+    landmark package dir. ``landmark=False`` reproduces the torn install that
+    ``installed()`` has to reject — the interpreter is there, the packages aren't.
+
+    Per-OS off ``vcsetup._IS_WIN`` (not ``sys.platform``) so the posix/windows
+    fixtures reach both layouts from whichever host is running the suite.
+    """
+    venv = root / name
+    setup = next(s for s in vcsetup.SETUPS.values() if name == f".venv-{s.venv}")
+    if vcsetup._IS_WIN:
+        exe = venv / "Scripts" / "python.exe"
+        site = venv / "Lib" / "site-packages"
+    else:
+        exe = venv / "bin" / "python"
+        site = venv / "lib" / "python3.12" / "site-packages"
+    exe.parent.mkdir(parents=True, exist_ok=True)
+    exe.write_text("")
+    if landmark:
+        (site / setup.landmark).mkdir(parents=True)
+    return exe
+
+
 def test_posix_has_exactly_the_historical_candidate(monkeypatch, tmp_path, posix):
     monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
     assert vcsetup.venv_candidates("seedvc") == [
@@ -180,15 +203,74 @@ def test_venv_python_of_an_unknown_id_is_none():
 
 def test_installed_vevo_needs_both_the_venv_and_amphion(monkeypatch, tmp_path, posix):
     monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
-    exe = tmp_path / ".venv-vevo" / "bin" / "python"
-    exe.parent.mkdir(parents=True)
-    exe.write_text("")
+    make_venv(tmp_path, ".venv-vevo")
     amphion = tmp_path / "Amphion"
     monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(amphion))
     assert vcsetup.installed("vevo") is False  # venv only
     amphion.mkdir()
     assert vcsetup.installed("vevo") is True
     assert vcsetup.amphion_dir() == amphion
+
+
+# --- torn installs -------------------------------------------------------
+#
+# 2026-07-28 field failure: setup-seedvc.ps1 died at the `pip install seed-vc`
+# stage, AFTER venv and torch had succeeded. The interpreter existed, so the
+# Models row cleared its warning and hid the Install button for an engine that
+# could not load. installed() now demands a landmark package too.
+
+
+@pytest.mark.parametrize("setup_id, venv", [("seedvc", ".venv-seedvc"),
+                                            ("vevo", ".venv-vevo")])
+def test_an_interpreter_without_the_landmark_is_not_installed(
+        monkeypatch, tmp_path, posix, setup_id, venv):
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(tmp_path))  # never the blocker here
+    exe = make_venv(tmp_path, venv, landmark=False)
+    # the interpreter IS there — that is exactly what made the old check lie
+    assert vcsetup.venv_python(setup_id) == exe
+    assert vcsetup.installed(setup_id) is False
+    # a torn venv has no site-packages at all yet, so re-running the setup to
+    # completion is what flips it — not merely touching a directory
+    make_venv(tmp_path, venv)
+    assert vcsetup.installed(setup_id) is True
+
+
+def test_the_landmarks_are_the_packages_the_critical_stages_install():
+    """Pinned by name: these are what `pip install seed-vc` and the vevo `deps`
+    command drop into site-packages, and changing either script's critical stage
+    without changing these here would silently restore the torn-venv lie."""
+    assert vcsetup.SETUPS["seedvc"].landmark == "seed_vc"
+    assert vcsetup.SETUPS["vevo"].landmark == "torchcrepe"
+
+
+def test_the_landmark_is_read_from_the_venv_the_interpreter_was_found_in(
+        monkeypatch, tmp_path, windows):
+    """Windows probes two locations. A finished LEGACY venv must not be judged
+    by the (empty) data-dir venv's site-packages, or the fallback path — the
+    whole point of which is hand-built venvs — would read as torn."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    monkeypatch.setenv("SYRINX_VEVO_AMPHION", str(tmp_path))
+    make_venv(tmp_path, ".venv-vevo")  # legacy, beside the script
+    assert vcsetup.installed("vevo") is True
+
+
+def test_a_venv_directory_with_no_interpreter_at_all_is_not_installed(
+        monkeypatch, tmp_path, posix):
+    """The original torn-install guard, still load-bearing: a cancel mid-`venv`
+    leaves the directory but no python."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    (tmp_path / ".venv-seedvc").mkdir()
+    assert vcsetup.installed("seedvc") is False
+
+
+def test_site_packages_globs_the_minor_version_on_posix(tmp_path, posix):
+    """The setup venv is built by whatever Python 3.12 the box has, not by the
+    interpreter running the engine, so the minor version cannot be hard-coded."""
+    sp = tmp_path / "lib" / "python3.12" / "site-packages"
+    sp.mkdir(parents=True)
+    assert vcsetup.site_packages(tmp_path) == [sp]
+    assert vcsetup.site_packages(tmp_path / "empty") == []
 
 
 def test_amphion_defaults_under_the_data_dir(monkeypatch, isolated_env):
