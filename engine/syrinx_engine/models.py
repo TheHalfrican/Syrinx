@@ -169,8 +169,9 @@ CATALOG: list = [
     # vevo_worker.py's VEVO2_PATTERNS (the 6+ GB AR stacks never load)
     ModelSpec("vevo2-singing", "Vevo2 (singing)", "vc", "vevo_timbre", "",
               ["RMSnow/Vevo2"], 2830,
-              "Amphion's Vevo2 singing converter — the alternative ♫ engine "
-              "(Seed-VC articulates lyrics better and stays the default); "
+              "Amphion's Vevo2 singing converter — experimental: results vary "
+              "wildly with the material, from striking to comically bad "
+              "(Seed-VC articulates lyrics better and stays the ♫ default); "
               "first conversion also fetches whisper-medium (~1.5 GB). "
               "Runs in its own isolated environment — one-time setup. "
               "Non-commercial weights.",
