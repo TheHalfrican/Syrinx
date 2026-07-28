@@ -275,14 +275,35 @@ def test_status_rows_carry_setup_id_and_needs_setup(monkeypatch, tmp_path):
     assert by_id["seed-vc"]["setup_id"] == "seedvc"
     assert by_id["vevo-timbre"]["setup_id"] == "vevo"
     assert by_id["vevo2-singing"]["setup_id"] == "vevo"
+    # a "voice" row with a setup, not just the ⇄ converters — the field is keyed
+    # off the engine name, so the category never entered into it
+    assert by_id["luxtts"]["setup_id"] == "luxtts"
     assert all(by_id[i]["needs_setup"] is True
-               for i in ("seed-vc", "vevo-timbre", "vevo2-singing"))
+               for i in ("seed-vc", "vevo-timbre", "vevo2-singing", "luxtts"))
 
     # installing seed-vc clears only its own row
     make_venv(tmp_path, ".venv-seedvc")
     by_id = {r["id"]: r for r in models.ModelManager().status()}
     assert by_id["seed-vc"]["needs_setup"] is False
     assert by_id["vevo-timbre"]["needs_setup"] is True
+    assert by_id["luxtts"]["needs_setup"] is True
+
+
+def test_luxtts_needs_its_venv_before_it_can_speak(monkeypatch, tmp_path):
+    """LuxTTS is the first VOICE row wired to the one-click installer, so the
+    whole needs_setup path has to work for a row that isn't a ⇄ converter. The
+    `zipvoice` landmark comes along for free — make_venv reads it off SETUPS."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    monkeypatch.setattr(models, "detect_hardware", lambda: FAKE_HW)
+    assert models._vc_setup_warning(models.spec("luxtts")) == models.VC_SETUP_NEEDED
+    row = {r["id"]: r for r in models.ModelManager().status()}["luxtts"]
+    assert row["needs_setup"] is True
+    assert row["warning"] == models.VC_SETUP_NEEDED
+
+    make_venv(tmp_path, ".venv-luxtts")
+    row = {r["id"]: r for r in models.ModelManager().status()}["luxtts"]
+    assert models._vc_setup_warning(models.spec("luxtts")) == ""
+    assert row["needs_setup"] is False
 
 
 def test_descriptions_no_longer_send_people_to_a_shell_script():

@@ -52,21 +52,27 @@ def windows(monkeypatch):
 
 
 def test_setup_ids_and_engine_mapping_are_the_pinned_vocabulary():
-    assert set(vcsetup.SETUP_IDS) == {"seedvc", "vevo"}
+    assert set(vcsetup.SETUP_IDS) == {"seedvc", "vevo", "luxtts"}
     # both vevo catalog rows share engine "vevo_timbre", so one install clears
-    # vevo-timbre AND vevo2-singing
-    assert vcsetup.ENGINE_TO_SETUP == {"seed_vc": "seedvc", "vevo_timbre": "vevo"}
+    # vevo-timbre AND vevo2-singing; luxtts is the odd one out — a cloning
+    # VOICE rather than a ⇄ converter, which this table does not care about
+    assert vcsetup.ENGINE_TO_SETUP == {"seed_vc": "seedvc", "vevo_timbre": "vevo",
+                                       "luxtts": "luxtts"}
 
 
-def test_only_vevo_needs_git():
+def test_which_setups_need_git():
+    """needs_git decides whether the Windows installer bootstraps Git before it
+    spawns the script. vevo clones Amphion; luxtts pip-installs two `git+https`
+    SHAs; seed-vc comes entirely off PyPI and must NOT drag Git in."""
     assert vcsetup.SETUPS["vevo"].needs_git is True
+    assert vcsetup.SETUPS["luxtts"].needs_git is True
     assert vcsetup.SETUPS["seedvc"].needs_git is False
 
 
 def test_every_script_stage_token_has_a_human_label():
     """An unmapped token would show the user a bare word like "pins"."""
     for token in ("venv", "torch", "seedvc", "demucs", "pins", "verify",
-                  "amphion", "deps"):
+                  "amphion", "deps", "phonemize", "luxtts"):
         assert vcsetup.STAGE_LABELS[token]
 
 
@@ -221,7 +227,8 @@ def test_installed_vevo_needs_both_the_venv_and_amphion(monkeypatch, tmp_path, p
 
 
 @pytest.mark.parametrize("setup_id, venv", [("seedvc", ".venv-seedvc"),
-                                            ("vevo", ".venv-vevo")])
+                                            ("vevo", ".venv-vevo"),
+                                            ("luxtts", ".venv-luxtts")])
 def test_an_interpreter_without_the_landmark_is_not_installed(
         monkeypatch, tmp_path, posix, setup_id, venv):
     monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
@@ -237,11 +244,18 @@ def test_an_interpreter_without_the_landmark_is_not_installed(
 
 
 def test_the_landmarks_are_the_packages_the_critical_stages_install():
-    """Pinned by name: these are what `pip install seed-vc` and the vevo `deps`
-    command drop into site-packages, and changing either script's critical stage
-    without changing these here would silently restore the torn-venv lie."""
+    """Pinned by name: these are what `pip install seed-vc`, the vevo `deps`
+    command and the luxtts git installs drop into site-packages, and changing any
+    script's critical stage without changing these here would silently restore
+    the torn-venv lie.
+
+    luxtts is `zipvoice`, NOT `piper_phonemize`, even though both are dirs that
+    venv ends up with: the phonemize stage runs first, so piper_phonemize would
+    still be there after a failure inside the later (and much more fragile)
+    luxtts stage — the exact false pass this landmark exists to prevent."""
     assert vcsetup.SETUPS["seedvc"].landmark == "seed_vc"
     assert vcsetup.SETUPS["vevo"].landmark == "torchcrepe"
+    assert vcsetup.SETUPS["luxtts"].landmark == "zipvoice"
 
 
 def test_the_landmark_is_read_from_the_venv_the_interpreter_was_found_in(
@@ -281,6 +295,7 @@ def test_amphion_defaults_under_the_data_dir(monkeypatch, isolated_env):
 def test_venv_root_is_the_per_setup_data_subdir(isolated_env):
     assert vcsetup.venv_root("seedvc") == isolated_env / "seedvc"
     assert vcsetup.venv_root("vevo") == isolated_env / "vevo"
+    assert vcsetup.venv_root("luxtts") == isolated_env / "luxtts"
 
 
 # --- resolve_python / ensure_git -----------------------------------------

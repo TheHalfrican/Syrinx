@@ -10,25 +10,17 @@ CPU-friendly zero-shot cloning — the one cloning engine usable on this box.
 import asyncio
 import json
 import logging
-import sys
 from pathlib import Path
 
 import numpy as np
 
 from . import detect_device
-from .. import chunking
+from .. import chunking, vcsetup
 from ..paths import worker_log_path
 
 log = logging.getLogger("syrinx.engine.tts.luxtts")
 
 _HERE = Path(__file__).resolve()
-_ENGINE_DIR = _HERE.parents[2]  # .../engine
-# venv layout is per-OS: POSIX puts the interpreter in bin/python, Windows in
-# Scripts/python.exe. The Linux string is byte-identical to before this seam.
-if sys.platform == "win32":
-    _LUX_PY = _ENGINE_DIR / ".venv-luxtts" / "Scripts" / "python.exe"
-else:
-    _LUX_PY = _ENGINE_DIR / ".venv-luxtts" / "bin" / "python"
 _WORKER = _HERE.parents[1] / "luxtts_worker.py"  # .../engine/syrinx_engine/luxtts_worker.py
 _STDERR_LOG = worker_log_path("luxtts")
 
@@ -46,12 +38,22 @@ class LuxTTSBackend:
     async def _ensure_worker(self) -> None:
         if self._proc is not None and self._proc.returncode is None:
             return
-        if not _LUX_PY.exists():
-            raise RuntimeError("LuxTTS not installed (.venv-luxtts missing)")
+        # Resolved per launch, never cached at import: the venv's location is
+        # per-OS AND per-layout (Windows puts it under the data dir to dodge
+        # MAX_PATH), and the Models tab can build it while the engine is already
+        # running — the user should be able to speak immediately afterwards
+        # without restarting Syrinx. vcsetup owns that knowledge for all three
+        # isolated-venv engines, so the backend never guesses a path again.
+        lux_py = vcsetup.venv_python("luxtts")
+        if lux_py is None:
+            raise RuntimeError(
+                "LuxTTS isn't installed yet — open Models and click Install "
+                "on the LuxTTS row."
+            )
         _STDERR_LOG.parent.mkdir(parents=True, exist_ok=True)
         errfile = open(_STDERR_LOG, "ab")
         self._proc = await asyncio.create_subprocess_exec(
-            str(_LUX_PY), str(_WORKER),
+            str(lux_py), str(_WORKER),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=errfile,

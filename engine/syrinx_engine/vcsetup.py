@@ -1,12 +1,16 @@
-"""One-click installer for the isolated voice-conversion engines.
+"""One-click installer for the engines that live in their own virtualenvs.
 
-Seed-VC (GPL-3.0) and Vevo's Amphion checkpoints (CC-BY-NC) are deliberately
+Seed-VC (GPL-3.0), Vevo's Amphion checkpoints (CC-BY-NC) and LuxTTS (Apache-2.0,
+git-only — the PyPI ``zipvoice`` name is an unrelated stub) are deliberately
 never bundled with Syrinx — they are installed per-user, on request, into their
-own virtualenvs by ``engine/setup-{seedvc,vevo}.{sh,ps1}``. Historically that
-meant telling the user to "run engine/setup-vevo.sh first", which is a dead end
-for anyone who never opens a terminal (and names a ``.sh`` path on Windows).
+own virtualenvs by ``engine/setup-{seedvc,vevo,luxtts}.{sh,ps1}``. Historically
+that meant telling the user to "run engine/setup-vevo.sh first", which is a dead
+end for anyone who never opens a terminal (and names a ``.sh`` path on Windows).
 This module lets the app run those exact same scripts itself and stream their
 progress, so the opt-in stays an explicit user decision but costs one click.
+
+Two of the three are ⇄ conversion engines and one (LuxTTS) is a cloning voice,
+but nothing here cares: a setup is a script, a venv and a landmark package.
 
 It is deliberately **stdlib + :mod:`.paths` only**: it has to be importable on a
 box where nothing ML is installed yet — that is the entire point of the feature —
@@ -57,7 +61,7 @@ class VcSetupError(RuntimeError):
 
 @dataclass(frozen=True)
 class _Setup:
-    id: str          # the wire vocabulary: "seedvc" | "vevo"
+    id: str          # the wire vocabulary: "seedvc" | "vevo" | "luxtts"
     stem: str        # engine/setup-<stem>.sh / .ps1
     venv: str        # the venv the script creates: .venv-<venv>
     py_env: str      # env var the script reads for its base interpreter
@@ -78,11 +82,22 @@ SETUPS: "dict[str, _Setup]" = {
     # packages the worker proved Amphion imports without declaring.
     "vevo": _Setup("vevo", "vevo", "vevo", "SYRINX_VEVO_PYTHON",
                    "vevo", "vevo_timbre", "torchcrepe", needs_git=True),
+    # needs_git: setup-luxtts pip-installs LinaCodec and LuxTTS from two pinned
+    # git SHAs — neither project publishes a usable release.
+    # landmark zipvoice: dropped by the critical `luxtts` stage, which is the
+    # LAST thing that can fail (venv, torch and phonemize all had to succeed to
+    # reach it) and is literally the package luxtts_worker.py imports. Not
+    # piper_phonemize, even though that is also a dir this venv gets: the
+    # phonemize stage runs BEFORE luxtts, so an install torn open in the luxtts
+    # stage would still have it and would falsely read as finished.
+    "luxtts": _Setup("luxtts", "luxtts", "luxtts", "SYRINX_LUXTTS_PYTHON",
+                     "luxtts", "luxtts", "zipvoice", needs_git=True),
 }
 
 SETUP_IDS = tuple(SETUPS)
 
-# Derived, not written out twice: {"seed_vc": "seedvc", "vevo_timbre": "vevo"}.
+# Derived, not written out twice:
+# {"seed_vc": "seedvc", "vevo_timbre": "vevo", "luxtts": "luxtts"}.
 ENGINE_TO_SETUP = {s.engine: s.id for s in SETUPS.values()}
 
 # The scripts print these on stdout before each phase; everything else they emit
@@ -97,6 +112,8 @@ STAGE_LABELS = {
     "seedvc": "installing Seed-VC…",
     "demucs": "installing Demucs (music mode)…",
     "deps": "installing the Vevo dependencies…",
+    "phonemize": "installing the espeak phonemizer…",
+    "luxtts": "installing LuxTTS…",
     "pins": "pinning transformers and huggingface_hub…",
     "verify": "verifying the install…",
 }
@@ -491,8 +508,8 @@ class VcSetupManager:
         self._claimed: "set[str]" = set()
         self._procs: "dict[str, asyncio.subprocess.Process]" = {}
         self._cancelled: "set[str]" = set()
-        # Both setups install torch. Running them concurrently would double the
-        # download and thrash a small disk, so they queue.
+        # All three setups install torch. Running them concurrently would
+        # multiply the download and thrash a small disk, so they queue.
         self._lock = asyncio.Lock()
 
     def claim(self, setup_id: str) -> bool:

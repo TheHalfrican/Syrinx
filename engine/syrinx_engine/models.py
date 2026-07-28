@@ -24,7 +24,8 @@ from .profiles import _data_dir
 
 log = logging.getLogger("syrinx.engine.models")
 
-# What the ⇄ rows say when their isolated venv hasn't been built yet. OS-agnostic
+# What a row whose isolated venv hasn't been built yet says — the ⇄ converters
+# and, since LuxTTS became one-click, a voice row too. OS-agnostic
 # on purpose: the old text named engine/setup-vevo.sh, which is both a dead end
 # for anyone who never opens a terminal and a path that doesn't exist on Windows.
 # The Install button in the Models tab is now the answer, so the string points there.
@@ -81,10 +82,9 @@ CATALOG: list = [
               ["Qwen/Qwen3-TTS-12Hz-0.6B-CustomVoice"], 2400,
               "Same 9 presets + instruct, lighter and faster.",
               gpu_recommended=True, min_ram_gb=4.0, supported=True, min_vram_gb=3.5),
-    # needs the real k2 wheel matching the venv's torch (k2-fsa.github.io/k2/cpu.html);
-    # the PyPI "k2" package is a stub and the vocoder segfaults without the real one.
     ModelSpec("luxtts", "LuxTTS", "voice", "luxtts", "", ["YatharthS/LuxTTS"], 1150,
-              "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly cloning, English.",
+              "ZipVoice-based, 48kHz, >150x realtime. CPU-friendly cloning, "
+              "English. Runs in its own isolated environment — one-time setup.",
               gpu_recommended=False, min_ram_gb=2.0, supported=True, min_vram_gb=1.5),
     # chatterbox-tts installs --no-deps (stale pins); sub-deps in engine[chatterbox]
     ModelSpec("chatterbox", "Chatterbox (Multilingual)", "voice", "chatterbox", "",
@@ -315,7 +315,7 @@ def _setup_id(m: "ModelSpec") -> str:
 
 
 def _vc_setup_warning(m: "ModelSpec") -> str:
-    """Conversion engines that live in isolated venvs need a one-time setup.
+    """Engines that live in isolated venvs need a one-time setup.
 
     Delegating the "is it there?" question to vcsetup means the warning, the
     Install button and the backends all read the same probe — the old copy here

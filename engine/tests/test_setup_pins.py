@@ -67,6 +67,11 @@ def test_vevo_setup_scripts_exist():
     assert (_ENGINE_DIR / "setup-vevo.ps1").is_file()
 
 
+def test_luxtts_setup_scripts_exist():
+    assert (_ENGINE_DIR / "setup-luxtts.sh").is_file()
+    assert (_ENGINE_DIR / "setup-luxtts.ps1").is_file()
+
+
 def test_seedvc_pins_match():
     sh, ps1 = _pair("setup-seedvc")
     # sanity: parsing actually found the known load-bearing pins
@@ -89,12 +94,50 @@ def test_vevo_pins_match():
     assert sh == ps1, f"vevo pin drift: only in .sh={sh - ps1}, only in .ps1={ps1 - sh}"
 
 
+def test_luxtts_pins_match():
+    sh, ps1 = _pair("setup-luxtts")
+    expected = {
+        # the whole reason LuxTTS is installable on Windows at all: PyPI's
+        # piper-phonemize upstream is dead and ships no win_amd64 wheel, so this
+        # exact version comes off the k2-fsa fork's find-links index
+        "piper_phonemize==1.4.7",
+        "transformers<=4.57.6",
+        "setuptools<81",
+    }
+    assert expected <= sh, f"luxtts .sh lost expected pins: {expected - sh}"
+    assert sh == ps1, f"luxtts pin drift: only in .sh={sh - ps1}, only in .ps1={ps1 - sh}"
+
+
+# LinaCodec/LuxTTS are pinned as `…​.git@<40 hex>` fragments, which carry no
+# name<op>version token and are therefore invisible to _PIN_RE above. They are
+# still pins — arguably the load-bearing ones, since neither project publishes a
+# release — so they get their own equality guard.
+_SHA_RE = re.compile(r"git\+https://\S+?\.git@([0-9a-f]{40})")
+
+
+def test_luxtts_git_shas_match():
+    sh = set(_SHA_RE.findall(_strip_comments(
+        (_ENGINE_DIR / "setup-luxtts.sh").read_text(encoding="utf-8"))))
+    ps1 = set(_SHA_RE.findall(_strip_comments(
+        (_ENGINE_DIR / "setup-luxtts.ps1").read_text(encoding="utf-8"))))
+    expected = {
+        "c0ae7c7285e121475c27592cfbb600624b714290",  # ysharma3501/LinaCodec main
+        "28ae6a61151684fffc9d1a7aa15eafa02286fe0b",  # ysharma3501/LuxTTS master
+    }
+    assert sh == expected, f"luxtts .sh git pins moved: {sh ^ expected}"
+    assert sh == ps1, f"luxtts SHA drift: only in .sh={sh - ps1}, only in .ps1={ps1 - sh}"
+
+
 # --- one-click install seams (engine/syrinx_engine/vcsetup.py drives these) ---
 
 
 _EXPECTED_STAGES = {
     "setup-seedvc": {"venv", "torch", "seedvc", "demucs", "pins", "verify"},
     "setup-vevo": {"amphion", "venv", "torch", "deps", "verify"},
+    # phonemize sits BEFORE luxtts on purpose (the resolver trick that keeps pip
+    # away from piper-phonemize's dead PyPI upstream); this set is order-free, so
+    # the ordering itself is documented in the scripts, not asserted here.
+    "setup-luxtts": {"venv", "torch", "phonemize", "luxtts", "pins", "verify"},
 }
 
 
