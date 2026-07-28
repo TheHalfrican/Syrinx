@@ -279,6 +279,14 @@ pub trait Engine {
     /// Make a model the active one for its category; returns the category.
     fn set_active_model(&self, model_id: &str) -> zbus::Result<String>;
 
+    /// Start installing a voice-conversion engine ("seedvc" | "vevo") into its
+    /// own environment; progress arrives via `VcSetupProgress`. False = unknown
+    /// setup id, or that engine is already installing.
+    fn install_vc_engine(&self, setup_id: &str) -> zbus::Result<bool>;
+
+    /// Stop an in-flight VC engine install; true = a running install was killed.
+    fn cancel_vc_setup(&self, setup_id: &str) -> zbus::Result<bool>;
+
     /// Persisted engine settings + effective values as JSON.
     fn get_settings(&self) -> zbus::Result<String>;
 
@@ -363,6 +371,19 @@ pub trait Engine {
     /// Model download progress: pct 0..1, status "downloading"|"done"|"error".
     #[zbus(signal)]
     fn model_progress(&self, model_id: String, pct: f64, status: String) -> zbus::Result<()>;
+
+    /// VC engine install progress: `stage` is a human label shown verbatim,
+    /// `status` is "running"|"done"|"error"|"cancelled" (stage-based, no pct —
+    /// pip isn't measurable), `detail` is "" while running and, on error, a
+    /// one-line reason plus " · log: <path>".
+    #[zbus(signal)]
+    fn vc_setup_progress(
+        &self,
+        setup_id: String,
+        stage: String,
+        status: String,
+        detail: String,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     fn speak_started(&self, gen_id: u32) -> zbus::Result<()>;

@@ -62,6 +62,8 @@ enum Cmd {
     DownloadModel { id: String },
     DeleteModel { id: String },
     ActivateModel { id: String },
+    InstallVc { setup_id: String },
+    CancelVc { setup_id: String },
     // Voicebox-style composer / cards / player
     GenerateInCharacter { text: String, voice: String },
     SelectVoice { id: String },
@@ -311,6 +313,9 @@ fn main() -> anyhow::Result<()> {
         // The ENGINE / stop-on-quit card is systemd-specific; hide it on Win/mac
         // where a spawned engine always dies with the app (RPC-PROTOCOL.md §13).
         ui.set_is_linux(cfg!(target_os = "linux"));
+        // The VC engine consent modal's winget paragraph (Python 3.12 + Git)
+        // only applies to Windows.
+        ui.set_is_windows(cfg!(target_os = "windows"));
         // System-audio capture exists on Linux (parecord monitor) and Windows
         // (WASAPI loopback); macOS waits for phase 3. Gates the ◉ Record-system
         // buttons, the create-voice System chip, and the ⚙ tap picker.
@@ -521,6 +526,26 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_delete_model(move |id| { let _ = tx.send(Cmd::DeleteModel { id: id.to_string() }); });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_install_vc(move |setup_id| {
+            // arm the row's marquee before the round-trip — the engine's first
+            // VcSetupProgress can be a minute out (venv creation), and a dead
+            // Install button in the meantime reads as a no-op
+            let ui = ui_weak.unwrap();
+            ui.set_vc_install_error("".into());
+            ui.set_vc_install_active(setup_id.clone());
+            ui.set_vc_install_stage("starting…".into());
+            let _ = tx.send(Cmd::InstallVc { setup_id: setup_id.to_string() });
+        });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_cancel_vc(move |setup_id| {
+            let _ = tx.send(Cmd::CancelVc { setup_id: setup_id.to_string() });
+        });
     }
     {
         let tx = tx.clone();
@@ -1713,6 +1738,9 @@ fn build_models(json: &str) -> (Vec<ModelItem>, Vec<ModelItem>, Vec<ModelItem>, 
             warning: s("warning").into(),
             progress: 0.0,
             finalizing: false,
+            // VC engines only; absent (⇒ false/"") on every other row
+            needs_setup: b("needs_setup"),
+            setup_id: s("setup_id").into(),
         };
         match m.get("category").and_then(|v| v.as_str()).unwrap_or("") {
             "voice" => voice.push(item),
@@ -2053,6 +2081,56 @@ fn model_progress_ui(status: &str) -> ModelProgressUi {
         // "downloading" and any unknown/future stage degrade to the bar
         _ => ModelProgressUi::Downloading,
     }
+}
+
+/// How a `VcSetupProgress` status string maps to the Models-tab treatment.
+/// Split out from the event handler for the same reason as
+/// [`ModelProgressUi`]: the decision is unit-testable without a running UI.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum VcSetupUi {
+    /// Marquee + the stage label shown verbatim. Also the graceful fallback for
+    /// any unknown/future status string (never panic, never strand the row).
+    Running,
+    /// The engine is installed — clear the install state and refetch, so the
+    /// row's "one-time setup needed" warning goes with it.
+    Done,
+    /// Failed — surface the detail (reason + log path) in the banner, and
+    /// refetch: a partial install can still have changed the rows.
+    Error,
+    /// The user pressed × — clear the state quietly, no scary banner.
+    Cancelled,
+}
+
+fn vc_setup_ui(status: &str) -> VcSetupUi {
+    match status {
+        "done" => VcSetupUi::Done,
+        "error" => VcSetupUi::Error,
+        "cancelled" => VcSetupUi::Cancelled,
+        // "running" and any unknown/future status keep the marquee up
+        _ => VcSetupUi::Running,
+    }
+}
+
+/// Put a VC-engine install failure in front of the user: the marquee stops and
+/// the Models tab's ⇄ section grows a ⚠ banner. Always visible — an install
+/// that dies silently is indistinguishable from one that never started.
+fn set_install_error(ui: &slint::Weak<AppWindow>, msg: String) {
+    ui.upgrade_in_event_loop(move |ui| {
+        ui.set_vc_install_active("".into());
+        ui.set_vc_install_stage("".into());
+        ui.set_vc_install_error(msg.into());
+    })
+    .ok();
+}
+
+/// Take the install marquee — and any stale banner — back down (done/cancelled).
+fn clear_install_state(ui: &slint::Weak<AppWindow>) {
+    ui.upgrade_in_event_loop(|ui| {
+        ui.set_vc_install_active("".into());
+        ui.set_vc_install_stage("".into());
+        ui.set_vc_install_error("".into());
+    })
+    .ok();
 }
 
 /// Update a single model row's download progress in place (no refetch).
@@ -2824,6 +2902,41 @@ async fn run_session(
                             voice_models = r.0;
                             active_engine = r.1;
                         }
+                    }
+                }
+                EngineEvent::VcSetupProgress { setup_id, stage, status, detail } => {
+                    match vc_setup_ui(&status) {
+                        VcSetupUi::Running => {
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_vc_install_active(setup_id.into());
+                                ui.set_vc_install_stage(stage.into());
+                            }).ok();
+                        }
+                        VcSetupUi::Done => {
+                            clear_install_state(&ui);
+                            // the row's "one-time setup needed" warning comes
+                            // from the engine — only a refetch clears it
+                            let r = refresh_models(&ui, &proxy).await;
+                            voice_models = r.0;
+                            active_engine = r.1;
+                        }
+                        VcSetupUi::Error => {
+                            tracing::error!("vc setup failed: {setup_id}: {detail}");
+                            let label = if setup_id == "seedvc" { "Seed-VC" } else { "Vevo" };
+                            // detail carries the reason and the log path
+                            let msg = if detail.is_empty() {
+                                format!("{label} install failed.")
+                            } else {
+                                format!("{label} install failed — {detail}")
+                            };
+                            set_install_error(&ui, msg);
+                            // a half-done install can still have moved rows
+                            let r = refresh_models(&ui, &proxy).await;
+                            voice_models = r.0;
+                            active_engine = r.1;
+                        }
+                        // the user asked for this one — no banner
+                        VcSetupUi::Cancelled => clear_install_state(&ui),
                     }
                 }
                 EngineEvent::LlmResult { req_id, text, error } => {
@@ -3641,6 +3754,28 @@ async fn run_session(
                     let r = refresh_models(&ui, &proxy).await;
                     voice_models = r.0;
                     active_engine = r.1;
+                }
+                Some(Cmd::InstallVc { setup_id }) => {
+                    // the row is already showing "starting…" — every path that
+                    // isn't a started install has to take it back down again
+                    match proxy.install_vc_engine(&setup_id).await {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!("install_vc_engine refused: {setup_id}");
+                            set_install_error(&ui, "that engine is already installing.".to_string());
+                        }
+                        Err(e) => {
+                            tracing::error!("install_vc_engine failed: {setup_id}: {e}");
+                            set_install_error(&ui, format!("could not start the install: {e}"));
+                        }
+                    }
+                }
+                Some(Cmd::CancelVc { setup_id }) => {
+                    // fire-and-forget: the row clears on the engine's
+                    // "cancelled" progress event, not on this reply
+                    if let Err(e) = proxy.cancel_vc_setup(&setup_id).await {
+                        tracing::error!("cancel_vc_setup failed: {setup_id}: {e}");
+                    }
                 }
                 Some(Cmd::Compose { voice_id, prompt }) => {
                     match proxy.compose_profile(&voice_id, &prompt).await {
@@ -5350,6 +5485,55 @@ mod tests {
         for s in ["", "verifying", "queued", "FINALIZING", "unknown"] {
             assert_eq!(model_progress_ui(s), ModelProgressUi::Downloading);
         }
+    }
+
+    // --- vc_setup_ui -----------------------------------------------------
+
+    #[test]
+    fn vc_setup_ui_maps_the_status_vocabulary() {
+        assert_eq!(vc_setup_ui("running"), VcSetupUi::Running);
+        assert_eq!(vc_setup_ui("done"), VcSetupUi::Done);
+        assert_eq!(vc_setup_ui("error"), VcSetupUi::Error);
+        assert_eq!(vc_setup_ui("cancelled"), VcSetupUi::Cancelled);
+    }
+
+    #[test]
+    fn vc_setup_ui_unknown_status_degrades_to_running() {
+        // a future status must keep the marquee up rather than strand the row
+        // in a state nothing ever clears
+        for s in ["", "queued", "waiting", "DONE", "canceled", "unknown"] {
+            assert_eq!(vc_setup_ui(s), VcSetupUi::Running);
+        }
+    }
+
+    // --- build_models: VC engine setup fields -----------------------------
+
+    #[test]
+    fn build_models_reads_the_vc_setup_fields() {
+        let json = r#"[
+            {"id": "seed_vc", "display": "Seed-VC", "category": "vc", "size_mb": 900,
+             "needs_setup": true, "setup_id": "seedvc",
+             "warning": "one-time setup needed — click Install"},
+            {"id": "vevo_timbre", "display": "Vevo", "category": "vc", "size_mb": 2048,
+             "needs_setup": false, "setup_id": "vevo"}
+        ]"#;
+        let (.., vc) = build_models(json);
+        assert!(vc[0].needs_setup);
+        assert_eq!(vc[0].setup_id, "seedvc");
+        assert_eq!(vc[0].warning, "one-time setup needed — click Install");
+        // installed engine: the id still rides along, so × / Install… can
+        // address the row, but the affordance is gone
+        assert!(!vc[1].needs_setup);
+        assert_eq!(vc[1].setup_id, "vevo");
+    }
+
+    #[test]
+    fn build_models_defaults_the_vc_setup_fields() {
+        // every non-VC row (and an older engine) omits both keys
+        let json = r#"[{"id": "kokoro", "display": "Kokoro", "category": "voice", "size_mb": 350}]"#;
+        let (voice, ..) = build_models(json);
+        assert!(!voice[0].needs_setup);
+        assert_eq!(voice[0].setup_id, "");
     }
 
     #[test]

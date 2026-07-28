@@ -63,7 +63,7 @@ impl EngineClient {
     }
 }
 
-/// Generate the 70 method + 3 property-getter dispatchers. Each expands to a
+/// Generate the 72 method + 3 property-getter dispatchers. Each expands to a
 /// `match` that either delegates to the zbus proxy (same method name) or issues
 /// an RPC `call` with the PascalCase method name and the args as positional
 /// JSON. Keeping this a table makes the surface auditable against `lib.rs`.
@@ -166,6 +166,8 @@ engine_methods! {
     fn download_model(model_id: &str) -> bool => "DownloadModel";
     fn delete_model(model_id: &str) -> () => "DeleteModel";
     fn set_active_model(model_id: &str) -> String => "SetActiveModel";
+    fn install_vc_engine(setup_id: &str) -> bool => "InstallVcEngine";
+    fn cancel_vc_setup(setup_id: &str) -> bool => "CancelVcSetup";
     fn get_settings() -> String => "GetSettings";
     fn set_setting(key: &str, value_json: &str) -> () => "SetSetting";
     fn cancel(gen_id: u32) -> () => "Cancel";

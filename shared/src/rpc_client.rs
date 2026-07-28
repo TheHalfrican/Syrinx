@@ -258,6 +258,15 @@ pub(crate) fn notification_to_event(v: &Value) -> Option<EngineEvent> {
                 status: str_at(a, 2)?,
             })
         }
+        "VcSetupProgress" => {
+            let a = arr()?;
+            Some(EngineEvent::VcSetupProgress {
+                setup_id: str_at(a, 0)?,
+                stage: str_at(a, 1)?,
+                status: str_at(a, 2)?,
+                detail: str_at(a, 3)?,
+            })
+        }
         "SpeakStarted" => Some(EngineEvent::SpeakStarted { gen_id: u32_at(arr()?, 0)? }),
         "SpeakEnded" => Some(EngineEvent::SpeakEnded { gen_id: u32_at(arr()?, 0)? }),
         "PropertiesChanged" => {

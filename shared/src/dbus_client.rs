@@ -6,7 +6,8 @@
 //! progress, transcribe progress/result, speak ended, playback info/progress,
 //! llm result, model progress) plus `RecordingLevel` — ten — which carries the
 //! ⚙ test-mic meter (idle on Linux, where the mic path is `parecord` and the
-//! §14 recorder is never started, but the transports stay identical),
+//! §14 recorder is never started, but the transports stay identical), plus
+//! `VcSetupProgress` — eleven — which streams the one-click VC engine install,
 //! plus one property stream: `ModelLoadError`,
 //! whose RPC counterpart reaches the app as a `PropertiesChanged` notification
 //! — without it a failed warmup would be invisible on Linux only. `SpeakStarted`
@@ -37,13 +38,14 @@ impl DbusClient {
         let mut pprog = proxy.receive_playback_progress().await?;
         let mut llm = proxy.receive_llm_result().await?;
         let mut mprog = proxy.receive_model_progress().await?;
+        let mut vcprog = proxy.receive_vc_setup_progress().await?;
         // Property change (not a signal): the D-Bus analog of the RPC
         // `PropertiesChanged {"ModelLoadError": "…"}` notification.
         let mut mlerr = proxy.receive_model_load_error_changed().await;
 
         let (tx, rx) = mpsc::unbounded_channel::<EngineEvent>();
 
-        // Fan the ten signal-args streams into the one unified channel. Each
+        // Fan the eleven signal-args streams into the one unified channel. Each
         // `.args()` yields owned fields, mapped 1:1 onto an EngineEvent variant.
         tokio::spawn(async move {
             loop {
@@ -99,6 +101,14 @@ impl DbusClient {
                     Some(sig) = mprog.next() => {
                         if let Ok(a) = sig.args() {
                             let _ = tx.send(EngineEvent::ModelProgress { model_id: a.model_id, pct: a.pct, status: a.status });
+                        }
+                    }
+                    Some(sig) = vcprog.next() => {
+                        if let Ok(a) = sig.args() {
+                            let _ = tx.send(EngineEvent::VcSetupProgress {
+                                setup_id: a.setup_id, stage: a.stage,
+                                status: a.status, detail: a.detail,
+                            });
                         }
                     }
                     Some(change) = mlerr.next() => {

@@ -21,6 +21,7 @@ pub enum EngineEvent {
     TranscribeProgress { req_id: u32, partial: String },
     TranscribeResult { req_id: u32, text: String, error: bool },
     ModelProgress { model_id: String, pct: f64, status: String },
+    VcSetupProgress { setup_id: String, stage: String, status: String, detail: String },
     SpeakStarted { gen_id: u32 },
     SpeakEnded { gen_id: u32 },
 

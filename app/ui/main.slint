@@ -33,6 +33,10 @@ export struct ModelItem {
     // huggingface is verifying/renaming — show an indeterminate "finishing…"
     // treatment instead of a determinate fill that reads as stuck at 100%
     finalizing: bool,
+    // this row's engine needs its one-time local install before it can run
+    // (Seed-VC / Vevo — never bundled, see the consent modal). setup-id is the
+    // engine's install id ("seedvc" | "vevo"), "" on every other row.
+    needs-setup: bool, setup-id: string,
 }
 
 // --- Win95 3D bevel overlay (transparent center; draws a doubled 2px edge) ---
@@ -525,9 +529,16 @@ component ModelRow inherits Rectangle {
     // false for conversion engines: the ⇄ tab's dropdown picks per
     // conversion, so there is no "Use"/active concept to offer
     in property <bool> selectable: true;
+    // one-click VC engine install (Seed-VC / Vevo): `installing` is true only
+    // for the row whose setup is running, `install-stage` is the engine's human
+    // label shown verbatim under the marquee
+    in property <bool> installing: false;
+    in property <string> install-stage: "";
     callback download();
     callback del();
     callback activate();
+    callback install-request();
+    callback cancel-request();
     height: 64px;
     border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
     background: Theme.card-bg;
@@ -560,8 +571,33 @@ component ModelRow inherits Rectangle {
             if m.warning != "" : Text { text: "⚠ " + m.warning; font-size: 9.5px; color: #d9922b; overflow: elide; }
         }
         Rectangle {
-            width: 156px;
-            if m.downloading : VerticalLayout {
+            // the install affordance needs room beside Download/Delete; every
+            // other row keeps the original width
+            width: installing || m.needs-setup ? 210px : 156px;
+            // installing a VC engine: an indeterminate marquee (same idiom as
+            // finalizing below) — pip isn't measurable, so the engine sends
+            // named stages instead of a fraction — plus a × to stop it
+            if installing : VerticalLayout {
+                alignment: center; spacing: 5px;
+                HorizontalLayout {
+                    spacing: 6px;
+                    Text {
+                        text: install-stage == "" ? "installing…" : install-stage;
+                        font-size: 9.5px; font-family: Theme.mono; color: Theme.dim;
+                        overflow: elide; horizontal-stretch: 1; vertical-alignment: center;
+                    }
+                    TBtn { label: "×"; tip: "Stop this install"; clicked => { root.cancel-request(); } }
+                }
+                Rectangle {
+                    height: 6px; border-radius: 3px; background: Theme.chip-bg; clip: true;
+                    Rectangle {
+                        height: 100%; width: parent.width * 0.35;
+                        border-radius: 3px; background: Theme.gen-bg;
+                        x: -self.width + (parent.width + self.width) * (mod(animation-tick(), 1200ms) / 1200ms);
+                    }
+                }
+            }
+            if !installing && m.downloading : VerticalLayout {
                 alignment: center; spacing: 5px;
                 Text { text: m.finalizing ? "finishing…" : "downloading…"; font-size: 9.5px; font-family: Theme.mono; color: Theme.dim; horizontal-alignment: center; }
                 // finalizing: same full-width track, but the fill becomes an
@@ -580,8 +616,14 @@ component ModelRow inherits Rectangle {
                     Rectangle { x: 0; width: parent.width * m.progress; height: 100%; border-radius: 3px; background: Theme.gen-bg; }
                 }
             }
-            if !m.downloading : HorizontalLayout {
+            if !installing && !m.downloading : HorizontalLayout {
                 alignment: end; spacing: 6px;
+                // the engine's one-time local install — independent of the
+                // weights, so it sits beside Download/Delete, not instead of them
+                if m.needs-setup : TBtn {
+                    label: "Install…"; tip: "Set this engine up on this computer"; generate: true;
+                    clicked => { root.install-request(); }
+                }
                 if m.downloaded && m.supported && !m.active && selectable : TBtn {
                     label: "Use"; tip: "Make this the active model";
                     clicked => { root.activate(); }
@@ -848,6 +890,18 @@ export component AppWindow inherits Window {
     in-out property <string> del-kind: "";
     in-out property <string> del-id: "";
     in-out property <string> del-name: "";
+    // --- one-click VC engine install (Models tab) ---
+    // Same pure-Slint idiom as del-kind: the Install… affordance arms
+    // vc-install-kind ("seedvc" | "vevo"), the consent modal picks the wording
+    // and fires install-vc. The rest is SET FROM RUST: vc-install-active is the
+    // setup id currently running ("" = none), vc-install-stage its human label,
+    // vc-install-error the last failure ("" = none).
+    in-out property <string> vc-install-kind: "";
+    in property <string> vc-install-active: "";
+    in property <string> vc-install-stage: "";
+    in property <string> vc-install-error: "";
+    callback install-vc(string);
+    callback cancel-vc(string);
     // --- apply-effects-to-history dialog ---
     in-out property <string> fx-id: "";
     in-out property <string> fx-voice: "";
@@ -1044,6 +1098,9 @@ export component AppWindow inherits Window {
     // Win/mac, where a spawned engine always dies with the app (RPC §13). Rust
     // sets this from cfg!(target_os = "linux").
     in property <bool> is-linux: true;
+    // Windows-only wording in the VC engine consent modal (the winget
+    // Python/Git bootstrap). Rust sets this from cfg!(target_os = "windows").
+    in property <bool> is-windows: false;
     // System-audio capture support — Linux (parecord monitor) + Windows (WASAPI
     // loopback), not macOS yet. SET FROM RUST. Gates the ◉ Record-system
     // buttons, the create-voice System chip, and the ⚙ tap picker (but NOT the
@@ -3024,10 +3081,20 @@ export component AppWindow inherits Window {
                                 }
                                 if sec.cat == "vc" : VerticalLayout {
                                     spacing: 8px;
+                                    // a failed (or refused) engine install — the
+                                    // detail carries the reason and the log path
+                                    if vc-install-error != "" : Text {
+                                        text: "⚠ " + vc-install-error;
+                                        font-size: 10px; color: #d9922b; wrap: word-wrap;
+                                    }
                                     for m in vc-conv-models : ModelRow {
                                         m: m; selectable: false;
+                                        installing: root.vc-install-active == m.setup-id && root.vc-install-active != "";
+                                        install-stage: root.vc-install-stage;
                                         download => { root.download-model(m.id); }
                                         del => { root.del-kind = "model"; root.del-id = m.id; root.del-name = m.display; }
+                                        install-request => { root.vc-install-kind = m.setup-id; }
+                                        cancel-request => { root.cancel-vc(m.setup-id); }
                                     }
                                 }
                                 if sec.cat == "stt" : VerticalLayout {
@@ -3814,6 +3881,58 @@ export component AppWindow inherits Window {
                         label: "✦ Use photo"; tip: "Bake this crop into the voice's avatar";
                         generate: true; min-width: 120px;
                         clicked => { crop-open = false; root.crop-done(true); }
+                    }
+                }
+            }
+        }
+    }
+
+    // --- VC engine install consent dialog ---
+    // Same pure-Slint idiom as the delete confirm below: Install… arms
+    // vc-install-kind, this picks the wording, Install fires the real callback.
+    // Declared first so the delete confirm still draws on top of it.
+    if vc-install-kind != "" : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 460px; height: 340px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text {
+                    text: vc-install-kind == "seedvc" ? "Install Seed-VC" : "Install Vevo";
+                    font-size: 15px; font-weight: 700; color: Theme.fg;
+                }
+                Text {
+                    text: vc-install-kind == "seedvc"
+                            ? "Seed-VC is GPL-3.0 licensed, so Syrinx doesn't ship it. Installing puts it on this computer only, in its own isolated environment."
+                            : "Vevo's Amphion code is MIT, but its model checkpoints are CC-BY-NC: personal, non-commercial use. They stay on this computer and are never redistributed.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                Text {
+                    text: "The download is roughly 4–8 GB (mostly PyTorch) and takes 10–40 minutes. Keep Syrinx open until it finishes.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                if root.is-windows : Text {
+                    text: "If this PC has no suitable Python, Syrinx will install Python 3.12 — and, for Vevo, Git — via winget first. Windows may show one approval prompt for Git.";
+                    font-size: 12px; color: Theme.dim; wrap: word-wrap;
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { vc-install-kind = ""; } }
+                    TBtn {
+                        label: "Install"; tip: "Set this engine up on this computer";
+                        generate: true; min-width: 110px;
+                        clicked => {
+                            root.install-vc(vc-install-kind);
+                            vc-install-kind = "";
+                        }
                     }
                 }
             }
