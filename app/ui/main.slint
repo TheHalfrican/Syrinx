@@ -2969,9 +2969,14 @@ export component AppWindow inherits Window {
                     // ---- Settings: the last stub falls ----
                     if tab == "settings" : ScrollView {
                         VerticalLayout {
-                            padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 10px;
+                            // start-aligned so a short page can't stretch the
+                            // title rows apart; 6px binds each title to ITS
+                            // card, and the titles' own bottom-aligned 26px
+                            // boxes put the wide gap above them instead.
+                            alignment: start;
+                            padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 6px;
 
-                            Text { text: "APPEARANCE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "APPEARANCE"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 56px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3002,7 +3007,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "AUDIO DEVICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "AUDIO DEVICES"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 // 62px of fixed chrome + mic dropdown, plus 34px
                                 // for each optional row: the mic meter and the
@@ -3098,7 +3103,7 @@ export component AppWindow inherits Window {
                             // Compose, ✎ Rewrite, the transcription refiner and
                             // dictation's post-processing — no single view owns
                             // it, so it belongs in Settings.
-                            Text { text: "LANGUAGE MODEL"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "LANGUAGE MODEL"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3125,7 +3130,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            if root.dictation-supported : Text { text: "DICTATION"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            if root.dictation-supported : Text { text: "DICTATION"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             if root.dictation-supported : Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3165,7 +3170,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "VOICE CONVERTER"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "VOICE CONVERTER"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 96px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3200,7 +3205,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-            if root.is-linux : Text { text: "ENGINE"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+            if root.is-linux : Text { text: "ENGINE"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             if root.is-linux : Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3227,7 +3232,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "PATHS"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "PATHS"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 96px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3793,7 +3798,9 @@ export component AppWindow inherits Window {
                             border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
                             if Theme.name == "win95" : Bevel { width: 100%; height: 100%; sunken: true; }
                             if cv-transcript == "" : Text {
-                                x: 10px; y: 8px; text: "What the reference clip says (required for cloning).";
+                                x: 10px; y: 8px; width: parent.width - 20px;
+                                text: "What the reference clip says (required for cloning).";
+                                wrap: word-wrap;
                                 font-size: 12px; color: Theme.dim; opacity: 0.6; font-family: Theme.font;
                             }
                             cvtsv := ScrollView {
@@ -3882,6 +3889,9 @@ export component AppWindow inherits Window {
                     Rectangle { x: 0; y: 0; width: 100%; height: 1px; background: Theme.brd; }
                     HorizontalLayout {
                         padding-left: 18px; padding-right: 18px; spacing: 10px;
+                        // center the 30px buttons in the 56px row — fixed-height
+                        // children otherwise sit on the layout's top edge
+                        padding-top: 13px; padding-bottom: 13px;
                         if cv-error != "" : HorizontalLayout {
                             spacing: 6px; horizontal-stretch: 1;
                             Text {
@@ -3890,8 +3900,7 @@ export component AppWindow inherits Window {
                                 vertical-alignment: center; overflow: elide;
                                 horizontal-stretch: 1; preferred-width: 0px;
                             }
-                            // the footer row is 56px tall, so the button is hand-
-                            // centered in a full-height slot rather than stretched
+                            // hand-centered in its slot rather than stretched
                             Rectangle {
                                 width: 18px; height: 100%;
                                 CopyBtn { y: parent.height / 2 - self.height / 2; text: cv-error; }
