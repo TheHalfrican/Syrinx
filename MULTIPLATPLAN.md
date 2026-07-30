@@ -975,6 +975,79 @@ implementation is a new status token + app mapping. Decide whether
 that counts as a §6 vocabulary change needing a RPC-PROTOCOL prose
 note (no count changes either way).
 
+**2026-07-29 — macOS day 1: phase 1 lands whole on the M3 with ZERO
+source changes.** First boot of the campaign's third platform (Apple
+M3, 24 GB, macOS 26.5.2, arm64). Recipe: brew uv+sox, `uv venv
+--python 3.12 --seed engine/.venv`, `uv pip install -e 'engine[qwen]'
+'numba>=0.60'` — 147 packages, torch 2.13.0 with MPS available
+(deliberately unused until the phase-2 device matrix; Hardware
+honestly reports gpu:false on the M3). Engine suite 500 passed / ruff
+clean / coverage 94.27% over the 94 gate; boot smoke proved §2 live:
+rpc.json at ~/Library/Application Support/syrinx/ (mac merges
+config+data dirs — no filename collisions), authenticated round-trip,
+stdin-close teardown clean. The Rust app built FIRST TRY — the
+Windows campaign's `unix`→`target_os = "linux"` cfg-narrowing paid
+off in full; 88+7 tests, clippy clean. One real bug: the AUDIO
+DEVICES card height counted only one of its two optional rows, and
+mac is the first platform hiding exactly one (system tap unsupported,
+mic test supported). Fixed: the height now sums the rows —
+62+34+34 = the authored 130px on Linux/Windows, provably identical.
+Gotchas earned: SYRINX_DATA_DIR does NOT relocate rpc.json (only
+SYRINX_RPC_ENDPOINT does); brew sox prints an empty version string
+(probe existence, not version); backgrounded shell jobs inherit
+SIG_IGN for SIGINT — spawn from a clean parent when testing signal
+behavior or chase phantoms; first mic capture may return zeros until
+TCC consent lands (the prompt attributes to the terminal; an
+unbundled binary has no NSMicrophoneUsageDescription — packaging
+item); bare `cargo build` can never work on mac (dictate/ has ungated
+gtk4 deps and is a default workspace member — always `-p syrinx-app
+-p syrinx-shared`); Linux cross-check from mac: shared checks clean,
+app is blocked by yeslogic-fontconfig-sys's pkg-config cross-compile
+panic (vendored, not ours).
+
+**2026-07-30 — macOS wave 2: Retina stays native, the dead DICTATION
+card dies, and SIGTERM finally keeps §2.1's promise.** App side:
+forcing SLINT_SCALE_FACTOR=1.0 was Windows medicine (OS *user*
+scaling re-applied via ui_scale) that halved the mac window — Retina
+2.0 is backing-store density, so winit read the authored points as
+physical pixels. mac now sets no env var and runs at true
+scale_factor=2.000; an explicit ui_scale in settings.json still
+overrides on both, and the Windows path is byte-identical.
+os_native_scale()'s mac arm is implemented via
+NSScreen.backingScaleFactor — objc2/objc2-app-kit were already in the
+graph via winit, so Cargo.toml only names them (zero new packages,
+nothing recompiled). New `dictation-supported` property
+(linux|windows) hides the whole ⚙ DICTATION card, heading included,
+the way the ENGINE card hides off-Linux. Engine side:
+`_install_sigterm_handler` routes SIGTERM onto asyncio's own
+cancel-the-main-task path — the byte-identical teardown Ctrl-C
+already gets — so `systemctl stop` and a plain `kill` now exit 0 with
+rpc.json removed (was exit -15 and a stale discovery file). win32 is
+structurally inert (early return before `signal` is even imported);
+SIGINT is deliberately left to asyncio's own handler and a test pins
+that. Live matrix, three reps each from a clean Python parent:
+SIGTERM / SIGINT / stdin-close all exit 0, rpc.json removed. The sox
+hint is per-OS now (darwin→`brew install sox`; Linux names the
+package, not a guessed command). Coverage de-platformed: the win32
+GlobalMemoryStatusEx block and the Linux XDG endpoint branch now run
+on every OS (models.py 94→98%, total 94.27→94.67 over the 94 gate —
+the gate no longer cares which OS runs the suite). Suites on the
+merged tree: engine 516 passed (+16), ruff clean; cargo 88+6+1,
+clippy clean. GUI smoke: app spawned the venv engine, ready in 0.6 s,
+expected models-missing warmup banner, engine child gone within 6 s
+of quit — twice. Found, NOT fixed: (1) pre-existing flake in
+test_contract's rpc download/vc-setup exercises (~30-50% of runs,
+reproduced on the untouched baseline) — `_Adapter.wait_for` returns
+on the FIRST notification of a name while the assertions want two,
+and the second frame is still in flight on the real WebSocket (D-Bus
+never flakes: in-process synchronous emit); fix shape: a `count=`
+parameter on wait_for. (2) The DICTATION card keeps a hard 92px while
+its second row is Linux-only — dead space on Windows, the same class
+as the AUDIO DEVICES fix; the one-liner (58px + is-linux ? 34px)
+waits for a Windows session to verify. (3) Agent screenshots are
+impossible until the terminal gets a Screen-Recording TCC grant — the
+⚙ tab is verified structurally but still wants one human glance.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
