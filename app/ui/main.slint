@@ -1344,6 +1344,15 @@ export component AppWindow inherits Window {
     in-out property <int> st-mic-index: 0;
     in property <[string]> st-mon-names: ["Default sink monitor"];
     in-out property <int> st-mon-index: 0;
+    // One-line help under the system-tap picker; "" hides the row entirely (so
+    // Linux and Windows keep the card height they always had). macOS uses it for
+    // the two things a loopback tap needs said: how to install one when there is
+    // none, and that it only hears what is routed to it when there is. SET FROM
+    // RUST.
+    in property <string> st-tap-hint: "";
+    // The copyable payload of that hint — the install command, not the prose
+    // around it (the same split the Hyprland bind hint uses). "" = no ⧉.
+    in property <string> st-tap-copy: "";
     // ⚙ test-mic meter: `st-mic-testing` mirrors the toggle, `st-mic-level` is
     // the PERCEPTUAL bar fill (Rust already took sqrt of the raw RMS), and
     // `st-mic-test-supported` gates the whole row — on now for every platform:
@@ -1361,10 +1370,12 @@ export component AppWindow inherits Window {
     // Windows-only wording in the VC engine consent modal (the winget
     // Python/Git bootstrap). Rust sets this from cfg!(target_os = "windows").
     in property <bool> is-windows: false;
-    // System-audio capture support — Linux (parecord monitor) + Windows (WASAPI
-    // loopback), not macOS yet. SET FROM RUST. Gates the ◉ Record-system
-    // buttons, the create-voice System chip, and the ⚙ tap picker (but NOT the
-    // is-linux ENGINE card or the Hyprland dictation hint).
+    // System-audio capture support — Linux (parecord monitor), Windows (WASAPI
+    // loopback) and macOS (a loopback driver, recorded through the engine). SET
+    // FROM RUST. Gates the ◉ Record-system buttons, the create-voice System
+    // chip, and the ⚙ tap picker (but NOT the is-linux ENGINE card or the
+    // Hyprland dictation hint). On macOS it stays true even with no driver
+    // installed — st-tap-hint carries the fix, which a hidden button cannot.
     in property <bool> system-capture-supported: true;
     // Dictation support — Linux (syrinx-dictate + compositor bind) and Windows
     // (the global hotkey thread), not macOS yet. SET FROM RUST. Gates the whole
@@ -2995,15 +3006,15 @@ export component AppWindow inherits Window {
                             Rectangle {
                                 // 62px of fixed chrome + mic dropdown, plus 34px
                                 // for each optional row: the mic meter and the
-                                // system-tap picker. Linux and Windows show both
-                                // (62+34+34 = the authored 130px, unchanged);
-                                // macOS has no system tap yet, so it lands on the
-                                // same 96px two-row height the meter-less case
-                                // already used — counting only one of the two
-                                // left a row's worth of dead space in the card.
+                                // system-tap picker. Every platform now shows
+                                // both (62+34+34 = the authored 130px), and macOS
+                                // adds a fourth row for the loopback hint — 40px
+                                // because that line is the only one here allowed
+                                // to wrap to two.
                                 height: 62px
                                     + (root.st-mic-test-supported ? 34px : 0px)
-                                    + (root.system-capture-supported ? 34px : 0px);
+                                    + (root.system-capture-supported ? 34px : 0px)
+                                    + (root.st-tap-hint != "" ? 40px : 0px);
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
                                 border-radius: Theme.rad; background: Theme.card-bg;
                                 if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
@@ -3051,7 +3062,8 @@ export component AppWindow inherits Window {
                                             }
                                         }
                                     }
-                                    // system-audio tap: Linux monitor / Windows render endpoint
+                                    // system-audio tap: Linux monitor / Windows
+                                    // render endpoint / macOS loopback input
                                     if root.system-capture-supported : HorizontalLayout {
                                         spacing: 12px;
                                         Text { text: "System tap"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; width: 130px; }
@@ -3060,6 +3072,23 @@ export component AppWindow inherits Window {
                                             model: st-mon-names;
                                             current-index <=> st-mon-index;
                                             selected(i) => { root.st-pick-monitor(i); }
+                                        }
+                                    }
+                                    // macOS-only help: the install command when
+                                    // no loopback driver is present, the routing
+                                    // caveat when one is. The ⧉ appears only for
+                                    // the former, and copies the bare command.
+                                    if root.st-tap-hint != "" : HorizontalLayout {
+                                        spacing: 6px;
+                                        Text {
+                                            text: root.st-tap-hint;
+                                            font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                            vertical-alignment: center; wrap: word-wrap;
+                                            preferred-width: 0px; horizontal-stretch: 1;
+                                        }
+                                        if root.st-tap-copy != "" : VerticalLayout {
+                                            alignment: start;
+                                            CopyBtn { text: root.st-tap-copy; tip: "Copy the install command"; }
                                         }
                                     }
                                 }

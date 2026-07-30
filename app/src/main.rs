@@ -352,10 +352,18 @@ fn main() -> anyhow::Result<()> {
         // The VC engine consent modal's winget paragraph (Python 3.12 + Git)
         // only applies to Windows.
         ui.set_is_windows(cfg!(target_os = "windows"));
-        // System-audio capture exists on Linux (parecord monitor) and Windows
-        // (WASAPI loopback); macOS waits for phase 3. Gates the ◉ Record-system
-        // buttons, the create-voice System chip, and the ⚙ tap picker.
-        ui.set_system_capture_supported(cfg!(any(target_os = "linux", target_os = "windows")));
+        // System-audio capture exists on Linux (parecord monitor), Windows
+        // (WASAPI loopback) and macOS (a loopback driver — BlackHole & friends —
+        // recorded through the engine like any input). Gates the ◉ Record-system
+        // buttons, the create-voice System chip, and the ⚙ tap picker. On macOS
+        // the affordances stay live even with no driver installed: the picker
+        // and the record attempt both name the one-line fix (st-tap-hint /
+        // NO_SYSTEM_TAP), which a hidden button could never do.
+        ui.set_system_capture_supported(cfg!(any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos"
+        )));
         // Dictation ships on Linux (syrinx-dictate) and Windows (the global
         // hotkey thread below); macOS waits for phase 3. Gates the whole ⚙
         // DICTATION card rather than just the Hyprland bind hint.
@@ -1555,7 +1563,9 @@ async fn stop_pw_record(child: &mut tokio::process::Child) {
 // `parecord` child writing to an app-chosen wav (byte-identical to before); on
 // Windows a `system` capture wraps a native WASAPI loopback thread (the twin of
 // parecord) while the mic still goes through the engine (sounddevice); on macOS
-// the engine owns every capture and system audio is hidden until phase 3.
+// the engine owns every capture — system audio included, because a loopback
+// driver is just another CoreAudio input, so the `system` flag stays unused
+// there and the chosen device carries the whole decision (as on Linux).
 
 /// A live capture. Linux owns the `parecord` child; on Windows it is either the
 /// engine's mic recording id or a WASAPI loopback for system audio; on macOS it
@@ -1573,10 +1583,10 @@ struct Capture {
 }
 
 /// Start a capture. `device` is a source name (`.monitor` for system on Linux,
-/// a render-endpoint id for system on Windows, a mic name otherwise);
-/// `None`/`""` = the platform default. `system` routes Windows to WASAPI
-/// loopback instead of the engine's mic path; Linux/macOS already encode the
-/// choice in `device`.
+/// a render-endpoint id for system on Windows, a loopback input name for system
+/// on macOS, a mic name otherwise); `None`/`""` = the platform default.
+/// `system` routes Windows to WASAPI loopback instead of the engine's mic path;
+/// Linux/macOS already encode the choice in `device`.
 #[cfg(target_os = "linux")]
 async fn capture_start(
     _proxy: &EngineClient,
@@ -1679,12 +1689,17 @@ fn capture_died(_cap: &mut Capture) -> bool {
 }
 
 /// Resolve the capture device for a record request. `system` taps the output
-/// (Linux monitor / Windows render endpoint); mic uses the ⚙ mic choice
-/// (`""` = default). Returns `(device, ok)` — `ok == false` means "system was
-/// requested but no monitor exists" (Linux only; Windows always has a default
+/// (Linux monitor / Windows render endpoint / macOS loopback input); mic uses
+/// the ⚙ mic choice (`""` = default). Returns `(device, ok)` — `ok == false`
+/// means "system was requested but no tap exists" (Linux: no default sink
+/// monitor; macOS: no loopback driver installed. Windows always has a default
 /// render endpoint, and the loopback surfaces its own errors).
 #[cfg(target_os = "linux")]
-async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String>, bool) {
+async fn resolve_capture_device(
+    _proxy: &EngineClient,
+    cfg: &AppConfig,
+    system: bool,
+) -> (Option<String>, bool) {
     if system {
         let d = if cfg.monitor_device.is_empty() {
             default_monitor().await
@@ -1700,7 +1715,11 @@ async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String
     }
 }
 #[cfg(target_os = "windows")]
-async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String>, bool) {
+async fn resolve_capture_device(
+    _proxy: &EngineClient,
+    cfg: &AppConfig,
+    system: bool,
+) -> (Option<String>, bool) {
     if system {
         // The ⚙ "System tap" choice is a render-endpoint id; "" = default.
         let d = (!cfg.monitor_device.is_empty()).then(|| cfg.monitor_device.clone());
@@ -1711,15 +1730,60 @@ async fn resolve_capture_device(cfg: &AppConfig, system: bool) -> (Option<String
         (Some(cfg.mic_device.clone()), true)
     }
 }
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
-async fn resolve_capture_device(cfg: &AppConfig, _system: bool) -> (Option<String>, bool) {
-    // System capture is hidden on macOS; always the mic.
+#[cfg(target_os = "macos")]
+async fn resolve_capture_device(
+    proxy: &EngineClient,
+    cfg: &AppConfig,
+    system: bool,
+) -> (Option<String>, bool) {
+    if system {
+        // The ⚙ "System tap" choice is a loopback INPUT device name — CoreAudio
+        // has no monitor sources, so a loopback driver (BlackHole & friends) is
+        // the tap, and the engine records it through the same sounddevice path
+        // as any mic. Re-enumerate on every request: the stored choice can be a
+        // driver the user has since uninstalled, and falling through to the
+        // default input would hand back the microphone under a "system" label.
+        let Ok(json) = proxy.list_recording_devices().await else {
+            // engine unreachable — not a missing driver; let capture_start
+            // report the real failure rather than blaming BlackHole.
+            return ((!cfg.monitor_device.is_empty()).then(|| cfg.monitor_device.clone()), true);
+        };
+        let taps = mac_loopback_devices(&parse_recording_devices(&json));
+        let d = taps
+            .iter()
+            .find(|(n, _)| *n == cfg.monitor_device)
+            .or_else(|| taps.first())
+            .map(|(n, _)| n.clone());
+        let ok = d.is_some();
+        (d, ok)
+    } else if cfg.mic_device.is_empty() {
+        (None, true)
+    } else {
+        (Some(cfg.mic_device.clone()), true)
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows"), not(target_os = "macos")))]
+async fn resolve_capture_device(
+    _proxy: &EngineClient,
+    cfg: &AppConfig,
+    _system: bool,
+) -> (Option<String>, bool) {
+    // System capture is hidden everywhere else; always the mic.
     if cfg.mic_device.is_empty() {
         (None, true)
     } else {
         (Some(cfg.mic_device.clone()), true)
     }
 }
+
+/// What to say when a system capture was asked for and there is no tap to take
+/// it from. Linux's default-sink probe coming back empty is a broken-audio
+/// situation with nothing to suggest; macOS's is the expected first-run state —
+/// no loopback driver installed — so its line is the fix.
+#[cfg(not(target_os = "macos"))]
+const NO_SYSTEM_TAP: &str = "no default sink monitor found";
+#[cfg(target_os = "macos")]
+const NO_SYSTEM_TAP: &str = "no loopback device — run: brew install blackhole-2ch";
 
 /// Format seconds as m:ss (Voicebox-style meta).
 fn fmt_dur(d: f64) -> String {
@@ -2876,11 +2940,56 @@ fn export_dialog(cfg_dir: &str) -> rfd::AsyncFileDialog {
     if cfg_dir.is_empty() { dlg } else { dlg.set_directory(cfg_dir) }
 }
 
-/// Enumerate capture devices for the ⚙ pickers: `(mics, sink monitors)`, each
-/// as `(technical name, human description)`. On Linux this taps PipeWire via
-/// pactl (monitors are a Linux feature); elsewhere the engine's sounddevice
-/// enumeration lists mics only (system monitors wait for phase 3, and their
-/// picker is hidden off-Linux).
+/// Loopback driver families that turn a macOS output into a recordable input.
+/// CoreAudio has no monitor sources, so a system tap means one of these virtual
+/// devices; matched case-insensitively as a substring because every one of them
+/// ships channel-count and edition suffixes ("BlackHole 2ch", "BlackHole 16ch").
+/// "Existential Audio" is BlackHole's vendor, which some builds put in the name.
+#[cfg(any(target_os = "macos", test))]
+const MAC_LOOPBACK_FAMILIES: &[&str] =
+    &["blackhole", "loopback", "soundflower", "vb-cable", "existential audio"];
+
+/// Is this device name one of the known loopback drivers?
+#[cfg(any(target_os = "macos", test))]
+fn is_mac_loopback(name: &str) -> bool {
+    let n = name.to_lowercase();
+    MAC_LOOPBACK_FAMILIES.iter().any(|f| n.contains(f))
+}
+
+/// The loopback-capable subset of an input-device list — macOS's answer to
+/// Linux's `.monitor` sources. Matches on either half of the pair so a driver
+/// that only spells itself out in the description still lands in the picker.
+#[cfg(any(target_os = "macos", test))]
+fn mac_loopback_devices(devices: &[(String, String)]) -> Vec<(String, String)> {
+    devices
+        .iter()
+        .filter(|(id, desc)| is_mac_loopback(id) || is_mac_loopback(desc))
+        .cloned()
+        .collect()
+}
+
+/// Parse the engine's §14 `ListRecordingDevices` payload into
+/// `(id, description)` pairs. sounddevice ids are name-based (stable across
+/// hotplug) and the description is the same name — good enough for the
+/// dropdown. Entries without an id are dropped.
+#[cfg(any(not(target_os = "linux"), test))]
+fn parse_recording_devices(json: &str) -> Vec<(String, String)> {
+    let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
+    arr.iter()
+        .filter_map(|d| {
+            let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            let name = d.get("name").and_then(|v| v.as_str()).unwrap_or(id);
+            (!id.is_empty()).then(|| (id.to_string(), name.to_string()))
+        })
+        .collect()
+}
+
+/// Enumerate capture devices for the ⚙ pickers: `(mics, system taps)`, each as
+/// `(technical name, human description)`. On Linux this taps PipeWire via pactl
+/// (the taps are `.monitor` sources); on Windows the taps are WASAPI render
+/// endpoints; on macOS they are the loopback-driver subset of the engine's own
+/// input list. A loopback device is a legitimate mic choice too, so it stays in
+/// both lists rather than being moved out the way Linux moves monitors.
 #[cfg(target_os = "linux")]
 async fn list_audio_devices(_proxy: &EngineClient) -> (Vec<(String, String)>, Vec<(String, String)>) {
     let out = tokio::process::Command::new("pactl")
@@ -2907,30 +3016,66 @@ async fn list_audio_devices(_proxy: &EngineClient) -> (Vec<(String, String)>, Ve
 }
 #[cfg(not(target_os = "linux"))]
 async fn list_audio_devices(proxy: &EngineClient) -> (Vec<(String, String)>, Vec<(String, String)>) {
-    // sounddevice ids are name-based (stable across hotplug); the description
-    // is the same name — good enough for the dropdown.
-    let mut mics = Vec::new();
-    if let Ok(json) = proxy.list_recording_devices().await {
-        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(&json) {
-            for d in &arr {
-                let id = d.get("id").and_then(|v| v.as_str()).unwrap_or("");
-                let name = d.get("name").and_then(|v| v.as_str()).unwrap_or(id);
-                if !id.is_empty() {
-                    mics.push((id.to_string(), name.to_string()));
-                }
-            }
-        }
-    }
+    let mics = match proxy.list_recording_devices().await {
+        Ok(json) => parse_recording_devices(&json),
+        Err(_) => Vec::new(),
+    };
     // Windows lists WASAPI render endpoints as the "monitors" for the ⚙ tap
-    // picker; macOS has none until phase 3. Enumeration is blocking COM, so it
-    // runs on a blocking pool thread.
+    // picker. Enumeration is blocking COM, so it runs on a blocking pool thread.
     #[cfg(target_os = "windows")]
     let monitors = tokio::task::spawn_blocking(capture_win::enumerate_render_devices)
         .await
         .unwrap_or_default();
-    #[cfg(not(target_os = "windows"))]
+    // macOS taps a loopback driver, which CoreAudio presents as an ordinary
+    // input — so the taps are the loopback-named subset of the list already in
+    // hand. No second enumeration, no extra RPC.
+    #[cfg(target_os = "macos")]
+    let monitors = mac_loopback_devices(&mics);
+    #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     let monitors = Vec::new();
     (mics, monitors)
+}
+
+/// Rows for the ⚙ "System tap" dropdown: a leading default row (index 0 =
+/// "let the app choose", stored as an empty `monitor_device`) plus one row per
+/// enumerated tap. macOS words the default row after what it actually does —
+/// pick the first loopback driver — and, when none is installed, says so
+/// outright rather than promising a default that does not exist.
+fn tap_dropdown_names(taps: &[(String, String)]) -> Vec<String> {
+    let head = if !cfg!(target_os = "macos") {
+        "Default sink monitor"
+    } else if taps.is_empty() {
+        "No loopback device found"
+    } else {
+        "First loopback device"
+    };
+    std::iter::once(head.to_string())
+        .chain(taps.iter().map(|(_, d)| d.clone()))
+        .collect()
+}
+
+/// The help line under the ⚙ system-tap picker, as `(line, copyable)` — `""`
+/// for the line means no row at all. macOS only: with no driver the line
+/// carries the install command (and the ⧉ copies the bare command, the same
+/// split the Hyprland bind hint uses), and with one it warns about the routing
+/// half — a loopback device is a dead end unless the audio is actually sent to
+/// it, and a Multi-Output Device is how you keep hearing it meanwhile.
+/// Linux/Windows taps need neither, and an empty line keeps their card the
+/// exact height it has always been.
+fn tap_hint(taps: &[(String, String)]) -> (&'static str, &'static str) {
+    if !cfg!(target_os = "macos") {
+        ("", "")
+    } else if taps.is_empty() {
+        (
+            "No loopback device. Install one:  brew install blackhole-2ch",
+            "brew install blackhole-2ch",
+        )
+    } else {
+        (
+            "A loopback tap hears only what is routed to it — a Multi-Output Device (Audio MIDI Setup) lets you hear it too.",
+            "",
+        )
+    }
 }
 
 /// Push the ⚙ tab's state to the UI (devices, config, engine knobs).
@@ -4229,23 +4374,35 @@ async fn run_session(
                 }
                 Some(Cmd::CvStartRecord { system }) => {
                     // System audio taps the output (Linux monitor / Windows
-                    // loopback); mic uses the ⚙ mic choice ("" = default).
-                    let (target, _ok) = resolve_capture_device(&cfg, system).await;
-                    match capture_start(&proxy, &cv_wav, target.as_deref(), system).await {
-                        Ok(cap) => {
-                            cv_rec = Some(cap);
-                            rec_elapsed = 0;
-                            rec_interval.reset();  // first tick a full second out
-                            ui.upgrade_in_event_loop(|ui| {
-                                ui.set_cv_recording(true);
-                                ui.set_cv_sample_label("● recording… 0s / 30s".into());
-                            }).ok();
-                        }
-                        Err(e) => {
-                            tracing::error!("record failed: {e}");
-                            ui.upgrade_in_event_loop(|ui| {
-                                ui.set_cv_sample_label("⚠ recording failed — try again".into());
-                            }).ok();
+                    // loopback / macOS loopback driver); mic uses the ⚙ mic
+                    // choice ("" = default).
+                    let (target, ok) = resolve_capture_device(&proxy, &cfg, system).await;
+                    // macOS with no loopback driver: `target` is None and the
+                    // engine would happily record the MICROPHONE under a
+                    // "System" label, so refuse with the install line instead.
+                    // Linux keeps its long-standing fall-through (a failed
+                    // default-sink probe there still records the mic).
+                    if cfg!(target_os = "macos") && !ok {
+                        ui.upgrade_in_event_loop(|ui| {
+                            ui.set_cv_sample_label(format!("⚠ {NO_SYSTEM_TAP}").into());
+                        }).ok();
+                    } else {
+                        match capture_start(&proxy, &cv_wav, target.as_deref(), system).await {
+                            Ok(cap) => {
+                                cv_rec = Some(cap);
+                                rec_elapsed = 0;
+                                rec_interval.reset();  // first tick a full second out
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_cv_recording(true);
+                                    ui.set_cv_sample_label("● recording… 0s / 30s".into());
+                                }).ok();
+                            }
+                            Err(e) => {
+                                tracing::error!("record failed: {e}");
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_cv_sample_label("⚠ recording failed — try again".into());
+                                }).ok();
+                            }
                         }
                     }
                 }
@@ -4898,12 +5055,12 @@ async fn run_session(
                             }
                         }
                     } else {
-                        // System taps the output (Linux only); mic uses the ⚙
-                        // choice ("" = default).
-                        let (device, ok) = resolve_capture_device(&cfg, system).await;
+                        // System taps the output (Linux monitor / Windows loopback /
+                        // macOS loopback driver); mic uses the ⚙ choice ("" = default).
+                        let (device, ok) = resolve_capture_device(&proxy, &cfg, system).await;
                         if !ok {
                             ui.upgrade_in_event_loop(|ui| {
-                                ui.set_tr_status("no default sink monitor found".into());
+                                ui.set_tr_status(NO_SYSTEM_TAP.into());
                             }).ok();
                         } else {
                             match capture_start(&proxy, &tr_wav, device.as_deref(), system).await {
@@ -5091,12 +5248,12 @@ async fn run_session(
                             }
                         }
                     } else {
-                        // System taps the output (Linux only); mic uses the ⚙
-                        // choice ("" = default).
-                        let (device, ok) = resolve_capture_device(&cfg, system).await;
+                        // System taps the output (Linux monitor / Windows loopback /
+                        // macOS loopback driver); mic uses the ⚙ choice ("" = default).
+                        let (device, ok) = resolve_capture_device(&proxy, &cfg, system).await;
                         if !ok {
                             ui.upgrade_in_event_loop(|ui| {
-                                ui.set_vc_status("no default sink monitor found".into());
+                                ui.set_vc_status(NO_SYSTEM_TAP.into());
                             }).ok();
                         } else {
                             match capture_start(&proxy, &vc_wav, device.as_deref(), system).await {
@@ -5392,9 +5549,11 @@ async fn run_session(
                     let mic_names: Vec<SharedString> = std::iter::once(SharedString::from("System default"))
                         .chain(st_mics.iter().map(|(_, d)| SharedString::from(d.as_str())))
                         .collect();
-                    let mon_names: Vec<SharedString> = std::iter::once(SharedString::from("Default sink monitor"))
-                        .chain(st_mons.iter().map(|(_, d)| SharedString::from(d.as_str())))
+                    let mon_names: Vec<SharedString> = tap_dropdown_names(&st_mons)
+                        .iter()
+                        .map(|n| SharedString::from(n.as_str()))
                         .collect();
+                    let (tap_hint, tap_copy) = tap_hint(&st_mons);
                     let mic_idx = st_mics.iter().position(|(n, _)| *n == cfg.mic_device)
                         .map(|i| i as i32 + 1).unwrap_or(0);
                     let mon_idx = st_mons.iter().position(|(n, _)| *n == cfg.monitor_device)
@@ -5416,6 +5575,8 @@ async fn run_session(
                         ui.set_st_mic_index(mic_idx);
                         ui.set_st_mon_names(ModelRc::from(Rc::new(VecModel::from(mon_names))));
                         ui.set_st_mon_index(mon_idx);
+                        ui.set_st_tap_hint(tap_hint.into());
+                        ui.set_st_tap_copy(tap_copy.into());
                         ui.set_st_cap_names(ModelRc::from(Rc::new(VecModel::from(cap_names))));
                         ui.set_st_cap_index(cap_idx);
                         ui.set_st_steps_names(ModelRc::from(Rc::new(VecModel::from(steps_names))));
@@ -6160,6 +6321,159 @@ mod tests {
         // path under a nonexistent dir (Windows had /tmp) fails the whole start
         std::fs::File::create(path).expect("scratch wav path is creatable");
         std::fs::remove_file(path).ok();
+    }
+
+    // --- system tap: device enumeration + the macOS loopback filter --------
+
+    /// A device list entry whose id and description are the same string, which
+    /// is what the engine's §14 enumeration actually reports.
+    fn dev(name: &str) -> (String, String) {
+        (name.to_string(), name.to_string())
+    }
+
+    #[test]
+    fn parse_recording_devices_reads_the_engine_payload_and_survives_junk() {
+        let json = r#"[{"id":"iMac Microphone","name":"iMac Microphone","default":true},
+                       {"id":"BlackHole 2ch","name":"BlackHole 2ch","default":false},
+                       {"id":"","name":"nameless"},
+                       {"name":"no id at all"},
+                       {"id":"desc falls back to id"}]"#;
+        let got = parse_recording_devices(json);
+        assert_eq!(
+            got,
+            vec![
+                dev("iMac Microphone"),
+                dev("BlackHole 2ch"),
+                // an entry with no "name" describes itself with its id
+                dev("desc falls back to id"),
+            ]
+        );
+        // an engine that answered with garbage must not panic the picker
+        assert!(parse_recording_devices("not json").is_empty());
+        assert!(parse_recording_devices("").is_empty());
+        assert!(parse_recording_devices("{}").is_empty());
+    }
+
+    #[test]
+    fn mac_loopback_filter_knows_every_driver_family() {
+        for name in [
+            "BlackHole 2ch",
+            "BlackHole 16ch",
+            "blackhole 64ch",              // case-insensitive
+            "Loopback Audio",              // Rogue Amoeba
+            "Soundflower (2ch)",
+            "VB-Cable",
+            "Existential Audio BlackHole", // vendor-prefixed builds
+            "EXISTENTIAL AUDIO",
+        ] {
+            assert!(is_mac_loopback(name), "{name} should read as a loopback");
+        }
+    }
+
+    #[test]
+    fn mac_loopback_filter_leaves_real_microphones_alone() {
+        for name in [
+            "iMac Microphone",
+            "MacBook Pro Microphone",
+            "External Headphones",
+            "Yeti Nano",
+            "AirPods Pro",
+            "Scarlett 2i2 USB",
+        ] {
+            assert!(!is_mac_loopback(name), "{name} is a real input, not a tap");
+        }
+    }
+
+    #[test]
+    fn mac_loopback_devices_keeps_order_and_matches_either_half() {
+        let all = vec![
+            dev("iMac Microphone"),
+            dev("BlackHole 2ch"),
+            ("aggregate-42".to_string(), "Loopback Audio".to_string()),
+            dev("Yeti Nano"),
+            dev("BlackHole 16ch"),
+        ];
+        let taps = mac_loopback_devices(&all);
+        assert_eq!(
+            taps,
+            vec![
+                dev("BlackHole 2ch"),
+                // id is opaque, but the description gives it away
+                ("aggregate-42".to_string(), "Loopback Audio".to_string()),
+                dev("BlackHole 16ch"),
+            ]
+        );
+        // a machine with no loopback driver produces no taps at all — the
+        // absence the ⚙ picker and the record buttons both have to explain
+        assert!(mac_loopback_devices(&[dev("iMac Microphone")]).is_empty());
+        assert!(mac_loopback_devices(&[]).is_empty());
+    }
+
+    // --- system tap: the ⚙ picker's rows and help line ---------------------
+
+    #[test]
+    fn tap_dropdown_leads_with_a_default_row_then_one_row_per_tap() {
+        let taps = vec![dev("BlackHole 2ch"), dev("BlackHole 16ch")];
+        let rows = tap_dropdown_names(&taps);
+        assert_eq!(rows.len(), 3, "a default row plus every tap");
+        assert_eq!(&rows[1..], ["BlackHole 2ch", "BlackHole 16ch"]);
+        // index 0 is always "let the app choose" (stored as an empty
+        // monitor_device); only its wording is per-platform, and macOS drops the
+        // promise entirely when there is nothing to choose from
+        if cfg!(target_os = "macos") {
+            assert_eq!(rows[0], "First loopback device");
+            assert_eq!(tap_dropdown_names(&[]), ["No loopback device found"]);
+        } else {
+            assert_eq!(rows[0], "Default sink monitor");
+            assert_eq!(tap_dropdown_names(&[]), ["Default sink monitor"]);
+        }
+    }
+
+    #[test]
+    fn tap_hint_names_the_install_command_only_when_macos_has_no_tap() {
+        if cfg!(target_os = "macos") {
+            let (line, copy) = tap_hint(&[]);
+            assert!(line.contains("brew install blackhole-2ch"));
+            // the ⧉ hands over the bare command, not the sentence around it
+            assert_eq!(copy, "brew install blackhole-2ch");
+            // with a tap present the advice changes to the routing half — a
+            // loopback device hears nothing until audio is sent to it — and
+            // there is no command left to copy
+            let (line, copy) = tap_hint(&[dev("BlackHole 2ch")]);
+            assert!(line.contains("Multi-Output Device"));
+            assert!(!line.contains("brew"));
+            assert_eq!(copy, "");
+        } else {
+            // no extra row off macOS, so the AUDIO DEVICES card keeps its height
+            assert_eq!(tap_hint(&[]), ("", ""));
+            assert_eq!(tap_hint(&[dev("Monitor of Built-in Audio")]), ("", ""));
+        }
+    }
+
+    #[test]
+    fn a_mac_with_no_loopback_driver_gets_the_whole_absence_path() {
+        // verbatim ListRecordingDevices reply from a stock M3 iMac — the exact
+        // string the engine put on the wire, no driver installed
+        let engine_said = r#"[{"id": "iMac Microphone", "name": "iMac Microphone", "default": true}]"#;
+        let devices = parse_recording_devices(engine_said);
+        assert_eq!(devices, vec![dev("iMac Microphone")]);
+        let taps = mac_loopback_devices(&devices);
+        assert!(taps.is_empty(), "a built-in mic is not a system tap");
+        // …and every surface that absence reaches says what to do about it
+        if cfg!(target_os = "macos") {
+            assert_eq!(tap_dropdown_names(&taps), ["No loopback device found"]);
+            assert!(tap_hint(&taps).0.contains("brew install blackhole-2ch"));
+            assert!(NO_SYSTEM_TAP.contains("brew install blackhole-2ch"));
+        }
+    }
+
+    #[test]
+    fn no_system_tap_message_is_actionable_on_macos() {
+        if cfg!(target_os = "macos") {
+            assert!(NO_SYSTEM_TAP.contains("brew install blackhole-2ch"));
+        } else {
+            assert_eq!(NO_SYSTEM_TAP, "no default sink monitor found");
+        }
     }
 
     // --- is_vc_engine ----------------------------------------------------
