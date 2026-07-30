@@ -1160,6 +1160,48 @@ session: LuxTTS sampling is non-deterministic (same sentence: 3.45 /
 3.11 / 2.69 s of audio), so the worker's duration-ladder retry fires
 unevenly — cosmetic, ledgered, unfixed.
 
+**2026-07-30 (late) — phase-3 opens: macOS system capture, the
+loopback way. Zero new native code — a loopback driver is just
+another CoreAudio input, so the engine's §14 recorder was already
+the whole implementation.** system_capture_supported gains macos:
+the ◉ Record-system buttons, the create-voice System chip and the ⚙
+tap picker come alive, and the AUDIO DEVICES card returns to its
+authored 130px via the wave-2 row-sum. The tap enumeration is the
+loopback-named subset of the engine's own ListRecordingDevices reply
+(one RPC, no second enumeration): case-insensitive family match over
+BlackHole / Loopback / Soundflower / VB-Cable / Existential Audio,
+matching either half of the (id, description) pair; loopback devices
+stay in the mic list too (a legit mic choice — unlike Linux, which
+moves monitors out). resolve_capture_device's mac arm re-enumerates
+per request — a stored tap the user has since uninstalled must NOT
+fall through to the default input, which would record the microphone
+under a "system" label; engine-unreachable deliberately returns
+ok=true so capture_start reports the real failure instead of blaming
+BlackHole. Absence UX (the plan's "detect gracefully"): per-OS
+NO_SYSTEM_TAP ("no loopback device — run: brew install
+blackhole-2ch" on mac; Linux keeps its verbatim string), rendered in
+tr/vc status AND the create-voice arm — which, surprise, was
+ignoring the no-tap result on EVERY platform and silently recording
+the mic; fixed for mac only, and the Linux fall-through is hereby
+flagged as a latent bug for a Linux session to decide. New ⚙ hint
+row (mac-only, 40px, hides by "" so Linux/Windows card heights are
+bit-identical): with no driver, the install command + a ⧉ copying
+it; with one, the routing caveat ("a loopback tap hears only what is
+routed to it — a Multi-Output Device (Audio MIDI Setup) lets you
+hear it too"). The silent-capture ⚠ at record time already covers
+the forgot-to-route case on every platform. Suites: cargo 96+6+1
+(+8; the mac helpers are cfg(macos|test) so the tests run on all
+CI), clippy --all-targets clean. Verified live against the running
+engine, read-only: ListRecordingDevices returns only the iMac mic on
+a driverless box → enumeration [], absence path exact. NOT yet run:
+the live 440 Hz loop (play into the loopback's output, engine
+records its input, FFT-assert) — harness written and dry-run-tested,
+blocked only on `brew install blackhole-2ch` (cask, wants sudo, and
+coreaudiod may need a nudge before the device shows). Run it before
+trusting the happy path. Native CATap (AudioHardwareCreateProcessTap,
+macOS 14.4+) is the zero-setup upgrade — queued for the packaging
+phase, where its NSAudioCaptureUsageDescription belongs anyway.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
