@@ -142,11 +142,11 @@ still on D-Bus; the transport contract tests pass on both wrappers.
 
 | Backend | Linux | Windows | macOS |
 |---|---|---|---|
-| Kokoro | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU / MPS |
-| Qwen-TTS | CUDA ✅ | CUDA ✅ (Base + CustomVoice, 1.7B & 0.6B) | MPS (verify) / CPU — consider MLX port later |
+| Kokoro | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU / MPS ✅ (2026-07-30, M3) |
+| Qwen-TTS | CUDA ✅ | CUDA ✅ (Base + CustomVoice, 1.7B & 0.6B) | MPS ✅ bf16 (2026-07-30, 0.6B clone+speak on the M3 — fp16 overflows in code_predictor sampling, see Findings) — consider MLX port later |
 | LuxTTS (venv) | CPU ✅ / CUDA (plain pip torch) | ✅ one-click install (2026-07-28) via the `setup-luxtts.ps1`/`.sh` pair: the `piper_phonemize==1.4.7` cp312 win_amd64 wheel comes off the k2-fsa **icefall** find-links index (PyPI upstream ships no Windows wheel/sdist — that was the 2026-07-24 blocker), and LuxTTS/LinaCodec install from pinned git SHAs on the ysharma3501 fork | verify piper_phonemize on the icefall index for arm64 mac — no k2 question anymore |
-| faster-whisper (CTranslate2) | CPU ✅ / CUDA ✅ | CPU / CUDA ✅ (base/large/turbo — see cu12 DLL gotcha, Findings 2026-07-24 sweep) | CPU (no Metal in CT2 — still fast) |
-| Qwen3 LLM | CPU ✅ / CUDA fp16 ✅ | CUDA fp16 | **MPS fp16** (add "mps" to llm.py device pick) |
+| faster-whisper (CTranslate2) | CPU ✅ / CUDA ✅ | CPU / CUDA ✅ (base/large/turbo — see cu12 DLL gotcha, Findings 2026-07-24 sweep) | CPU ✅ int8 (2026-07-30 — no Metal in CT2, still fast: 0.46 s for a 3.25 s clip) |
+| Qwen3 LLM | CPU ✅ / CUDA fp16 ✅ | CUDA fp16 | MPS fp16 ✅ (2026-07-30, refine on the M3) |
 | Chatterbox VC (⇄) | CPU ✅ / CUDA ✅ | CPU / CUDA | MPS (verify — same stack as Chatterbox TTS) |
 | Seed-VC (⇄ + ♫, venv) | CPU ✅ / CUDA ✅ | CPU / CUDA (plain pip torch) | MPS unverified; CPU works (slow — minutes per clip) |
 | Vevo-Timbre / Vevo2 (⇄ + ♫, venv) | CPU ✅ / CUDA ✅ | CUDA (heavy — 10 GB-class resident) | unverified; treat as optional engines everywhere |
@@ -1047,6 +1047,48 @@ as the AUDIO DEVICES fix; the one-liner (58px + is-linux ? 34px)
 waits for a Windows session to verify. (3) Agent screenshots are
 impossible until the terminal gets a Screen-Recording TCC grant — the
 ⚙ tab is verified structurally but still wants one human glance.
+
+**2026-07-30 (later) — phase 2: the M3's GPU turns on. MPS lands in
+the core engine and Qwen voice cloning runs on Metal — in bf16,
+because fp16 provably cannot.** `detect_device()` gains the mps
+branch (cuda/rocm still outrank it — an eGPU or a CUDA build under
+Rosetta is the tuned path); the three copy-pasted
+`("cuda","rocm")→"cuda" else "cpu"` mappings collapsed into one
+shared `torch_device()` that passes "mps" through;
+`empty_device_cache()` learned the Metal allocator. The LLM picks
+cuda→mps→cpu with fp16 on both accelerators. `detect_hardware()`
+reports Metal as the GPU: name from sysctl's brand string, vram_gb
+from `torch.mps.recommended_max_memory()` — on unified memory the
+Metal working-set ceiling (~74% of RAM) is the honest "can I fit this
+model" number. Live on the M3: `{cores 8, ram 24.0, gpu true, "Apple
+M3", vram 17.8}`. The dtype finding that earns the ledger: **Qwen-TTS
+on MPS must be bf16.** fp16 loads and runs the talker, then dies in
+`code_predictor.generate` → transformers `_sample` with "probability
+tensor contains either inf, nan or element < 0" — logit overflow;
+bf16's exponent range is what that stage needs, and Metal has the
+kernels (M3, torch 2.13). The per-device dtype now lives in one
+`_load_checkpoint()` shared by both qwen backends, failure named in
+the docstring. No PYTORCH_ENABLE_MPS_FALLBACK needed anywhere — zero
+missing-op failures. Live matrix, all through the engine's own RPC:
+downloads of whisper-base / kokoro / qwen3-0.6b / qwen-tts-0.6B all
+clean (first mac exercise of the HF symlink-settle path — quiet on
+APFS); Kokoro speaks on MPS (3.25 s @ 24 kHz, warm 3.7 s; first call
++12.5 s while spaCy auto-fetched en_core_web_sm mid-synthesis);
+Qwen-TTS 0.6B clone + speak on MPS bf16 (load 2.4 s, cold synth
+11.6 s, warm 4.3 s for a 3.6 s clip); STT stays CPU int8 by design
+(no Metal in CT2) and round-tripped the kokoro clip exactly in
+0.46 s; LLM refine on MPS fp16 in 4.89 s, no NaNs. Suites: 543
+passed (+27), coverage 94.70%, ruff clean; the new device tests run
+on every OS via torch stand-ins, so none of it re-platforms the
+gate. New gotcha: under SYRINX_SUPERVISED=1 a backgrounded shell
+spawn hands the engine /dev/null for stdin — the watchdog reads EOF
+as "parent gone" and exits instantly with an empty log; spawn from a
+parent holding a real pipe. Deferred, on purpose: the venv workers
+(luxtts/seedvc/vevo) get their mps branches in the wave that
+installs them on mac; tada still picks fp32 on MPS (its dtype block
+is cuda-gated — untestable until tada is installed here). Test
+residue kept as evidence: a cloned voice "MPS Probe" + 4 history
+clips in ~/Library/Application Support/syrinx/.
 
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
