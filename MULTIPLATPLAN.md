@@ -1193,12 +1193,27 @@ the forgot-to-route case on every platform. Suites: cargo 96+6+1
 (+8; the mac helpers are cfg(macos|test) so the tests run on all
 CI), clippy --all-targets clean. Verified live against the running
 engine, read-only: ListRecordingDevices returns only the iMac mic on
-a driverless box → enumeration [], absence path exact. NOT yet run:
-the live 440 Hz loop (play into the loopback's output, engine
-records its input, FFT-assert) — harness written and dry-run-tested,
-blocked only on `brew install blackhole-2ch` (cask, wants sudo, and
-coreaudiod may need a nudge before the device shows). Run it before
-trusting the happy path. Native CATap (AudioHardwareCreateProcessTap,
+a driverless box → enumeration [], absence path exact. The live
+440 Hz loop RAN 2026-07-30 post-reboot (`brew install blackhole-2ch`
++ restart; system_profiler lists "BlackHole 2ch", Existential Audio,
+2 in / 2 out): 2 s of 440 Hz at 0.5 amplitude played into the
+BlackHole output while RecordingManager captured its input
+in-process (SYRINX_DATA_DIR redirected, no service, no rpc.json) —
+PASS, twice, byte-identical: rms 0.2776, FFT peak 440.00 Hz,
+48 kHz, sample peak 0.49997 = unity gain; rms matches
+0.5/√2·√(2.0 s tone / 3.24 s window) to 4 decimals, so everything
+outside the tone is true digital silence — BlackHole is a
+bit-transparent path, and `_resolve_input` mapped the name to the
+right index on the first try. One finding worth keeping: playing
+and recording the SAME CoreAudio device from ONE process fails
+deterministically (PaMacCore AUHAL err -10863 "cannot do in current
+context") — the play silently no-ops AND collaterally stalls the
+open capture stream at zeros; a subprocess player works, and
+cross-process is the real shape of system capture anyway. If the
+app ever adds same-process monitoring/preview on the tap device it
+hits this — remember it when CATap lands. Dev .app reinstalled at
+HEAD the same evening (the installed bundle predated the capture
+UI). Native CATap (AudioHardwareCreateProcessTap,
 macOS 14.4+) is the zero-setup upgrade — queued for the packaging
 phase, where its NSAudioCaptureUsageDescription belongs anyway.
 
