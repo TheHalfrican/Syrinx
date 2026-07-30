@@ -119,13 +119,33 @@ def test_ct2_cuda_dll_map_excludes_cudnn():
 # --- qwen: actionable SoX-missing error -----------------------------------
 
 
-def test_import_qwen_tts_translates_a_sox_failure(monkeypatch):
-    def boom(_name):
-        raise ImportError("sox: command not found (pysox _get_valid_formats)")
+def _sox_import_boom(_name):
+    raise ImportError("sox: command not found (pysox _get_valid_formats)")
 
-    monkeypatch.setattr(importlib, "import_module", boom)
+
+def test_import_qwen_tts_translates_a_sox_failure(monkeypatch):
+    monkeypatch.setattr(importlib, "import_module", _sox_import_boom)
     with pytest.raises(RuntimeError, match="SoX binary on PATH"):
         qwen._import_qwen_tts()
+
+
+@pytest.mark.parametrize(("platform", "hint"), [
+    ("win32", "winget install ChrisBagwell.SoX"),
+    ("darwin", "brew install sox"),
+    ("linux", "your distro's sox package"),
+    ("freebsd13", "your platform's sox package"),  # unknown OS -> generic
+])
+def test_sox_hint_names_this_os_package_manager(monkeypatch, platform, hint):
+    """The hint is the one actionable thing in the message, so it has to match
+    the box the user is actually on — a winget line on a Mac is noise."""
+    monkeypatch.setattr(qwen.sys, "platform", platform)
+    monkeypatch.setattr(importlib, "import_module", _sox_import_boom)
+    with pytest.raises(RuntimeError) as excinfo:
+        qwen._import_qwen_tts()
+    assert str(excinfo.value) == (
+        f"qwen engines need the SoX binary on PATH — install it ({hint}) "
+        "and restart the engine"
+    )
 
 
 def test_import_qwen_tts_passes_through_unrelated_import_errors(monkeypatch):

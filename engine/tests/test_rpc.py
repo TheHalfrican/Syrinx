@@ -8,7 +8,9 @@ import json
 import os
 import stat
 import sys
+from pathlib import Path
 
+import platformdirs
 import pytest
 from websockets.asyncio.client import connect
 from websockets.exceptions import ConnectionClosed
@@ -326,3 +328,32 @@ def test_default_paths_per_os(monkeypatch):
     assert p.name == "rpc.json"
     parts = p.parts
     assert "syrinx" in parts
+
+
+# The Linux branches, exercised on ANY host (sys.platform + a stubbed
+# platformdirs), so neither goes dead depending on which OS runs the suite.
+
+
+def test_linux_endpoint_lives_in_the_xdg_runtime_dir(monkeypatch, tmp_path):
+    """XDG_RUNTIME_DIR is a 0700 tmpfs — the right home for a session token."""
+    monkeypatch.delenv("SYRINX_RPC_ENDPOINT", raising=False)
+    monkeypatch.setattr(rpc.sys, "platform", "linux")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path / "run" / "user" / "1000"))
+    seen = []
+
+    def fake(appname, appauthor):
+        seen.append((appname, appauthor))
+        return str(tmp_path / "run" / "user" / "1000" / "syrinx")
+
+    monkeypatch.setattr(platformdirs, "user_runtime_dir", fake)
+    assert rpc.discovery_path() == tmp_path / "run" / "user" / "1000" / "syrinx" / "rpc.json"
+    assert seen == [("syrinx", "syrinx")]  # the §2.2 appname/appauthor contract
+
+
+def test_linux_endpoint_falls_back_to_the_data_dir_without_xdg_runtime_dir(monkeypatch):
+    monkeypatch.delenv("SYRINX_RPC_ENDPOINT", raising=False)
+    monkeypatch.delenv("XDG_RUNTIME_DIR", raising=False)
+    monkeypatch.setattr(rpc.sys, "platform", "linux")
+    # _default_data_dir()'s Linux literal — deliberately not SYRINX_DATA_DIR,
+    # which overrides the data dir but never moves the discovery file.
+    assert rpc.discovery_path() == Path.home() / ".local" / "share" / "syrinx" / "rpc.json"

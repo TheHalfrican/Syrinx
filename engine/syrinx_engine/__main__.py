@@ -9,6 +9,11 @@
 Override with ``SYRINX_TRANSPORT=dbus|rpc|both`` for dev and contract testing
 (``both`` exports on D-Bus *and* serves RPC — Linux only). The warmup-in-
 background pattern is preserved on every path.
+
+Shutdown has three doors, all of which must end in the same graceful teardown
+(``finally`` blocks run, discovery file removed — see ``docs/RPC-PROTOCOL.md``
+§2.1): Ctrl-C, SIGTERM (``systemctl stop``, ``kill``), and — under
+``SYRINX_SUPERVISED=1`` — the parent closing our stdin.
 """
 
 import asyncio
@@ -131,6 +136,53 @@ def _start_stdin_watchdog(on_parent_gone, *, stdin=_UNSET, _exit=os._exit) -> bo
     return True
 
 
+# --- graceful shutdown on SIGTERM (spec §2.1) -----------------------------
+
+
+def _install_sigterm_handler(*, loop=None, task=None) -> bool:
+    """Route SIGTERM into the *same* graceful shutdown Ctrl-C already gets.
+
+    ``asyncio.run`` installs its own SIGINT handler, which **cancels the main
+    task** before raising ``KeyboardInterrupt`` — so every ``finally`` on the
+    way out runs and the discovery file is removed. SIGTERM had no such
+    disposition: the default is "die now", which skipped the cleanup entirely
+    and left a stale ``rpc.json`` behind (exit ``-15``), contradicting the
+    promise in spec §2.1. Cancelling the main task here puts SIGTERM on the
+    byte-identical path, so ``systemctl stop`` on the Linux user unit — and a
+    plain ``kill`` anywhere — exits 0 with the file gone.
+
+    SIGINT is deliberately *not* registered here. asyncio's own handler already
+    does the right thing, and taking it over would change Ctrl-C's behavior (no
+    ``KeyboardInterrupt``, no second-Ctrl-C escape hatch) for no gain.
+
+    Windows is skipped outright: it has no POSIX signals, and
+    ``add_signal_handler`` raises ``NotImplementedError`` on the Proactor loop.
+    The stdin watchdog above is that platform's shutdown seam. The registration
+    is *additionally* wrapped, because a loop running off the main thread raises
+    too — a missing handler must never take the engine down at boot.
+
+    ``loop``/``task`` are test seams. Returns ``True`` if the handler is armed.
+    """
+    if sys.platform == "win32":
+        return False
+    import signal
+
+    loop = loop if loop is not None else asyncio.get_running_loop()
+    task = task if task is not None else asyncio.current_task()
+
+    def _on_sigterm() -> None:
+        log.info("SIGTERM received — shutting down")
+        task.cancel()
+
+    try:
+        loop.add_signal_handler(signal.SIGTERM, _on_sigterm)
+    except (NotImplementedError, RuntimeError, ValueError):
+        log.warning("cannot install a SIGTERM handler on this event loop; "
+                    "shutdown on SIGTERM will not be graceful")
+        return False
+    return True
+
+
 async def _run_dbus() -> None:
     from dbus_next.aio import MessageBus
 
@@ -200,6 +252,9 @@ async def _run_both() -> None:
 
 
 async def _run() -> None:
+    # Armed before any transport binds, so a SIGTERM that lands mid-boot still
+    # unwinds through the transports' cleanup instead of killing the process.
+    _install_sigterm_handler()
     transport = _transport()
     if transport == "dbus":
         await _run_dbus()
@@ -217,7 +272,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(message)s")
     try:
         asyncio.run(_run())
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, asyncio.CancelledError):
+        # KeyboardInterrupt: Ctrl-C (asyncio cancelled the main task first).
+        # CancelledError: SIGTERM, via _install_sigterm_handler. Both mean the
+        # cleanup already ran on the way out — exit 0.
         pass
 
 

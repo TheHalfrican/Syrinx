@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -36,6 +37,17 @@ log = logging.getLogger("syrinx.engine.tts.qwen")
 MODELS = {
     "1.7B": "Qwen/Qwen3-TTS-12Hz-1.7B-Base",
     "0.6B": "Qwen/Qwen3-TTS-12Hz-0.6B-Base",
+}
+
+
+# How to get the SoX binary, per OS. Windows and macOS have one blessed
+# package manager each, so the hint is a command the user can paste; Linux
+# ships sox under that exact name everywhere but the package manager differs
+# per distro, so name the package instead of guessing the command.
+_SOX_HINTS = {
+    "win32": "winget install ChrisBagwell.SoX",
+    "darwin": "brew install sox",
+    "linux": "your distro's sox package",
 }
 
 
@@ -53,9 +65,10 @@ def _import_qwen_tts():
         mod = importlib.import_module("qwen_tts")
     except Exception as e:  # noqa: BLE001
         if "sox" in str(e).lower():
+            hint = _SOX_HINTS.get(sys.platform, "your platform's sox package")
             raise RuntimeError(
                 "qwen engines need the SoX binary on PATH — install it "
-                "(winget install ChrisBagwell.SoX) and restart the engine"
+                f"({hint}) and restart the engine"
             ) from e
         raise
     return mod.Qwen3TTSModel

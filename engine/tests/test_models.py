@@ -525,6 +525,67 @@ def test_detect_hardware_falls_back_to_zero_without_a_ram_source(monkeypatch):
     assert models.detect_hardware()["ram_gb"] == 0.0
 
 
+# The Windows GlobalMemoryStatusEx fallback, exercised on ANY host so the
+# branch isn't dead code on the OS that happens to run the suite. ctypes stays
+# REAL — only kernel32 is stubbed — so the MEMORYSTATUSEX layout is genuinely
+# built and byref() genuinely wraps it.
+
+
+def _no_sysconf(monkeypatch):
+    def boom(_name):
+        raise AttributeError("os.sysconf does not exist on Windows")
+
+    monkeypatch.setattr(models.os, "sysconf", boom, raising=False)
+    monkeypatch.setattr(models.sys, "platform", "win32")
+
+
+def _fake_kernel32(monkeypatch, fn):
+    import ctypes
+
+    monkeypatch.setattr(
+        ctypes, "windll",
+        types.SimpleNamespace(kernel32=types.SimpleNamespace(GlobalMemoryStatusEx=fn)),
+        raising=False,  # there is no ctypes.windll off Windows
+    )
+
+
+def test_windows_ram_comes_from_globalmemorystatusex(monkeypatch):
+    import ctypes
+
+    seen = {}
+
+    def GlobalMemoryStatusEx(ref):  # noqa: N802 — mirrors the Win32 name
+        stat = ref._obj  # byref() wraps the caller's real structure
+        seen["dwLength"] = stat.dwLength
+        seen["sizeof"] = ctypes.sizeof(type(stat))
+        stat.ullTotalPhys = 32 * 1024**3
+        return 1
+
+    _no_sysconf(monkeypatch)
+    _fake_kernel32(monkeypatch, GlobalMemoryStatusEx)
+    assert models._total_ram_gb() == 32.0
+    # The API fails outright unless dwLength is pre-set to the struct's size —
+    # pin that we set it, and that the struct we build is the real thing.
+    assert seen["dwLength"] == seen["sizeof"]
+
+
+def test_windows_ram_is_zero_when_the_api_reports_failure(monkeypatch):
+    _no_sysconf(monkeypatch)
+    _fake_kernel32(monkeypatch, lambda ref: 0)  # 0 == the Win32 call failed
+    assert models._total_ram_gb() == 0.0
+
+
+def test_windows_ram_is_zero_when_the_ctypes_call_raises(monkeypatch):
+    def boom(ref):
+        raise OSError("kernel32 unreachable")
+
+    _no_sysconf(monkeypatch)
+    _fake_kernel32(monkeypatch, boom)
+    # A broken/emulated box must degrade to "unknown RAM", never take the
+    # engine down at hardware-probe time.
+    assert models._total_ram_gb() == 0.0
+
+
 def test_detect_hardware_reports_a_cuda_gpu(monkeypatch):
     torch = types.SimpleNamespace(cuda=types.SimpleNamespace(
         is_available=lambda: True, get_device_name=lambda i: "NVIDIA GeForce RTX 4090",
