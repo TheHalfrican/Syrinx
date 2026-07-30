@@ -1,12 +1,13 @@
 # Syrinx — Hardware acceleration
 
-Syrinx runs on one codebase across very different machines and auto-adapts. Two
-reference targets:
+Syrinx runs on one codebase across very different machines and auto-adapts.
+Three reference targets:
 
 | Machine | Display | Compute for TTS/STT |
 |---------|---------|---------------------|
 | Laptop  | Intel iGPU (UHD/Xe) | CPU (torch cpu build) |
 | Desktop | 14900K iGPU **or** RTX 4090 | **RTX 4090, CUDA** (Ada / sm_89) |
+| Mac     | Apple M3 (Retina native) | **MPS** (unified memory, 24 GB) |
 
 Everything below the model layer already works on the CPU box: Kokoro presets,
 LuxTTS cloning (faster than realtime), faster-whisper STT, the Qwen3
@@ -15,8 +16,10 @@ engines (Qwen-TTS, Chatterbox, TADA) and faster everything else.
 
 ## Engine backend selection
 
-`backends/__init__.py::detect_device()` picks `cuda` / `rocm` / `cpu` from what
-torch can see; the active backend is surfaced via the `Backend` D-Bus property.
+`backends/__init__.py::detect_device()` picks `cuda` / `rocm` / `mps` / `cpu`
+from what torch can see; the active backend is surfaced via the `Backend`
+D-Bus property. A shared `torch_device()` mapping turns the backend name into
+what torch actually addresses (`rocm` → `"cuda"`, `mps` → `"mps"`).
 Isolated-venv workers (LuxTTS) detect their own device the same way.
 
 Environment overrides (all optional):
@@ -28,7 +31,7 @@ Environment overrides (all optional):
 | `SYRINX_MODEL` | Qwen-TTS model tier. |
 | `SYRINX_WHISPER_MODEL` | faster-whisper size (default `base.en`). |
 | `SYRINX_LLM_MODEL` | Personality/refinement LLM (default Qwen3 `1.7B`). |
-| `SYRINX_LUXTTS_DEVICE` | Force the LuxTTS worker onto `cpu` / `cuda`. |
+| `SYRINX_LUXTTS_DEVICE` | Force the LuxTTS worker onto `cpu` / `cuda` / `mps`. |
 | `SYRINX_TTS_CHUNK_CHARS` | Long-text chunk size for cloning engines (default 800). |
 | `SYRINX_DICTATE_REFINE` | `1` = dictation pill always runs the LLM cleanup pass. |
 
@@ -61,11 +64,31 @@ device = "cuda"
 - LuxTTS on GPU: CUDA torch + a matching k2 wheel in `.venv-luxtts`; the worker
   then picks CUDA automatically.
 
+## Apple silicon (MPS)
+
+Plain-pip torch on arm64 macOS ships MPS — no special index, no extra
+packages, and no `PYTORCH_ENABLE_MPS_FALLBACK` needed for anything Syrinx
+runs. What lands where on the M3:
+
+- **Kokoro, Qwen TTS, LuxTTS worker, personality LLM: MPS.** The LLM loads
+  fp16; LuxTTS's worker has its own `cuda > mps > cpu` rung (warm synthesis
+  2.1 s vs 3.4 s on CPU).
+- **Qwen-TTS must load bf16 on MPS, not fp16** — fp16 overflows in the code
+  predictor's sampling ("probability tensor contains inf/nan"). One shared
+  `_load_checkpoint()` owns the per-device dtype, so every Qwen-family
+  backend inherits the right one.
+- **STT stays on CPU** (int8): CTranslate2 has no MPS backend. Still snappy.
+- **Seed-VC / Vevo workers are not yet MPS-tuned** — they install and run,
+  but fall back to CPU/fp32 paths until their workers grow the same rung.
+- `detect_hardware` reports the chip name ("Apple M3") and treats
+  `torch.mps.recommended_max_memory()` as the VRAM figure (~17.8 GB of the
+  24 GB unified pool) — the Models tab's VRAM advisories work unchanged.
+
 ## STT
 
-**faster-whisper** (CTranslate2) runs in the engine venv on both boxes.
+**faster-whisper** (CTranslate2) runs in the engine venv on every box.
 Desktop: switch to `large-v3` via the Models tab for accuracy in <1 s.
-Laptop: `base.en` on CPU stays snappy.
+Laptop and Mac: `base.en` on CPU stays snappy (CT2 has no MPS backend).
 
 ## Arch / CachyOS packages
 

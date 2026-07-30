@@ -2,16 +2,18 @@
 
 A native voice studio — text-to-speech, voice cloning, and global-hotkey
 dictation. Wayland-first on Linux (built for **CachyOS + Hyprland**), and as
-of 2026-07 also fully native on **Windows**.
+of 2026-07 also fully native on **Windows** and (dictation aside) on
+**macOS** — Apple silicon, ML on MPS.
 
 Named for the *syrinx*, the vocal organ birds sing with (and, in myth, the reeds
 a nymph became — the first pan-pipe).
 
 > Native on every platform it touches, portable in none of the usual ways.
 > Linux is the reference platform: Wayland/wlroots, PipeWire, D-Bus, systemd —
-> used directly, never abstracted over. Windows gets its own native mechanisms
-> behind small strategy seams (JSON-RPC transport, app-supervised engine,
-> WASAPI-family audio) rather than a lowest-common-denominator layer. No
+> used directly, never abstracted over. Windows and macOS get their own native
+> mechanisms behind small strategy seams (JSON-RPC transport, app-supervised
+> engine, WASAPI/CoreAudio-family audio, CUDA or MPS compute) rather than a
+> lowest-common-denominator layer. No
 > WebView, no bundled browser runtime, no compositor-fighting — that's still
 > the whole point. See [`MULTIPLATPLAN.md`](MULTIPLATPLAN.md) for how, and
 > [`docs/RPC-PROTOCOL.md`](docs/RPC-PROTOCOL.md) for the wire contract.
@@ -73,6 +75,24 @@ the `.sh` scripts; MSVC Build Tools required for a few source-built deps, and
 Git for the two that clone from source). An NSIS installer comes from
 `scripts/build-windows.ps1` — see `packaging/WINDOWS.md`.
 
+**macOS** (Apple silicon; Python 3.12, rustup, SoX via `brew install sox` —
+the qwen engines shell out to it at import):
+
+```sh
+cd engine
+python3.12 -m venv .venv && .venv/bin/pip install -e .   # plain torch — MPS ships in the default arm64 wheels
+cd ..
+cargo run -p syrinx-app     # spawns + supervises the engine itself, like Windows
+
+# Or wrap the checkout in a real .app (Spotlight/Launchpad, its own TCC identity):
+scripts/install-macos-dev.sh
+```
+
+Build only `-p syrinx-app` here too. System-audio capture rides any loopback
+driver: `brew install blackhole-2ch` (the ⚙ tab shows the same hint when none
+is installed), then route audio to it — a Multi-Output Device in Audio MIDI
+Setup lets you hear what you're capturing.
+
 Add to your Hyprland config (see `packaging/hyprland.conf`):
 
 ```
@@ -94,9 +114,21 @@ LuxTTS, the one engine that used to be Windows-blocked (upstream
 piper-phonemize ships no Windows wheel), installs there too as of
 2026-07-28: `setup-luxtts.ps1` takes its phonemizer from the maintained
 k2-fsa wheel index, so every catalogued engine is now installable on
-Windows. Not yet on Windows (phase 3): system-audio capture (WASAPI
-loopback) and dictation; those buttons hide themselves there. Linux
-behavior is byte-identical by construction — the contract tests enforce it.
+Windows. Phase 3 landed there as well: system-audio capture (WASAPI
+loopback) and in-app dictation (**Ctrl+Alt+D**), plus an NSIS installer
+with a CI release job. Linux behavior is byte-identical by construction —
+the contract tests enforce it.
+
+**macOS (2026-07-30): the studio runs natively on Apple silicon** — the
+same app-supervised JSON-RPC shape as Windows, Retina-native, with ML on
+**MPS**: Kokoro, Qwen TTS, LuxTTS cloning and the personality LLM all
+validated end-to-end on an M3 (STT stays CTranslate2 on CPU — no MPS
+backend there). System-audio capture works through any loopback driver
+(`brew install blackhole-2ch`; proven live with a bit-transparent 440 Hz
+loop), and `scripts/install-macos-dev.sh` wraps the checkout in a signed
+dev `Syrinx.app`. Still to come on mac: in-app dictation, Seed-VC / Vevo
+verification (they install, but their workers haven't been MPS-tuned),
+and a self-contained bundle.
 
 - **Text-to-speech** across seven engines: Kokoro presets (language-filtered),
   and zero-shot cloning with Qwen TTS (1.7B/0.6B), Qwen CustomVoice, LuxTTS

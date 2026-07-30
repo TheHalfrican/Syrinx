@@ -2,11 +2,14 @@
 
 > **2026-07 addendum:** this document describes the Linux reference
 > architecture, which is unchanged. Syrinx now also runs natively on Windows
-> via small strategy seams — same core, different native mechanism per OS:
-> D-Bus ↔ JSON-RPC/WebSocket transport ([`RPC-PROTOCOL.md`](RPC-PROTOCOL.md)),
-> systemd/D-Bus activation ↔ app-supervised child engine (§13 there),
-> parecord/PipeWire ↔ engine-side sounddevice capture, XDG ↔ platformdirs.
-> The seam design and per-OS findings live in
+> and macOS via small strategy seams — same core, different native mechanism
+> per OS: D-Bus ↔ JSON-RPC/WebSocket transport
+> ([`RPC-PROTOCOL.md`](RPC-PROTOCOL.md)), systemd/D-Bus activation ↔
+> app-supervised child engine (§13 there), parecord/PipeWire ↔ engine-side
+> sounddevice capture, XDG ↔ platformdirs, CUDA ↔ MPS on Apple silicon
+> (compute only — the seam is inside `detect_device`). macOS system capture
+> is the same engine recorder pointed at a loopback driver (BlackHole et
+> al.); no new native code. The seam design and per-OS findings live in
 > [`../MULTIPLATPLAN.md`](../MULTIPLATPLAN.md).
 
 ## Design principle
@@ -86,7 +89,7 @@ and `syrinx-dictate` build against it. Summary by area:
 `TranscribeProgress` / `TranscribeResult`, `ModelProgress`,
 `SpeakStarted` / `SpeakEnded`.
 
-**Properties**: `ModelLoaded b` · `Backend s` (`cuda`|`rocm`|`cpu`).
+**Properties**: `ModelLoaded b` · `Backend s` (`cuda`|`rocm`|`mps`|`cpu`).
 
 Audio bytes never travel over D-Bus in bulk: the engine plays TTS output itself
 via PipeWire and emits only lightweight `AudioLevel` samples for visualization.

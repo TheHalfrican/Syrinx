@@ -329,7 +329,7 @@ engine emits after warmup (`emit_properties_changed({"ModelLoaded": True})` in
 |---|---|---|---|
 | `GetModelLoaded` | `[]` | boolean | `ModelLoaded` property |
 | `GetModelLoadError` | `[]` | string (`""` = no error) | `ModelLoadError` property |
-| `GetBackend` | `[]` | string (`"cuda"`\|`"rocm"`\|`"cpu"`) | `Backend` property |
+| `GetBackend` | `[]` | string (`"cuda"`\|`"rocm"`\|`"mps"`\|`"cpu"`) | `Backend` property |
 
 `ModelLoadError` is warmup's failure channel: when a model load raises, the
 engine stores the reason, emits `PropertiesChanged {"ModelLoadError": "…"}`, and
