@@ -144,7 +144,7 @@ still on D-Bus; the transport contract tests pass on both wrappers.
 |---|---|---|---|
 | Kokoro | CPU ✅ / CUDA ✅ | CPU / CUDA | CPU / MPS ✅ (2026-07-30, M3) |
 | Qwen-TTS | CUDA ✅ | CUDA ✅ (Base + CustomVoice, 1.7B & 0.6B) | MPS ✅ bf16 (2026-07-30, 0.6B clone+speak on the M3 — fp16 overflows in code_predictor sampling, see Findings) — consider MLX port later |
-| LuxTTS (venv) | CPU ✅ / CUDA (plain pip torch) | ✅ one-click install (2026-07-28) via the `setup-luxtts.ps1`/`.sh` pair: the `piper_phonemize==1.4.7` cp312 win_amd64 wheel comes off the k2-fsa **icefall** find-links index (PyPI upstream ships no Windows wheel/sdist — that was the 2026-07-24 blocker), and LuxTTS/LinaCodec install from pinned git SHAs on the ysharma3501 fork | verify piper_phonemize on the icefall index for arm64 mac — no k2 question anymore |
+| LuxTTS (venv) | CPU ✅ / CUDA (plain pip torch) | ✅ one-click install (2026-07-28) via the `setup-luxtts.ps1`/`.sh` pair: the `piper_phonemize==1.4.7` cp312 win_amd64 wheel comes off the k2-fsa **icefall** find-links index (PyPI upstream ships no Windows wheel/sdist — that was the 2026-07-24 blocker), and LuxTTS/LinaCodec install from pinned git SHAs on the ysharma3501 fork | ✅ install + MPS synthesis (2026-07-30, M3): the icefall index DOES carry `piper_phonemize-1.4.7-cp312-cp312-macosx_11_0_arm64.whl`, so the one-click install works unchanged; worker picks mps (warm 2.1 s vs 3.4 s cpu) |
 | faster-whisper (CTranslate2) | CPU ✅ / CUDA ✅ | CPU / CUDA ✅ (base/large/turbo — see cu12 DLL gotcha, Findings 2026-07-24 sweep) | CPU ✅ int8 (2026-07-30 — no Metal in CT2, still fast: 0.46 s for a 3.25 s clip) |
 | Qwen3 LLM | CPU ✅ / CUDA fp16 ✅ | CUDA fp16 | MPS fp16 ✅ (2026-07-30, refine on the M3) |
 | Chatterbox VC (⇄) | CPU ✅ / CUDA ✅ | CPU / CUDA | MPS (verify — same stack as Chatterbox TTS) |
@@ -1089,6 +1089,76 @@ installs them on mac; tada still picks fp32 on MPS (its dtype block
 is cuda-gated — untestable until tada is installed here). Test
 residue kept as evidence: a cloned voice "MPS Probe" + 4 history
 clips in ~/Library/Application Support/syrinx/.
+
+**2026-07-30 (evening) — Syrinx.app: the dev bundle lands and TCC
+finally has a name to put on its prompts.** New
+`scripts/install-macos-dev.sh` (house style, `--uninstall`,
+idempotent): builds the release binary, assembles a real bundle —
+Info.plist with `sh.syrinx.app`, NSMicrophoneUsageDescription,
+icns rendered from packaging/syrinx.svg (qlmanage won;
+rsvg-convert/sips are the fallbacks) — stages in a mktemp dir so a
+failed run never leaves a half-app where LaunchServices can see it,
+installs to /Applications (~/Applications fallback), ad-hoc signs IN
+PLACE (stable cdhash = stable TCC identity; the mic grant survives
+reinstalls — proven), registers with lsregister. The launcher bakes
+the checkout path in and does exactly two things Finder wouldn't:
+exports SYRINX_ENGINE_CMD (Finder launches with cwd=/, so the
+cwd-relative probe can't fire and the ancestor probe walks out of
+/Applications — the env var is the only probe that reaches the
+checkout) and prepends /opt/homebrew/bin to PATH (LaunchServices'
+environment has no brew prefix; qwen needs sox at import). Then
+`exec` — the binary owns the pid, quit and SIGTERM land where they
+act. Verified: `open -a Syrinx` → engine child from the venv, PATH
+position 1 is brew, qwen stack pre-imported (the sox seam holds),
+clean quit removes rpc.json, reinstall+relaunch with no re-prompt,
+Spotlight finds it. THE FIELD FINDING: first launch hung ~7 min —
+the engine's Python blocked inside open() reading pyvenv.cfg, because
+the checkout lives under ~/Documents and the very first file read
+trips the kTCCServiceSystemPolicyDocumentsFolder gate, which BLOCKS
+(does not fail) until the dialog is answered. Correctly attributed to
+sh.syrinx.app — the exact day-1 gap this bundle closes. One time
+only; now named in the installer summary. This is the dev seed of
+§2.2 packaging, not the relocatable bundle (that phase revisits
+--deep signing too, deprecated in favor of per-binary).
+
+**2026-07-30 (night) — Noah's first user-path click found the wave-3
+bug: `python3.12: command not found`, and resolve_python stops being
+Windows-only. Plus: LuxTTS is PROVEN on mac — the icefall index has
+the arm64 wheel.** The Models-tab Install on LuxTTS died at
+setup-luxtts.sh:29: vcsetup spawned the script with the interpreter
+env seam set only under `_IS_WIN`, on the theory "POSIX boxes that
+can run Syrinx already have python3" — true, but the scripts ask by
+the bare NAME python3.12, which a uv-managed mac never puts on PATH,
+least of all the four-entry PATH a Finder-launched app hands the
+engine. All three venv engines were equally broken; the mechanism got
+fixed, not the symptom: resolve_python now runs on every platform.
+POSIX candidates, lazily: python3.12 on PATH (Linux lands exactly
+where it always did — no-op by construction) → OUR OWN base
+interpreter via sys._base_executable (the self-answer: any box
+running the engine has a CPython 3.12 — the one that built
+engine/.venv; this is what wins on Noah's mac) → `uv python find
+3.12`. The winget bootstrap stays win32-only; the no-Python sentence
+went per-OS (the qwen sox-hint shape — darwin names brew/uv, not
+python.org). env[py_env] is now set unconditionally at spawn; the
+.sh files' Linux execution path is byte-identical. Verified live
+through the real VcSetupManager.install("luxtts") under env -i with
+the app's exact PATH: 76 s to a passing verify stage. The ledgered
+open question is CLOSED: k2-fsa's icefall find-links index carries
+piper_phonemize-1.4.7-cp312-cp312-macosx_11_0_arm64.whl (9.6 MB) —
+no piper-phonemize-fix fallback needed, no script logic change,
+and the torch cpu-index branch serves the standard arm64 build with
+working MPS. luxtts_worker._device() gained the mps rung (cuda > mps
+> cpu, llm.py's AttributeError guard): synthesis on mps, no
+missing-op fallbacks, warm 2.1 s vs cpu 3.4 s. Suites: 567 passed
+(+24, new test_luxtts_worker.py drives the worker as a subprocess —
+importing it in-process would dup2 pytest's stdout), coverage
+95.08%, ruff clean. The verified .venv-luxtts was then DELETED on
+purpose: Noah gets to click Install like a user, against a warm pip
+cache (~1 min) and already-cached HF weights. His running engine
+predates the fix — quit + relaunch first. Known quirk for that
+session: LuxTTS sampling is non-deterministic (same sentence: 3.45 /
+3.11 / 2.69 s of audio), so the worker's duration-ladder retry fires
+unevenly — cosmetic, ledgered, unfixed.
 
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
