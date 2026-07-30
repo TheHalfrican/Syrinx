@@ -2971,12 +2971,12 @@ export component AppWindow inherits Window {
                         VerticalLayout {
                             // start-aligned so a short page can't stretch the
                             // title rows apart; 6px binds each title to ITS
-                            // card, and the titles' own bottom-aligned 26px
+                            // card, and the titles' own bottom-aligned 36px
                             // boxes put the wide gap above them instead.
                             alignment: start;
                             padding-left: 22px; padding-right: 22px; padding-bottom: 16px; spacing: 6px;
 
-                            Text { text: "APPEARANCE"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "APPEARANCE"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 56px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3007,7 +3007,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "AUDIO DEVICES"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "AUDIO DEVICES"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 // 62px of fixed chrome + mic dropdown, plus 34px
                                 // for each optional row: the mic meter and the
@@ -3103,7 +3103,7 @@ export component AppWindow inherits Window {
                             // Compose, ✎ Rewrite, the transcription refiner and
                             // dictation's post-processing — no single view owns
                             // it, so it belongs in Settings.
-                            Text { text: "LANGUAGE MODEL"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "LANGUAGE MODEL"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3130,7 +3130,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            if root.dictation-supported : Text { text: "DICTATION"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            if root.dictation-supported : Text { text: "DICTATION"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             if root.dictation-supported : Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3170,7 +3170,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "VOICE CONVERTER"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "VOICE CONVERTER"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 96px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3205,7 +3205,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-            if root.is-linux : Text { text: "ENGINE"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+            if root.is-linux : Text { text: "ENGINE"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             if root.is-linux : Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3232,7 +3232,7 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "PATHS"; height: 26px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            Text { text: "PATHS"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
                                 height: 96px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
