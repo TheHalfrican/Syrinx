@@ -267,19 +267,34 @@ fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt().with_env_filter("info").init();
 
     // --- HiDPI scale compensation (non-Linux only) ---
-    // The UI was authored at the Hyprland density (scale ≈ 1.0). Windows/mac
-    // report the monitor's OS scaling (e.g. 1.5–2.0), which makes every element
-    // that much larger — the "zoomed in, cramped" report. Force the winit
-    // backend's scale factor via SLINT_SCALE_FACTOR *before* the window exists
-    // (the only reliable override in slint 1.17; a runtime ScaleFactorChanged
-    // event gets reverted by the next monitor event). Default target 1.0 =
-    // match the Linux reference; `ui_scale` in settings.json overrides it.
+    // The UI was authored at the Hyprland density (scale ≈ 1.0). Windows
+    // reports the monitor's *user* scaling (e.g. 1.5–2.0), which makes every
+    // element that much larger — the "zoomed in, cramped" report. Force the
+    // winit backend's scale factor via SLINT_SCALE_FACTOR *before* the window
+    // exists (the only reliable override in slint 1.17; a runtime
+    // ScaleFactorChanged event gets reverted by the next monitor event).
+    // Windows' default target is 1.0 = match the Linux reference.
+    //
+    // macOS is NOT that case: a Retina factor of 2.0 is backing-store pixel
+    // density, not user scaling — points are already the Linux-reference
+    // density. Pinning it to 1.0 makes winit read the authored logical sizes as
+    // physical pixels and the window opens at half its size, so mac stays
+    // native and the env var is not set at all. `ui_scale` in settings.json
+    // still overrides on both, and only then does mac force anything.
     // Linux never enters this block: no env var, native scaling untouched.
     #[cfg(not(target_os = "linux"))]
     let (ui_scale_cfg, scale_target) = {
         let cfg = load_config();
-        let target = if cfg.ui_scale > 0.0 { cfg.ui_scale } else { 1.0 };
-        std::env::set_var("SLINT_SCALE_FACTOR", format!("{target}"));
+        let target = if cfg.ui_scale > 0.0 {
+            Some(cfg.ui_scale)
+        } else if cfg!(target_os = "macos") {
+            None
+        } else {
+            Some(1.0)
+        };
+        if let Some(target) = target {
+            std::env::set_var("SLINT_SCALE_FACTOR", format!("{target}"));
+        }
         (cfg.ui_scale, target)
     };
 
@@ -292,13 +307,20 @@ fn main() -> anyhow::Result<()> {
     // after first paint instead. Then register the bundled fallback fonts.
     #[cfg(not(target_os = "linux"))]
     {
-        tracing::info!(
-            "ui-scale: os-native≈{:.3} → forcing effective={:.3} via SLINT_SCALE_FACTOR (ui_scale cfg={}, {})",
-            os_native_scale(),
-            scale_target,
-            ui_scale_cfg,
-            if ui_scale_cfg > 0.0 { "override" } else { "default→1.0" },
-        );
+        match scale_target {
+            Some(target) => tracing::info!(
+                "ui-scale: os-native≈{:.3} → forcing effective={:.3} via SLINT_SCALE_FACTOR (ui_scale cfg={}, {})",
+                os_native_scale(),
+                target,
+                ui_scale_cfg,
+                if ui_scale_cfg > 0.0 { "override" } else { "default→1.0" },
+            ),
+            None => tracing::info!(
+                "ui-scale: os-native≈{:.3} → left native, no SLINT_SCALE_FACTOR (ui_scale cfg={})",
+                os_native_scale(),
+                ui_scale_cfg,
+            ),
+        }
         register_fallback_fonts();
         let w = ui.as_weak();
         slint::Timer::single_shot(std::time::Duration::from_millis(700), move || {
@@ -334,6 +356,10 @@ fn main() -> anyhow::Result<()> {
         // (WASAPI loopback); macOS waits for phase 3. Gates the ◉ Record-system
         // buttons, the create-voice System chip, and the ⚙ tap picker.
         ui.set_system_capture_supported(cfg!(any(target_os = "linux", target_os = "windows")));
+        // Dictation ships on Linux (syrinx-dictate) and Windows (the global
+        // hotkey thread below); macOS waits for phase 3. Gates the whole ⚙
+        // DICTATION card rather than just the Hyprland bind hint.
+        ui.set_dictation_supported(cfg!(any(target_os = "linux", target_os = "windows")));
         // The ⚙ mic test has a level source on every platform: Win/mac read the
         // §14 engine recorder's RecordingLevel, Linux meters its own parecord
         // child app-side (the same capture path its real recordings use, so the
@@ -1117,10 +1143,22 @@ fn os_native_scale() -> f64 {
     }
     (unsafe { GetDpiForSystem() } as f64) / 96.0
 }
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
 fn os_native_scale() -> f64 {
-    // mac: no cheap pre-query; the effective window scale in the same log line
-    // is the meaningful number there.
+    // NSScreen.backingScaleFactor: 2.0 on Retina. Unlike the Windows DPI ratio
+    // this is pixel density, not user scaling, so it is expected to stay 2.0
+    // while the applied window scale factor below reads the same — see the
+    // SLINT_SCALE_FACTOR note in main(). Main-thread-only API; every caller is
+    // on the UI thread, and a headless/screen-less session yields NaN.
+    objc2::MainThreadMarker::new()
+        .and_then(objc2_app_kit::NSScreen::mainScreen)
+        .map(|s| s.backingScaleFactor())
+        .unwrap_or(f64::NAN)
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows"), not(target_os = "macos")))]
+fn os_native_scale() -> f64 {
+    // no cheap pre-query elsewhere; the effective window scale in the same log
+    // line is the meaningful number there.
     f64::NAN
 }
 

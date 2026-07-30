@@ -36,5 +36,12 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "net", "syn
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 
+# NSScreen.backingScaleFactor for the HiDPI diagnostic log. Both crates are
+# already in the graph (winit/slint pull the same 0.6/0.3 objc2 family), so this
+# only names what was there; MainThreadMarker comes from objc2 itself.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "objc2-core-foundation"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_LibraryLoader"] }

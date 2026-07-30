@@ -1366,6 +1366,10 @@ export component AppWindow inherits Window {
     // buttons, the create-voice System chip, and the ⚙ tap picker (but NOT the
     // is-linux ENGINE card or the Hyprland dictation hint).
     in property <bool> system-capture-supported: true;
+    // Dictation support — Linux (syrinx-dictate + compositor bind) and Windows
+    // (the global hotkey thread), not macOS yet. SET FROM RUST. Gates the whole
+    // ⚙ DICTATION card, heading included, so mac shows no dead affordance.
+    in property <bool> dictation-supported: true;
     // decorative titlebar chrome — SET FROM RUST per OS (Linux keeps the exact
     // "hyprland · workspace N"; Win/mac get an equivalently subtle string).
     in property <string> desktop-chrome: "hyprland · workspace 3";
@@ -2989,7 +2993,17 @@ export component AppWindow inherits Window {
 
                             Text { text: "AUDIO DEVICES"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             Rectangle {
-                                height: root.st-mic-test-supported ? 130px : 96px;
+                                // 62px of fixed chrome + mic dropdown, plus 34px
+                                // for each optional row: the mic meter and the
+                                // system-tap picker. Linux and Windows show both
+                                // (62+34+34 = the authored 130px, unchanged);
+                                // macOS has no system tap yet, so it lands on the
+                                // same 96px two-row height the meter-less case
+                                // already used — counting only one of the two
+                                // left a row's worth of dead space in the card.
+                                height: 62px
+                                    + (root.st-mic-test-supported ? 34px : 0px)
+                                    + (root.system-capture-supported ? 34px : 0px);
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
                                 border-radius: Theme.rad; background: Theme.card-bg;
                                 if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
@@ -3082,8 +3096,8 @@ export component AppWindow inherits Window {
                                 }
                             }
 
-                            Text { text: "DICTATION"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
-                            Rectangle {
+                            if root.dictation-supported : Text { text: "DICTATION"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
+                            if root.dictation-supported : Rectangle {
                                 height: 92px;
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
                                 border-radius: Theme.rad; background: Theme.card-bg;
