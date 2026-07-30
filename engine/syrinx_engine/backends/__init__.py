@@ -8,7 +8,7 @@ Two engines behind one interface, selected by ``SYRINX_TTS_ENGINE``:
   This is the one that lights up on the RTX 4090.
 
 Each backend implements the same small async interface:
-    .device -> str                       # "cuda" | "rocm" | "cpu"
+    .device -> str                       # "cuda" | "rocm" | "mps" | "cpu"
     .supports_cloning -> bool
     async load()
     async list_voices() -> list[VoiceInfo]
@@ -27,15 +27,31 @@ class VoiceInfo:
 
 
 def detect_device() -> str:
-    """Best available torch device: cuda / rocm / cpu."""
+    """Best available torch device: cuda / rocm / mps / cpu.
+
+    A discrete GPU outranks Metal: a machine can report both (an eGPU, or a
+    CUDA build under Rosetta), and the cuda path is the tuned one."""
     try:
         import torch
 
         if torch.cuda.is_available():
             return "rocm" if getattr(torch.version, "hip", None) else "cuda"
+        if torch.backends.mps.is_available():
+            return "mps"
     except Exception:  # noqa: BLE001
         pass
     return "cpu"
+
+
+# detected device -> the string torch's ``.to()`` / ``device_map`` accepts.
+# A ROCm build addresses the card as "cuda"; "mps" is torch's own name for
+# Metal and passes through. Anything else (incl. an unknown) lands on cpu.
+_TORCH_DEVICES = {"cuda": "cuda", "rocm": "cuda", "mps": "mps"}
+
+
+def torch_device(device: str) -> str:
+    """Torch's name for *device* (a ``detect_device()`` string)."""
+    return _TORCH_DEVICES.get(device, "cpu")
 
 
 def empty_device_cache() -> None:
@@ -45,6 +61,9 @@ def empty_device_cache() -> None:
 
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        elif torch.backends.mps.is_available():
+            # unified memory: this returns the Metal allocator's cached blocks
+            torch.mps.empty_cache()
     except Exception:  # noqa: BLE001
         pass
 

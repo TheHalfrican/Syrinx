@@ -152,7 +152,7 @@ def test_delete_model_of_an_unknown_id_is_a_no_op(iface):
 
 def test_properties(iface):
     assert iface._model_loaded is False
-    assert iface.backend_name in ("cpu", "cuda", "rocm")
+    assert iface.backend_name in ("cpu", "cuda", "rocm", "mps")
 
 
 # --- settings ------------------------------------------------------------

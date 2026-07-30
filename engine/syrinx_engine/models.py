@@ -18,6 +18,7 @@ import json
 import logging
 import os
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from fnmatch import fnmatch
@@ -233,6 +234,20 @@ def _total_ram_gb() -> float:
     return 0.0
 
 
+def _apple_chip_name() -> str:
+    """The marketing chip name ("Apple M3"), for the hardware line."""
+    try:
+        out = subprocess.run(
+            ["sysctl", "-n", "machdep.cpu.brand_string"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        if out:
+            return out
+    except Exception:  # noqa: BLE001
+        pass
+    return "Apple Silicon (MPS)"
+
+
 def detect_hardware() -> dict:
     cores = os.cpu_count() or 1
     ram_gb = _total_ram_gb()
@@ -246,6 +261,16 @@ def detect_hardware() -> dict:
             gpu = True
             gpu_name = torch.cuda.get_device_name(0)
             vram_gb = round(torch.cuda.get_device_properties(0).total_memory / 1024**3, 1)
+        elif torch.backends.mps.is_available():
+            gpu = True
+            gpu_name = _apple_chip_name()
+            # Unified memory has no VRAM figure; the Metal working-set limit is
+            # the real "can I fit this model" ceiling, so report that as vram_gb
+            # (~74% of physical RAM). Older torch lacks the API — 0.0 = unknown.
+            try:
+                vram_gb = round(torch.mps.recommended_max_memory() / 1024**3, 1)
+            except Exception:  # noqa: BLE001
+                pass
     except Exception:  # noqa: BLE001
         pass
     return {"cores": cores, "ram_gb": ram_gb, "gpu": gpu, "gpu_name": gpu_name,

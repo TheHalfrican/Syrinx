@@ -2,7 +2,8 @@
 
 The beefy engine: clones a voice from a short reference sample (+ its transcript)
 and speaks arbitrary text in it. ~3.5 GB (1.7B) / ~1.2 GB (0.6B). Wants a GPU —
-this is the one that lights up on the RTX 4090 (bf16 + TF32 + flash attention).
+this is the one that lights up on the RTX 4090 (bf16 + TF32 + flash attention)
+and on Apple Silicon (bf16 on MPS — fp16 overflows, see ``_load_checkpoint``).
 On CPU it still runs (float32), just slowly.
 
 Cloned voices persist to ``$SYRINX_DATA_DIR/voices`` (default the per-OS data
@@ -14,8 +15,8 @@ Grounded in the Voicebox pytorch_backend.py reference:
     model.create_voice_clone_prompt(ref_audio, ref_text, x_vector_only_mode=False)
     model.generate_voice_clone(text, voice_clone_prompt, language, instruct) -> (wavs, sr)
 
-NOTE: not exercised on this iGPU box — validated on the 4090. Marked TODO(syrinx)
-where a live-on-GPU check is still needed.
+NOTE: validated live on the 4090 (cuda) and the M3 (mps, 0.6B clone + speak).
+Marked TODO(syrinx) where a live-on-GPU check is still needed.
 """
 
 import asyncio
@@ -74,6 +75,46 @@ def _import_qwen_tts():
     return mod.Qwen3TTSModel
 
 
+def _load_checkpoint(model_path: str, device: str, label: str):
+    """``Qwen3TTSModel.from_pretrained`` with this device's dtype + tuning.
+
+    Three shapes, one per device family — shared by both qwen backends:
+
+    * **cuda/rocm** — bf16 + TF32 + flash attention (the RTX 4090 fast path,
+      see docs/HARDWARE.md).
+    * **mps** — bf16, and it has to be. fp16 loads and runs the talker fine
+      but overflows inside ``code_predictor.generate``: the sampler dies with
+      "probability tensor contains either `inf`, `nan` or element < 0"
+      (verified, M3 / torch 2.13). bf16's exponent range is what that stage
+      needs, and Metal has the kernels for it.
+    * **cpu** — fp32, correct everywhere and slow.
+    """
+    import torch
+
+    Qwen3TTSModel = _import_qwen_tts()
+
+    if device in ("cuda", "rocm"):
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        try:
+            torch.backends.cuda.enable_flash_sdp(True)
+        except Exception:  # noqa: BLE001
+            pass
+        log.info("loading %s on %s (bf16)...", label, device)
+        return Qwen3TTSModel.from_pretrained(
+            model_path, device_map=device, torch_dtype=torch.bfloat16
+        )
+    if device == "mps":
+        log.info("loading %s on mps (bf16)...", label)
+        return Qwen3TTSModel.from_pretrained(
+            model_path, device_map="mps", torch_dtype=torch.bfloat16
+        )
+    log.info("loading %s on cpu (float32 — slow)...", label)
+    return Qwen3TTSModel.from_pretrained(
+        model_path, torch_dtype=torch.float32, low_cpu_mem_usage=False
+    )
+
+
 def _slug(name: str) -> str:
     s = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
     return s or "voice"
@@ -111,28 +152,9 @@ class QwenBackend:
         await asyncio.to_thread(self._load_sync)
 
     def _load_sync(self) -> None:
-        import torch
-
-        Qwen3TTSModel = _import_qwen_tts()
-
-        model_path = MODELS[self.model_size]
-        if self.device in ("cuda", "rocm"):
-            # Ada/RTX 4090 fast path — see docs/HARDWARE.md.
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            try:
-                torch.backends.cuda.enable_flash_sdp(True)
-            except Exception:  # noqa: BLE001
-                pass
-            log.info("loading Qwen3-TTS %s on %s (bf16)...", self.model_size, self.device)
-            self._model = Qwen3TTSModel.from_pretrained(
-                model_path, device_map=self.device, torch_dtype=torch.bfloat16
-            )
-        else:
-            log.info("loading Qwen3-TTS %s on cpu (float32 — slow)...", self.model_size)
-            self._model = Qwen3TTSModel.from_pretrained(
-                model_path, torch_dtype=torch.float32, low_cpu_mem_usage=False
-            )
+        self._model = _load_checkpoint(
+            MODELS[self.model_size], self.device, f"Qwen3-TTS {self.model_size}"
+        )
         log.info("Qwen3-TTS %s loaded", self.model_size)
 
     def unload(self) -> None:
@@ -337,27 +359,9 @@ class QwenCustomVoiceBackend:
                     await asyncio.to_thread(self._load_sync)
 
     def _load_sync(self) -> None:
-        import torch
-
-        Qwen3TTSModel = _import_qwen_tts()
-
-        path = CV_MODELS[self.model_size]
-        if self.device in ("cuda", "rocm"):
-            torch.backends.cuda.matmul.allow_tf32 = True
-            torch.backends.cudnn.allow_tf32 = True
-            try:
-                torch.backends.cuda.enable_flash_sdp(True)
-            except Exception:  # noqa: BLE001
-                pass
-            log.info("loading Qwen CustomVoice %s on %s (bf16)...", self.model_size, self.device)
-            self._model = Qwen3TTSModel.from_pretrained(
-                path, device_map=self.device, torch_dtype=torch.bfloat16
-            )
-        else:
-            log.info("loading Qwen CustomVoice %s on cpu (float32 — slow)...", self.model_size)
-            self._model = Qwen3TTSModel.from_pretrained(
-                path, torch_dtype=torch.float32, low_cpu_mem_usage=False
-            )
+        self._model = _load_checkpoint(
+            CV_MODELS[self.model_size], self.device, f"Qwen CustomVoice {self.model_size}"
+        )
         log.info("Qwen CustomVoice %s loaded", self.model_size)
 
     def unload(self) -> None:

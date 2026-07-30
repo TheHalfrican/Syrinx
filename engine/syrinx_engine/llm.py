@@ -169,6 +169,19 @@ def _build_system_prompt(personality: str, task: str) -> str:
     return f"{_CHARACTER_FRAMING}\n\nCharacter description:\n{personality.strip()}\n\n{task}"
 
 
+def _pick_device(torch) -> str:
+    """cuda > mps > cpu. A ROCm build reports cuda and is addressed as cuda,
+    so — unlike CTranslate2 in stt.py — no HIP special case is needed here."""
+    if torch.cuda.is_available():
+        return "cuda"
+    try:
+        if torch.backends.mps.is_available():
+            return "mps"
+    except AttributeError:  # torch too old to know about Metal
+        pass
+    return "cpu"
+
+
 class PersonalityLLM:
     def __init__(self) -> None:
         self._model = None
@@ -197,9 +210,10 @@ class PersonalityLLM:
         import torch
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
-        self._device = "cuda" if torch.cuda.is_available() else "cpu"
+        self._device = _pick_device(torch)
         repo = _MODELS.get(self.model_size, self.model_size)  # allow a raw repo id too
-        dtype = torch.float16 if self._device == "cuda" else torch.float32
+        # half precision on both accelerators; cpu has no fp16 kernels worth having
+        dtype = torch.float32 if self._device == "cpu" else torch.float16
         log.info("loading LLM %s on %s (first run downloads weights)...", repo, self._device)
         self._tokenizer = AutoTokenizer.from_pretrained(repo)
         self._model = AutoModelForCausalLM.from_pretrained(repo, dtype=dtype)

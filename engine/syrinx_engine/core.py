@@ -155,7 +155,7 @@ class EngineCore:
 
     @property
     def backend_name(self) -> str:
-        return self._tts.backend  # "cuda" | "rocm" | "cpu"
+        return self._tts.backend  # "cuda" | "rocm" | "mps" | "cpu"
 
     async def warmup(self) -> None:
         """Load models in the background, then flip ModelLoaded.

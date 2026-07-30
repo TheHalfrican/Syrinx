@@ -620,6 +620,76 @@ def test_detect_hardware_without_torch_reports_no_gpu(monkeypatch):
     assert hw["vram_gb"] == 0.0
 
 
+# Apple silicon, exercised on ANY host: torch and sysctl are both stand-ins, so
+# the branch isn't dead code on the OS that happens to run the suite.
+
+
+def fake_mps_torch(recommended_max_memory=None):
+    mps = types.SimpleNamespace()
+    if recommended_max_memory is not None:
+        mps.recommended_max_memory = recommended_max_memory
+    return types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False),
+        backends=types.SimpleNamespace(mps=types.SimpleNamespace(is_available=lambda: True)),
+        mps=mps,
+    )
+
+
+def fake_sysctl(monkeypatch, stdout="Apple M3\n", boom=None):
+    def run(cmd, **kwargs):
+        assert cmd == ["sysctl", "-n", "machdep.cpu.brand_string"]
+        if boom:
+            raise boom
+        return types.SimpleNamespace(stdout=stdout)
+
+    monkeypatch.setattr(models.subprocess, "run", run)
+
+
+def test_detect_hardware_reports_metal_as_a_gpu(monkeypatch):
+    """Unified memory has no VRAM figure — the Metal working-set limit is the
+    honest "can I fit this model" number, so it is what vram_gb carries."""
+    monkeypatch.setitem(sys.modules, "torch",
+                        fake_mps_torch(lambda: 17.76 * 1024**3))
+    fake_sysctl(monkeypatch)
+    hw = models.detect_hardware()
+    assert hw["gpu"] is True
+    assert hw["gpu_name"] == "Apple M3"
+    assert hw["vram_gb"] == 17.8
+
+
+def test_detect_hardware_keeps_the_mac_gpu_without_the_memory_api(monkeypatch):
+    # torch too old for torch.mps.recommended_max_memory -> vram unknown, but
+    # the chip is still a GPU and must not be erased.
+    monkeypatch.setitem(sys.modules, "torch", fake_mps_torch())
+    fake_sysctl(monkeypatch)
+    hw = models.detect_hardware()
+    assert hw["gpu"] is True and hw["gpu_name"] == "Apple M3"
+    assert hw["vram_gb"] == 0.0
+
+
+@pytest.mark.parametrize("kwargs", [
+    {"stdout": "   \n"},                       # sysctl answered with nothing
+    {"boom": OSError("sysctl not found")},     # or isn't there at all
+])
+def test_apple_chip_name_falls_back(monkeypatch, kwargs):
+    fake_sysctl(monkeypatch, **kwargs)
+    assert models._apple_chip_name() == "Apple Silicon (MPS)"
+
+
+def test_hardware_warning_reads_sensibly_on_apple_silicon():
+    """The M3 shape: a real GPU with a working-set ceiling. A model that fits
+    warns about nothing; one that doesn't gets the VRAM line, not the
+    "no GPU detected" line."""
+    hw = {"cores": 8, "ram_gb": 24.0, "gpu": True,
+          "gpu_name": "Apple M3", "vram_gb": 17.8}
+    fits = models.spec("qwen-tts-0.6B")
+    assert models.hardware_warning(fits, hw) == ""
+    huge = models.ModelSpec("huge", "Huge", "voice", "qwen", "", [], 40_000, "",
+                            gpu_recommended=True, min_ram_gb=16.0, min_vram_gb=24.0)
+    assert "24 GB VRAM (have 17.8)" in models.hardware_warning(huge, hw)
+    assert "no GPU detected" not in models.hardware_warning(huge, hw)
+
+
 # --- download ------------------------------------------------------------
 
 

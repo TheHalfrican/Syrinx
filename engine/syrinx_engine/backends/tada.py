@@ -24,7 +24,7 @@ import os
 
 import numpy as np
 
-from . import detect_device, empty_device_cache
+from . import detect_device, empty_device_cache, torch_device
 from .. import chunking
 from ..dac_shim import install_dac_shim
 from ..paths import data_dir
@@ -60,7 +60,7 @@ class TadaBackend:
                     await asyncio.to_thread(self._load_sync)
 
     def _torch_device(self) -> str:
-        return "cuda" if self.device in ("cuda", "rocm") else "cpu"
+        return torch_device(self.device)
 
     def _load_sync(self) -> None:
         install_dac_shim()  # before any tada import

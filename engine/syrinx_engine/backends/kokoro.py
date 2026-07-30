@@ -10,7 +10,7 @@ import logging
 
 import numpy as np
 
-from . import VoiceInfo, detect_device
+from . import VoiceInfo, detect_device, torch_device
 from .. import chunking
 
 log = logging.getLogger("syrinx.engine.tts.kokoro")
@@ -51,7 +51,7 @@ class KokoroBackend:
     def _load_sync(self) -> None:
         from kokoro import KModel
 
-        device = "cuda" if self.device in ("cuda", "rocm") else "cpu"
+        device = torch_device(self.device)
         log.info("loading Kokoro-82M on %s (first run downloads ~330MB)...", device)
         self._model = KModel(repo_id=KOKORO_HF_REPO).to(device).eval()
         log.info("Kokoro-82M loaded")

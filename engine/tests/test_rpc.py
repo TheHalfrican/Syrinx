@@ -94,7 +94,8 @@ def test_authenticate_then_call_getters(tmp_path):
             async with connect(disc["url"]) as ws:
                 assert (await _send(ws, "Authenticate", [disc["token"]], 0))["result"] is True
                 assert (await _send(ws, "GetProtocolVersion", [], 1))["result"] == 1
-                assert (await _send(ws, "GetBackend", [], 2))["result"] in ("cpu", "cuda", "rocm")
+                assert (await _send(ws, "GetBackend", [], 2))["result"] in (
+                    "cpu", "cuda", "rocm", "mps")
                 assert (await _send(ws, "GetModelLoaded", [], 3))["result"] is False
                 assert (await _send(ws, "GetModelLoadError", [], 4))["result"] == ""
         finally:

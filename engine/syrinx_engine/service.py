@@ -30,7 +30,7 @@ class EngineInterface(ServiceInterface):
 
     @property
     def backend_name(self) -> str:
-        return self._core.backend_name  # "cuda" | "rocm" | "cpu"
+        return self._core.backend_name  # "cuda" | "rocm" | "mps" | "cpu"
 
     async def warmup(self) -> None:
         """Load models in the background, then flip ModelLoaded."""
