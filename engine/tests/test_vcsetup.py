@@ -5,11 +5,15 @@ streaming tests spawn ``sys.executable -c <fake>`` through the module's own
 ``_command`` seam, so the reader, the log tee, the stage parsing and the error
 detail are all exercised against a real child process — just a fast one.
 
-The per-OS branches are reached by flipping ``vcsetup._IS_WIN``, so both venv
-layouts and both script flavors are covered on whichever host OS is running.
+The per-OS branches are reached by flipping ``vcsetup._IS_WIN`` (behavior) and
+``vcsetup._PLATFORM`` (wording), so both venv layouts, both script flavors, all
+three interpreter searches and all three "no Python" sentences are covered on
+whichever host OS is running.
 """
 
 import asyncio
+import os
+import subprocess
 import sys
 
 import pytest
@@ -39,13 +43,22 @@ def log_for(setup_log, setup_id):
 
 @pytest.fixture
 def posix(monkeypatch):
-    """Pretend to be POSIX: no Python/Git bootstrap, one venv candidate."""
+    """Pretend to be Linux: no winget bootstrap, one venv candidate."""
     monkeypatch.setattr(vcsetup, "_IS_WIN", False)
+    monkeypatch.setattr(vcsetup, "_PLATFORM", "linux")
+
+
+@pytest.fixture
+def mac(monkeypatch):
+    """Pretend to be macOS: the POSIX branches, with macOS wording."""
+    monkeypatch.setattr(vcsetup, "_IS_WIN", False)
+    monkeypatch.setattr(vcsetup, "_PLATFORM", "darwin")
 
 
 @pytest.fixture
 def windows(monkeypatch):
     monkeypatch.setattr(vcsetup, "_IS_WIN", True)
+    monkeypatch.setattr(vcsetup, "_PLATFORM", "win32")
 
 
 # --- the table -----------------------------------------------------------
@@ -376,6 +389,167 @@ def test_winget_that_installs_nothing_still_ends_with_advice(monkeypatch, window
     assert "install Python 3.12 from python.org, then click Install again." in str(ei.value)
 
 
+# --- resolve_python on POSIX ---------------------------------------------
+#
+# Three candidates, tried in order, each one a different kind of box:
+# `python3.12` on PATH (Linux, and what the scripts' own default resolves to),
+# our own base interpreter (the Finder-launched macOS app, whose PATH has four
+# entries and none of them ~/.local/bin), and `uv python find`.
+
+
+@pytest.fixture
+def posix_probes(monkeypatch):
+    """Take control of all three POSIX finders; returns the knobs.
+
+    Every one of them is mocked in every test here — a real ``shutil.which``
+    or a real ``uv`` on the developer's box would make the candidate ORDER
+    unobservable, which is the entire thing under test.
+    """
+    knobs = {"which": "", "base": "", "uv": ""}
+    monkeypatch.setattr(vcsetup.shutil, "which",
+                        lambda name: knobs["which"] if name == "python3.12" else "")
+    monkeypatch.setattr(vcsetup, "_base_python", lambda: knobs["base"])
+    monkeypatch.setattr(vcsetup, "_uv_python", lambda: knobs["uv"])
+    return knobs
+
+
+def test_posix_prefers_python312_on_path(monkeypatch, posix, posix_probes):
+    """Linux's historical answer stays Linux's answer: the interpreter the
+    scripts' bare `python3.12` would have found is probed FIRST, so setting
+    the variable changes nothing there."""
+    posix_probes.update(which="/usr/bin/python3.12", base="/opt/base/python3.12",
+                        uv="/uv/python3.12")
+    monkeypatch.setattr(vcsetup, "_probe_python", lambda argv: argv[0])
+    assert vcsetup.resolve_python("luxtts") == "/usr/bin/python3.12"
+
+
+def test_posix_falls_back_to_our_own_base_interpreter(monkeypatch, mac, posix_probes):
+    """The macOS fix (field report 2026-07-30): nothing named python3.12 is on
+    the app's PATH, but a CPython 3.12 is demonstrably running us."""
+    posix_probes.update(which="", base="/uv/cpython-3.12/bin/python3.12",
+                        uv="/never/reached")
+    probed = []
+
+    def probe(argv):
+        probed.append(argv)
+        return argv[0]
+
+    monkeypatch.setattr(vcsetup, "_probe_python", probe)
+    assert vcsetup.resolve_python("luxtts") == "/uv/cpython-3.12/bin/python3.12"
+    assert probed == [["/uv/cpython-3.12/bin/python3.12"]]
+
+
+def test_posix_asks_uv_last(monkeypatch, mac, posix_probes):
+    """A uv-managed 3.12 that did not build our venv is on no PATH at all."""
+    posix_probes.update(uv="/uv/pythons/3.12/bin/python3")
+    monkeypatch.setattr(vcsetup, "_probe_python", lambda argv: argv[0])
+    assert vcsetup.resolve_python("luxtts") == "/uv/pythons/3.12/bin/python3"
+
+
+def test_a_candidate_that_fails_the_probe_is_skipped(monkeypatch, posix, posix_probes):
+    """A python3.12 on PATH that cannot make a venv (a distro that split
+    python3.12-venv out into its own package) must not win by being first."""
+    posix_probes.update(which="/usr/bin/python3.12", base="/opt/base/python3.12")
+    monkeypatch.setattr(vcsetup, "_probe_python",
+                        lambda argv: "" if argv == ["/usr/bin/python3.12"] else argv[0])
+    assert vcsetup.resolve_python("luxtts") == "/opt/base/python3.12"
+
+
+def test_posix_never_reaches_the_winget_bootstrap(monkeypatch, posix, posix_probes):
+    """winget is a Windows program; the POSIX miss is a message, not an install."""
+    monkeypatch.setattr(vcsetup, "_probe_python", lambda argv: "")
+    monkeypatch.setattr(vcsetup, "_winget",
+                        lambda: pytest.fail("winget probed on POSIX"))
+    with pytest.raises(vcsetup.VcSetupError) as ei:
+        vcsetup.resolve_python("luxtts")
+    assert "python3.12 package" in str(ei.value)  # the Linux sentence
+
+
+def test_the_no_python_advice_names_this_platforms_installer(monkeypatch, mac,
+                                                             posix_probes):
+    """Sending a Mac user to python.org (or a Linux user to winget) is the one
+    piece of advice that guarantees the next click fails the same way."""
+    monkeypatch.setattr(vcsetup, "_probe_python", lambda argv: "")
+    with pytest.raises(vcsetup.VcSetupError) as ei:
+        vcsetup.resolve_python("luxtts")
+    msg = str(ei.value)
+    assert "brew install python@3.12" in msg
+    assert "uv python install 3.12" in msg
+    assert "python.org" not in msg
+    assert "winget" not in msg
+
+
+def test_a_broken_explicit_override_is_still_a_hard_error_on_posix(monkeypatch, mac):
+    """The override's semantics are per-user intent, not per-OS: extending the
+    search to POSIX must not turn a wrong SYRINX_LUXTTS_PYTHON into a silent
+    fallback onto some other interpreter."""
+    monkeypatch.setenv("SYRINX_LUXTTS_PYTHON", "/nope/python3.12")
+    monkeypatch.setattr(vcsetup, "_base_python",
+                        lambda: pytest.fail("fell back past a bad override"))
+    with pytest.raises(vcsetup.VcSetupError) as ei:
+        vcsetup.resolve_python("luxtts")
+    assert "SYRINX_LUXTTS_PYTHON" in str(ei.value)
+
+
+def test_our_own_base_interpreter_answers_the_probe():
+    """Candidate 2 is only an answer if the interpreter running this engine can
+    itself build a venv. It can: a distro python3.12 has venv+ensurepip, and so
+    do uv's python-build-standalone builds — which is the whole reason a
+    uv-managed Mac with no python3.12 on PATH is still installable."""
+    found = vcsetup._base_python()
+    assert found and os.path.isfile(found)
+    if sys.version_info[:2] == (3, 12):  # the probe's own version gate
+        assert vcsetup._probe_python([found]) == found
+
+
+def test_base_python_walks_base_prefix_when_the_attribute_is_missing(monkeypatch,
+                                                                    tmp_path):
+    """An embedder can leave sys._base_executable unset (or stale)."""
+    monkeypatch.setattr(vcsetup.sys, "_base_executable", "", raising=False)
+    monkeypatch.setattr(vcsetup.sys, "base_prefix", str(tmp_path))
+    assert vcsetup._base_python() == ""  # nothing there yet
+    exe = tmp_path / "bin" / f"python{sys.version_info[0]}.{sys.version_info[1]}"
+    exe.parent.mkdir(parents=True)
+    exe.write_text("#!/bin/sh\n")
+    assert vcsetup._base_python() == str(exe)
+
+
+def uv_run(monkeypatch, result):
+    """Point vcsetup's `uv python find` at *result* (an exception or a
+    CompletedProcess)."""
+    def run(argv, **kwargs):
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(vcsetup.subprocess, "run", run)
+
+
+def test_no_uv_on_the_box_is_just_the_next_candidate(monkeypatch):
+    monkeypatch.setattr(vcsetup.shutil, "which", lambda name: "")
+    assert vcsetup._uv_python() == ""
+
+
+@pytest.mark.parametrize("result", [
+    OSError("uv vanished mid-probe"),
+    subprocess.CompletedProcess([], 2, "", "no interpreter found for 3.12"),
+    subprocess.CompletedProcess([], 0, "\n", ""),
+])
+def test_a_uv_that_cannot_answer_is_not_an_error(monkeypatch, result):
+    """uv is optional and its output is a guess like every other candidate's;
+    a traceback out of an Install click is never the right answer."""
+    monkeypatch.setattr(vcsetup.shutil, "which", lambda name: "/opt/bin/uv")
+    uv_run(monkeypatch, result)
+    assert vcsetup._uv_python() == ""
+
+
+def test_uv_python_find_returns_the_path_it_printed(monkeypatch):
+    monkeypatch.setattr(vcsetup.shutil, "which", lambda name: "/opt/bin/uv")
+    uv_run(monkeypatch,
+           subprocess.CompletedProcess([], 0, "\n/uv/py312/bin/python3\n", ""))
+    assert vcsetup._uv_python() == "/uv/py312/bin/python3"
+
+
 def test_git_already_present_adds_nothing_to_path(monkeypatch):
     monkeypatch.setattr(vcsetup, "_git_works", lambda exe: exe == "git")
     assert vcsetup.ensure_git() == ""
@@ -417,12 +591,25 @@ def fake_script(tmp_path, body, name="fake-setup.py"):
     return path
 
 
-def run_install(monkeypatch, tmp_path, body, setup_id="seedvc"):
-    """Drive a whole install against a fake child; returns (ok, events)."""
-    script = fake_script(tmp_path, body)
+def stub_spawn(monkeypatch, script):
+    """The four seams between the runner and a real install: which script,
+    what argv, which OS, and which base interpreter the child is handed.
+
+    ``resolve_python`` is stubbed rather than run because it probes real
+    interpreters with real subprocesses — its answer is the host's business,
+    and every test below cares only that the *result* reaches the child.
+    """
     monkeypatch.setattr(vcsetup, "_IS_WIN", False)  # skip the Windows bootstrap
     monkeypatch.setattr(vcsetup, "script_path", lambda sid: script)
     monkeypatch.setattr(vcsetup, "_command", lambda s: [sys.executable, str(s)])
+    monkeypatch.setattr(vcsetup, "resolve_python",
+                        lambda sid, on_stage=None: sys.executable)
+
+
+def run_install(monkeypatch, tmp_path, body, setup_id="seedvc"):
+    """Drive a whole install against a fake child; returns (ok, events)."""
+    script = fake_script(tmp_path, body)
+    stub_spawn(monkeypatch, script)
     events = []
     mgr = vcsetup.VcSetupManager()
     assert mgr.claim(setup_id) is True
@@ -715,6 +902,64 @@ def test_the_child_environment_carries_the_quiet_flags(monkeypatch, tmp_path, se
     assert seen["SYRINX_VC_VENV_DIR"] is None
 
 
+PY_ENV_SCRIPT = (
+    "import json, os, sys\n"
+    "sys.stdout.write(json.dumps({k: os.environ.get(k) for k in ("
+    "'SYRINX_LUXTTS_PYTHON','SYRINX_VC_VENV_DIR')}) + '\\n')\n"
+)
+
+
+@pytest.mark.parametrize("is_win", [False, True])
+def test_the_child_is_told_which_python_to_build_its_venv_from(
+        monkeypatch, tmp_path, setup_log, isolated_env, is_win):
+    """On EVERY platform, not just Windows.
+
+    The scripts default to a bare ``python3.12``, which is a name and not a
+    location. It is the right name on Linux, absent on a stock Windows box,
+    and absent from the four-entry PATH a Finder-launched macOS app inherits —
+    where the install died with "python3.12: command not found" even though a
+    3.12 was running the engine (field report, 2026-07-30). Resolving it in the
+    parent and passing the path is what makes all three the same story.
+    """
+    script = fake_script(tmp_path, PY_ENV_SCRIPT)
+    stub_spawn(monkeypatch, script)
+    monkeypatch.setattr(vcsetup, "_IS_WIN", is_win)
+    monkeypatch.setattr(vcsetup, "resolve_python",
+                        lambda sid, on_stage=None: "/resolved/python3.12")
+    monkeypatch.setattr(vcsetup, "ensure_git", lambda on_stage=None: "")
+    events = []
+    mgr = vcsetup.VcSetupManager()
+    mgr.claim("luxtts")
+    assert asyncio.run(mgr.install("luxtts", lambda *a: events.append(a))) is True
+
+    import json
+
+    seen = json.loads(log_for(setup_log, "luxtts").read_text(encoding="utf-8").strip())
+    assert seen["SYRINX_LUXTTS_PYTHON"] == "/resolved/python3.12"
+    # …while the venv relocation stays the Windows-only half of the block
+    assert (seen["SYRINX_VC_VENV_DIR"] is not None) is is_win
+
+
+def test_an_unresolvable_python_fails_the_install_with_its_own_sentence(
+        monkeypatch, tmp_path, setup_log):
+    """resolve_python raises VcSetupError, and the runner already turns that
+    into the banner — so the user reads "install Python 3.12 …", never a
+    traceback and never a spawn error from a script that got no interpreter."""
+    script = fake_script(tmp_path, "pass\n")
+    stub_spawn(monkeypatch, script)
+
+    def boom(sid, on_stage=None):
+        raise vcsetup.VcSetupError("no usable Python 3.12 was found — do the thing.")
+
+    monkeypatch.setattr(vcsetup, "resolve_python", boom)
+    events = []
+    mgr = vcsetup.VcSetupManager()
+    mgr.claim("luxtts")
+    assert asyncio.run(mgr.install("luxtts", lambda *a: events.append(a))) is False
+    assert events[-1][2] == "error"
+    assert "no usable Python 3.12 was found" in events[-1][3]
+
+
 # --- claim / cancel ------------------------------------------------------
 
 
@@ -731,9 +976,7 @@ def test_claim_is_a_synchronous_check_and_set():
 
 def test_a_finished_install_releases_its_claim(monkeypatch, tmp_path):
     script = fake_script(tmp_path, "pass\n")
-    monkeypatch.setattr(vcsetup, "_IS_WIN", False)
-    monkeypatch.setattr(vcsetup, "script_path", lambda sid: script)
-    monkeypatch.setattr(vcsetup, "_command", lambda s: [sys.executable, str(s)])
+    stub_spawn(monkeypatch, script)
     mgr = vcsetup.VcSetupManager()
     mgr.claim("seedvc")
     asyncio.run(mgr.install("seedvc", lambda *a: None))
@@ -752,9 +995,7 @@ def test_cancel_kills_the_child_and_reports_cancelled(monkeypatch, tmp_path):
     """A cancel is a user decision, not a failure: the app quietly returns the
     row to its Install state, so this must NOT come back as an error."""
     script = fake_script(tmp_path, "import time\ntime.sleep(30)\n")
-    monkeypatch.setattr(vcsetup, "_IS_WIN", False)
-    monkeypatch.setattr(vcsetup, "script_path", lambda sid: script)
-    monkeypatch.setattr(vcsetup, "_command", lambda s: [sys.executable, str(s)])
+    stub_spawn(monkeypatch, script)
     events = []
     mgr = vcsetup.VcSetupManager()
     mgr.claim("seedvc")
@@ -775,9 +1016,7 @@ def test_a_second_setup_waits_for_the_first(monkeypatch, tmp_path):
     """Both setups install torch; running them at once would double the
     download and thrash a small disk."""
     script = fake_script(tmp_path, "import time\ntime.sleep(0.3)\n")
-    monkeypatch.setattr(vcsetup, "_IS_WIN", False)
-    monkeypatch.setattr(vcsetup, "script_path", lambda sid: script)
-    monkeypatch.setattr(vcsetup, "_command", lambda s: [sys.executable, str(s)])
+    stub_spawn(monkeypatch, script)
     events = []
     mgr = vcsetup.VcSetupManager()
     mgr.claim("seedvc")

@@ -39,9 +39,12 @@ from pathlib import Path
 
 from .paths import data_dir, worker_log_path
 
-# Module-level switch rather than an inline ``sys.platform`` test so the per-OS
-# branches (venv layout, which script, whether to bootstrap Python/Git) are all
-# reachable from a test suite that only ever runs on one host OS.
+# Module-level switches rather than inline ``sys.platform`` tests so the per-OS
+# branches (venv layout, which script, which interpreter search, whether to
+# bootstrap Python/Git) are all reachable from a test suite that only ever runs
+# on one host OS. ``_PLATFORM`` is the three-way for wording that names a
+# package manager; ``_IS_WIN`` stays the two-way for behavior.
+_PLATFORM = sys.platform
 _IS_WIN = sys.platform == "win32"
 
 # The package dir; ``script_path`` walks up from here. Module-level so tests can
@@ -131,7 +134,22 @@ _PROBE_CODE = (
     "print('syrinx-python', sys.version_info[0], sys.version_info[1], sys.executable)"
 )
 
-_NO_PYTHON = ("install Python 3.12 from python.org, then click Install again.")
+# What to tell the user when no interpreter answers, per OS — the same shape as
+# the SoX hint in backends/qwen.py. Windows is the only platform we bootstrap a
+# Python on, so its sentence is what is left after winget came up empty; naming
+# python.org on a Mac or a Linux box would send the user to the one installer
+# their machine does NOT want.
+_NO_PYTHON_HINTS = {
+    "win32": "install Python 3.12 from python.org, then click Install again.",
+    "darwin": "install Python 3.12 (brew install python@3.12, or "
+              "uv python install 3.12), then click Install again.",
+    "linux": "install your distribution's python3.12 package, then click "
+             "Install again.",
+}
+
+
+def _no_python() -> str:
+    return _NO_PYTHON_HINTS.get(_PLATFORM, "install Python 3.12, then click Install again.")
 
 
 # --- locations --------------------------------------------------------------
@@ -268,7 +286,7 @@ def installed(setup_id: str) -> bool:
     return True
 
 
-# --- Windows prerequisites --------------------------------------------------
+# --- prerequisites: a base Python 3.12 (and, on Windows, Git) ---------------
 
 
 def _probe_python(argv: "list[str]") -> str:
@@ -305,7 +323,7 @@ def _fixed_python_candidates() -> "list[list[str]]":
 
 
 def _python_candidates() -> "list[list[str]]":
-    """The full pre-winget probe order."""
+    """The full pre-winget probe order (Windows)."""
     # `py -3.12` first: the launcher knows about every registered install,
     # including ones in directories we'd never guess.
     cands = [["py", "-3.12"]]
@@ -315,6 +333,72 @@ def _python_candidates() -> "list[list[str]]":
         if found:
             cands.append([found])
     return cands
+
+
+def _base_python() -> str:
+    """The interpreter our OWN venv was built from, or ``""``.
+
+    The self-answer: any box that is running this engine has a working CPython
+    3.12 on it by definition — the one that built ``engine/.venv``. ``venv``
+    itself uses ``sys._base_executable`` for exactly this, and it is the only
+    attribute that names the real binary rather than the venv's shim; the
+    ``base_prefix`` walk covers an embedder that left it unset.
+    """
+    base = getattr(sys, "_base_executable", "") or ""
+    if base and Path(base).is_file():
+        return base
+    prefix = Path(sys.base_prefix)
+    for name in (f"python{sys.version_info[0]}.{sys.version_info[1]}", "python3"):
+        cand = prefix / "bin" / name
+        if cand.is_file():
+            return str(cand)
+    return ""
+
+
+def _uv_python() -> str:
+    """What ``uv python find 3.12`` points at, or ``""`` — guarded end to end.
+
+    uv keeps its interpreter downloads in its own data directory and off PATH,
+    so a box whose only 3.12 is a uv one that did not happen to build our venv
+    is invisible to every other probe. uv being absent, old, or answering
+    "no such version" are all just "next candidate", never an error.
+    """
+    uv = shutil.which("uv")
+    if not uv:
+        return ""
+    try:
+        out = subprocess.run([uv, "python", "find", "3.12"], capture_output=True,
+                             text=True, timeout=60, **_NO_WINDOW)
+    except (OSError, subprocess.SubprocessError):
+        return ""
+    if out.returncode != 0:
+        return ""
+    for line in (out.stdout or "").splitlines():
+        if line.strip():
+            return line.strip()
+    return ""
+
+
+def _posix_python_candidates():
+    """The POSIX probe order, best first — a generator because step 3 costs a
+    subprocess of its own, which a box that answered at step 1 must not pay.
+
+    1. ``python3.12`` on PATH. This is what the setup scripts' own
+       ``${SYRINX_*_PYTHON:-python3.12}`` default has always resolved to, so
+       probing it first keeps Linux landing on the exact same interpreter it
+       lands on today — the change is a no-op there by construction.
+    2. Our own base interpreter (see :func:`_base_python`). This is the macOS
+       fix: the app's LaunchServices environment hands the engine a four-entry
+       PATH with no ``~/.local/bin`` in it, so on a uv-managed Mac step 1 finds
+       nothing and the script died with "python3.12: command not found" (field
+       report, 2026-07-30) even though a perfectly good 3.12 was running it.
+    3. ``uv python find 3.12`` — the last resort for a 3.12 that exists but is
+       neither on PATH nor ours.
+    """
+    for finder in (lambda: shutil.which("python3.12"), _base_python, _uv_python):
+        found = finder()
+        if found:
+            yield [found]
 
 
 def _winget() -> str:
@@ -350,8 +434,15 @@ def _winget_install(winget: str, package_id: str) -> None:
 def resolve_python(setup_id: str, on_stage=None) -> str:
     """A venv-capable Python 3.12 for *setup_id*, installing one if need be.
 
-    Windows only — POSIX boxes that can run Syrinx already have python3. Raises
-    :class:`VcSetupError` with a user-facing sentence when it comes up empty.
+    Every platform. It used to be Windows-only, on the theory that "a POSIX box
+    that can run Syrinx already has python3" — true, but the scripts asked for
+    it by the bare name ``python3.12``, and a macOS app launched from Finder
+    inherits a PATH that a uv-managed 3.12 is not on. Probing beats naming.
+
+    The bootstrap tail (winget) stays Windows-only: it is the one platform
+    where a missing Python is something we can fix for the user unattended.
+    Raises :class:`VcSetupError` with a user-facing sentence when it comes up
+    empty.
     """
     s = SETUPS[setup_id]
     explicit = os.environ.get(s.py_env, "")
@@ -365,15 +456,17 @@ def resolve_python(setup_id: str, on_stage=None) -> str:
                 "Python 3.12 (it needs the venv and ensurepip modules)."
             )
         return found
-    for argv in _python_candidates():
+    for argv in (_python_candidates() if _IS_WIN else _posix_python_candidates()):
         found = _probe_python(argv)
         if found:
             return found
+    if not _IS_WIN:
+        raise VcSetupError(f"no usable Python 3.12 was found — {_no_python()}")
     winget = _winget()
     if not winget:
         raise VcSetupError(
             "no Python 3.12 was found on this PC and winget is not available "
-            f"to install one — {_NO_PYTHON}"
+            f"to install one — {_no_python()}"
         )
     if on_stage:
         on_stage("installing Python 3.12…")
@@ -382,7 +475,8 @@ def resolve_python(setup_id: str, on_stage=None) -> str:
         found = _probe_python(argv)
         if found:
             return found
-    raise VcSetupError(f"Python 3.12 could not be installed automatically — {_NO_PYTHON}")
+    raise VcSetupError(
+        f"Python 3.12 could not be installed automatically — {_no_python()}")
 
 
 def _git_works(exe: str) -> bool:
@@ -610,8 +704,16 @@ class VcSetupManager:
             "SYRINX_VEVO_AMPHION": str(amphion_dir()),
         })
 
+        # Every platform. The scripts default to a bare `python3.12`, which is
+        # a name, not a location: it is right on Linux, absent on a stock
+        # Windows box, and absent from the four-entry PATH a Finder-launched
+        # macOS app hands us even when a 3.12 is running this very process
+        # (field report, 2026-07-30). Resolving it here tells the child exactly
+        # which interpreter to build its venv from — and on Linux that is the
+        # same one the bare name already resolved to, so nothing moves.
+        env[s.py_env] = resolve_python(s.id, stage)
+
         if _IS_WIN:
-            env[s.py_env] = resolve_python(s.id, stage)
             if s.needs_git:
                 extra_path = ensure_git(stage)
                 if extra_path:

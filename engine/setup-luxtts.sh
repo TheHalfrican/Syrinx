@@ -47,11 +47,14 @@ fi
 # ships no wheel for Windows at all; left alone, pip fetches that sdist and
 # tries to compile C++ and espeak-ng, which is the one thing a stock box cannot
 # do. The find-links index below is csukuangfj's (k2-fsa) maintained fork,
-# carrying cp37–cp314 wheels for win_amd64 and manylinux, and each wheel bundles
-# the espeak-ng shared libraries AND its data directory, so the venv is
-# self-contained and nothing has to be installed system-wide. Doing it first
-# means that by the time LuxTTS's dependency graph is resolved pip already sees
-# piper-phonemize satisfied and never reaches for the dead upstream.
+# carrying cp37–cp314 wheels for win_amd64, manylinux AND macosx arm64 (the
+# last one confirmed on 2026-07-30 by an install on an M3:
+# piper_phonemize-1.4.7-cp312-cp312-macosx_11_0_arm64.whl, 9.6 MB — so the
+# documented `piper-phonemize-fix` fallback is not needed on Apple silicon).
+# Each wheel bundles the espeak-ng shared libraries AND its data directory, so
+# the venv is self-contained and nothing has to be installed system-wide. Doing
+# it first means that by the time LuxTTS's dependency graph is resolved pip
+# already sees piper-phonemize satisfied and never reaches for the dead upstream.
 # If that index ever goes away, the fallback is PyPI's `piper-phonemize-fix`.
 echo "== syrinx-stage: phonemize"
 "$VENV"/bin/pip install \
