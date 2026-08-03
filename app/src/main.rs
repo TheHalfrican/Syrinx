@@ -3189,6 +3189,26 @@ fn build_captures(json: &str) -> Vec<CaptureItem> {
         .collect()
 }
 
+/// Extensions the engine reads directly.
+const AUDIO_EXTS: &[&str] = &["wav", "flac", "ogg", "mp3", "m4a", "opus"];
+
+/// Video containers the engine extracts the default audio stream from
+/// (RPC-PROTOCOL.md §4 — every path-taking method accepts these). `webm` lives
+/// here rather than with the audio formats because it IS a video container;
+/// an audio-only one now decodes through the same extraction.
+const VIDEO_EXTS: &[&str] = &["mp4", "mov", "mkv", "webm", "avi", "m4v"];
+
+/// The picker every audio-import point opens. Source audio often arrives inside
+/// a video file, so the DEFAULT (first) filter shows both and the split filters
+/// follow for narrowing.
+fn import_dialog() -> rfd::AsyncFileDialog {
+    let both: Vec<&str> = AUDIO_EXTS.iter().chain(VIDEO_EXTS).copied().collect();
+    rfd::AsyncFileDialog::new()
+        .add_filter("Audio or video", &both)
+        .add_filter("Audio", AUDIO_EXTS)
+        .add_filter("Video", VIDEO_EXTS)
+}
+
 /// Export dialogs start in the Settings-tab folder when one is set.
 fn export_dialog(cfg_dir: &str) -> rfd::AsyncFileDialog {
     let dlg = rfd::AsyncFileDialog::new();
@@ -4748,11 +4768,7 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::CvPickFile) => {
-                    if let Some(handle) = rfd::AsyncFileDialog::new()
-                        .add_filter("Audio", &["wav", "flac", "ogg", "mp3", "m4a", "opus"])
-                        .pick_file()
-                        .await
-                    {
+                    if let Some(handle) = import_dialog().pick_file().await {
                         cv_sample = Some(handle.path().to_string_lossy().to_string());
                         let label = handle.file_name();
                         ui.upgrade_in_event_loop(move |ui| ui.set_cv_sample_label(label.into())).ok();
@@ -5426,11 +5442,7 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::TrPickFile) => {
-                    if let Some(handle) = rfd::AsyncFileDialog::new()
-                        .add_filter("Audio", &["wav", "mp3", "flac", "ogg", "m4a", "opus", "webm"])
-                        .pick_file()
-                        .await
-                    {
+                    if let Some(handle) = import_dialog().pick_file().await {
                         let path = handle.path().to_string_lossy().to_string();
                         // an imported file replaces the source the last take's
                         // silence warning was about
@@ -5657,11 +5669,7 @@ async fn run_session(
                     }
                 }
                 Some(Cmd::VcPickFile) => {
-                    if let Some(handle) = rfd::AsyncFileDialog::new()
-                        .add_filter("Audio", &["wav", "mp3", "flac", "ogg", "m4a", "opus", "webm"])
-                        .pick_file()
-                        .await
-                    {
+                    if let Some(handle) = import_dialog().pick_file().await {
                         let name = handle.file_name();
                         let path = handle.path().to_string_lossy().to_string();
                         vc_source = Some(path.clone());
@@ -6667,6 +6675,21 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         assert!(json.contains("\"stop_engine_on_quit\":false"));
         assert!(!serde_json::from_str::<AppConfig>(&json).unwrap().stop_engine_on_quit);
+    }
+
+    // --- import filters --------------------------------------------------
+
+    #[test]
+    fn the_import_filter_lists_are_disjoint_and_lowercase_bare_extensions() {
+        for ext in AUDIO_EXTS.iter().chain(VIDEO_EXTS) {
+            assert!(!ext.starts_with('.'), "{ext}: rfd wants bare extensions");
+            assert_eq!(*ext, ext.to_lowercase(), "{ext}: filters match lowercased");
+        }
+        // webm belongs to exactly one list — a duplicate would show up twice in
+        // the combined default filter
+        for a in AUDIO_EXTS {
+            assert!(!VIDEO_EXTS.contains(a), "{a} is in both lists");
+        }
     }
 
     // --- fmt_dur ---------------------------------------------------------

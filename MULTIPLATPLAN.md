@@ -1566,6 +1566,80 @@ vc-setup flakes passed on the re-run), snapshot variants `tr-rename` /
 `narrow` from the window width, so the 165 px rail is checked too), dev
 bundle reinstalled.
 
+**2026-08-03 (feature) — every import point takes video files.** Source
+audio lives inside video more often than not (a lecture mp4, a music
+video, a phone take), and the workflow was: strip the audio in Ableton
+first, then import. The decoder was already installed — **PyAV 18.0** is
+a faster-whisper dependency, i.e. FFmpeg's demuxers/decoders sitting in
+`engine/.venv` unused — so this is a new module, not a new dependency
+(`av>=11` is now *named* in `engine/pyproject.toml` + the CI test-dep
+line, alongside librosa, for the same reason librosa is spelled out
+there: skipping the tests would drop the new code below the gate).
+**One chokepoint:** `syrinx_engine/media.py` — `resolve(path)` returns
+audio paths unchanged and hands back an extracted WAV for a video
+container, `await asyncio.to_thread`'d because decode is fast but not
+free. Detection is an **extension allowlist**
+(`.mp4/.mov/.mkv/.webm/.avi/.m4v`), never sniffing: a file that lies
+about being a WAV keeps failing at the decoder that reads it, which is
+predictable, and mislabeled files are rare. `.webm` moves from the app's
+*Audio* filter to *Video* — it IS a container, and routing audio-only
+webm through extraction is a straight upgrade because soundfile cannot
+read one at all. Extractions land in
+`$SYRINX_DATA_DIR/video_audio/<stem>-<sha1-16>.wav` (the `vc_pitch` /
+`recordings` layout), keyed on the source's **(resolved path, mtime,
+size)** — so the one video the app hands to TranscribeFile, then
+FileEnvelope, then PlayFile, then ConvertVoice, then SaveSourceClip
+decodes exactly **once**; a re-encoded source at the same path misses
+and re-extracts. Lifecycle is cache, not store: nothing references them
+by id, `_prune` evicts newest-first past 2 GiB (a feature-length film's
+PCM16 audio clears a gigabyte) and sweeps `.part` files older than an
+hour, and each decode writes a uuid-suffixed `.part` unlinked in a
+`finally`, so a kill mid-decode leaves no truncated WAV posing as a
+cache hit. Output preserves the **source rate and channel count** (only
+the sample format is resampled, planar float → packed s16) and is
+**PCM16**, the subtype every other import path already produces
+(`TrimAudio`, `_pitch_shift_wav`, the recorders). **No new RPC** — §0/§11
+counts unchanged at 73/11/3; the ten path-taking methods
+(`Transcribe`, `TranscribeFile`, `ConvertVoice`, `SuggestPitchShift`,
+`CloneVoice`, `AddSample`, `SaveSourceClip`, `PlayFile`/`PlayFileAt`,
+`FileEnvelope`, `TrimAudio`) just became container-tolerant, and each
+failure rides that method's **existing** surface (raise / `error=true` /
+`""` / `0` / `"{}"`) with one sentence: `no audio track in <name>`.
+RPC-PROTOCOL.md gains a normative paragraph at the head of §4 plus
+amended `SaveSourceClip` / `TrimAudio` rows. Three call-site notes: (1)
+`_start_convert` resolves into a local `source` and leaves `audio_path`
+the **original**, so the stored `vc_json` recipe pins the video the user
+picked and Regenerate re-extracts (mtime/size freshness still measured
+against a file the user can see); (2) `TrimAudio` siblings a
+`-trimmed.wav` for a video source instead of its usual in-place WAV
+rewrite — the extraction is shared cache, and rewriting it would hand
+the trimmed take to every later import of that video; (3)
+`PlayFile`/`PlayFileAt`/`FileEnvelope` go through `EngineCore._source`,
+which logs a failed extraction and returns the original so their
+already-documented unreadable-path outcome reports it once, rather than
+turning a tolerant method into a raising one. App: the three pickers
+(`CvPickFile`, `TrPickFile`, `VcPickFile`) collapse onto one
+`import_dialog()` whose **default (first) filter is "Audio or video"**,
+with "Audio" and "Video" following for narrowing — no other UI change,
+no `.slint` touched, no snapshots. **Nothing reads imported audio
+app-side** (verified): `wav_rms` and `silence_warning`/`wav_scan` are
+reached only from the record-stop arms, and envelope/duration are
+engine-side already. **AAC is lossy — the numbers:** round-tripping a
+440 Hz tone through AAC-in-mp4 runs the clip **long, never short**
+(encoder priming + tail padding, ~10 ms on a 12 s take, ~20 ms on 2 s),
+so duration asserts are one-sided slack; FFT peak lands within 0.03 Hz
+of 440 and rms within 0.15 % of ideal, which is why the tests assert on
+spectrum and rms rather than samples. Test media is **encoded by PyAV in
+the tests** (`make_video` in conftest — aac/libopus audio or a video-only
+mpeg4 stream with no audio at all); no binary fixtures in the repo.
+Live smoke on the M3, standalone against the real function: 12 s 48 kHz
+stereo AAC + mpeg4 video → 48 kHz/2ch PCM16, 12.0107 s, peak 440.03 Hz,
+rms 0.3531 vs 0.3536 ideal, decode **0.02 s (702× realtime)**, second
+call a 0.1 ms cache hit. Gates: ruff clean, 633 pytest @ **95.65 %**
+(the known `test_contract` download-flow flake passed on the re-run;
+`media.py` itself 98 %), clippy `-p syrinx-app -p syrinx-shared
+--all-targets` clean, 106 + 7 cargo tests green, dev bundle reinstalled.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~

@@ -192,6 +192,19 @@ and the engine's `json.loads`.
 Grouped and ordered as in `lib.rs`. RPC method name = the exact D-Bus PascalCase
 name. `→ null` means a void reply (`{"result":null}`).
 
+**Audio paths accept video containers.** Every parameter below that names a
+local media file — `audio_path`, `sample_path`, `clip_path`, `path` — takes
+`.mp4`, `.mov`, `.mkv`, `.webm`, `.avi` and `.m4v` as well as the audio formats.
+The engine demuxes and decodes the container's default audio stream to a WAV
+(source sample rate and channel count kept, PCM16) and reads that instead; the
+extraction is cached per source take, so handing the same video to several
+methods decodes it once. Detection is by extension only — a mislabeled audio
+file still fails the way it always did. A container with no audio track, or one
+whose audio will not decode, fails through the **method's own** error surface
+(a raised error, `error=true`, `""`, `0` or `"{}"` as documented per row) with a
+plain message such as `no audio track in lecture.mp4`. No new methods, no new
+signals, no signature changes.
+
 ### 4.1 Synthesis, transcription, voices
 
 | Method | Params `[name: type, …]` | Result | Semantics |
@@ -243,7 +256,7 @@ visible failure rather than an empty result.
 
 | Method | Params | Result | Semantics |
 |---|---|---|---|
-| `SaveSourceClip` | `[path: string, name: string, transcript: string, kind: string]` | string (clip_id, `""` on failure) | Copy an audio file into the clip store. Empty name → time-based default. `kind` `"speech"`\|`"music"` is the vc-mode active at save time (the rail filters on it, badges `"music"` with ♫); values other than `"music"` coerce to `"speech"`. |
+| `SaveSourceClip` | `[path: string, name: string, transcript: string, kind: string]` | string (clip_id, `""` on failure) | Copy an audio file into the clip store (a video source stores its extracted WAV, not the container). Empty name → time-based default. `kind` `"speech"`\|`"music"` is the vc-mode active at save time (the rail filters on it, badges `"music"` with ♫); values other than `"music"` coerce to `"speech"`. |
 | `SetSourceClipTranscript` | `[clip_id: string, transcript: string]` | → null | Backfill a clip's transcript cache. |
 | `ListSourceClips` | `[]` | string (JSON array) | Saved source clips, newest first. |
 | `DeleteSourceClip` | `[clip_id: string]` | → null | Delete a saved clip (row + file). |
@@ -288,7 +301,7 @@ visible failure rather than an empty result.
 | Method | Params | Result | Semantics |
 |---|---|---|---|
 | `FileEnvelope` | `[path: string]` | string (JSON `{bars,duration}`) | Waveform bars + duration of any local audio file (`"{}"` if unreadable). |
-| `TrimAudio` | `[path: string, start_s: number, end_s: number]` | string (path, `""` on failure) | Cut a recording to `[start_s, end_s)`. |
+| `TrimAudio` | `[path: string, start_s: number, end_s: number]` | string (path, `""` on failure) | Cut a recording to `[start_s, end_s)`. WAVs are rewritten in place; anything else — including a video source, whose extraction is a shared cache entry — gets a `<stem>-trimmed.wav` beside it. |
 | `TrimHistoryClip` | `[hid: string, start_s: number, end_s: number]` | boolean | Cut a history clip in place. |
 | `PlayFileAt` | `[path: string, title: string, pct: number]` | integer (gen_id) | `PlayFile` starting at fraction `pct` — trim-preview. |
 

@@ -230,6 +230,149 @@ def test_play_file_of_an_unreadable_path_is_zero(iface, tmp_path):
     assert call(iface, "PlayFileAt", str(tmp_path / "nope.wav"), "title", 0.5) == 0
 
 
+# --- video sources -------------------------------------------------------
+# Every method that takes a user-chosen path funnels through media.resolve, so
+# a picked mp4/mov/mkv behaves exactly like the WAV the user used to export by
+# hand. Extraction itself is covered in test_media.py.
+
+
+def _record_transcribe(iface, monkeypatch):
+    """Swap the stt stack for a recorder of the path it was handed."""
+    seen = []
+
+    async def _fake(path, *a, **kw):
+        seen.append(path)
+        return "words"
+
+    monkeypatch.setattr(iface._stt, "transcribe", _fake)
+    monkeypatch.setattr(iface._stt, "transcribe_stream", _fake)
+    return seen
+
+
+def drive(iface, name, *args):
+    """``call``, but draining the task the method spawned — TranscribeFile
+    returns its req_id long before its run() has finished."""
+
+    async def go():
+        out = await getattr(iface, name)(*args)
+        pending = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        return out
+
+    return asyncio.run(go())
+
+
+def test_transcribe_of_a_video_hands_the_stt_stack_the_extracted_wav(
+    iface, make_video, monkeypatch
+):
+    pytest.importorskip("av")
+    seen = _record_transcribe(iface, monkeypatch)
+    src = str(make_video("lecture.mp4", secs=1.0))
+
+    assert call(iface, "Transcribe", src) == "words"
+
+    assert seen[0] != src and seen[0].endswith(".wav")
+    assert Path(seen[0]).parent.name == "video_audio"
+
+
+def test_transcribe_file_of_a_video_streams_from_the_extracted_wav(
+    iface, make_video, monkeypatch
+):
+    pytest.importorskip("av")
+    seen = _record_transcribe(iface, monkeypatch)
+    results = []
+    iface._emit = lambda name, *a: results.append((name, *a))
+
+    rid = drive(iface, "TranscribeFile", str(make_video("talk.mov", secs=1.0)))
+
+    assert ("TranscribeResult", rid, "words", False) in results
+    assert seen[0].endswith(".wav")
+
+
+def test_transcribe_file_of_a_video_with_no_audio_track_reports_an_error(
+    iface, make_video, monkeypatch
+):
+    pytest.importorskip("av")
+    _record_transcribe(iface, monkeypatch)
+    results = []
+    iface._emit = lambda name, *a: results.append((name, *a))
+
+    rid = drive(iface, "TranscribeFile", str(make_video("silent.mp4", secs=0.5, audio=False)))
+
+    # the flow's OWN error surface — no new signal for a missing audio track
+    assert ("TranscribeResult", rid, "", True) in results
+
+
+def test_file_envelope_of_a_video(iface, make_video):
+    pytest.importorskip("av")
+    env = json.loads(call(iface, "FileEnvelope", str(make_video("clip.mkv", secs=2.0))))
+    assert len(env["bars"]) == 300
+    assert env["duration"] == pytest.approx(2.0, abs=0.1)  # AAC pads the tail
+
+
+def test_file_envelope_of_a_video_with_no_audio_track_is_an_empty_object(iface, make_video):
+    pytest.importorskip("av")
+    assert call(iface, "FileEnvelope", str(make_video("silent.mp4", audio=False))) == "{}"
+
+
+def test_play_file_of_a_video_with_no_audio_track_is_zero(iface, make_video):
+    pytest.importorskip("av")
+    src = str(make_video("silent.mp4", audio=False))
+    assert call(iface, "PlayFile", src, "title") == 0
+    assert call(iface, "PlayFileAt", src, "title", 0.5) == 0
+
+
+def test_trim_audio_of_a_video_siblings_the_extraction_instead_of_eating_it(
+    iface, make_video
+):
+    """The extraction is a cache entry keyed by the video's bytes — an in-place
+    rewrite would hand the trimmed take to every later import of that video."""
+    pytest.importorskip("av")
+    src = str(make_video("take.mp4", secs=3.0))
+    extracted = Path(asyncio.run(iface._source(src)))
+
+    out = call(iface, "TrimAudio", src, 0.5, 2.0)
+
+    assert out == str(extracted.with_name(extracted.stem + "-trimmed.wav"))
+    assert json.loads(call(iface, "FileEnvelope", out))["duration"] == pytest.approx(1.5, abs=1e-3)
+    # the extraction itself is untouched, so re-importing the video is still whole
+    assert json.loads(call(iface, "FileEnvelope", src))["duration"] == pytest.approx(3.0, abs=0.1)
+
+
+def test_save_source_clip_of_a_video_stores_a_readable_wav(iface, make_video):
+    pytest.importorskip("av")
+    cid = call(iface, "SaveSourceClip", str(make_video("song.mp4", secs=1.0)), "Cover", "", "music")
+    row = json.loads(call(iface, "ListSourceClips"))[0]
+    assert row["id"] == cid
+    assert Path(row["path"]).suffix == ".wav"  # not a copy of the container
+    assert row["duration"] == pytest.approx(1.0, abs=0.1)
+
+
+def test_save_source_clip_of_a_video_with_no_audio_track_is_empty(iface, make_video):
+    pytest.importorskip("av")
+    src = str(make_video("silent.mp4", audio=False))
+    assert call(iface, "SaveSourceClip", src, "n", "", "speech") == ""
+    assert json.loads(call(iface, "ListSourceClips")) == []
+
+
+def test_add_sample_from_a_video_stores_decodable_reference_audio(iface, make_video):
+    pytest.importorskip("av")
+    pid = call(iface, "CreateProfile", json.dumps({"name": "Nail", "voice_type": "cloned"}))
+    call(iface, "AddSample", pid, str(make_video("ref.m4v", secs=1.0)), "spoken ref")
+    stored = json.loads(call(iface, "GetProfile", pid))["samples"][0]["audio_path"]
+    env = json.loads(call(iface, "FileEnvelope", stored))
+    assert env["duration"] == pytest.approx(1.0, abs=0.1)
+    assert max(env["bars"]) == 1.0
+
+
+def test_add_sample_from_a_video_with_no_audio_track_raises(iface, make_video):
+    pytest.importorskip("av")
+    pid = call(iface, "CreateProfile", json.dumps({"name": "Nail", "voice_type": "cloned"}))
+    with pytest.raises(ValueError, match="no audio track"):
+        call(iface, "AddSample", pid, str(make_video("silent.mp4", audio=False)), "ref")
+
+
 def test_play_sample_of_an_unknown_id_is_zero(iface):
     assert call(iface, "PlaySample", "nope") == 0
 

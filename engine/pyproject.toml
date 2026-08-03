@@ -10,6 +10,10 @@ dependencies = [
     "numpy",
     "sounddevice",        # PipeWire capture/playback
     "soundfile",          # audio I/O
+    # FFmpeg's demuxers/decoders — media.py pulls the audio out of imported
+    # video containers. Rides in with faster-whisper anyway; named here because
+    # the engine now uses it directly.
+    "av>=11",
     # TTS: Kokoro-82M (pulls torch + misaki G2P). CPU-realtime; on the 4090
     # desktop torch auto-uses CUDA. Heavier cloning engines (Qwen3-TTS/LuxTTS)
     # will be added later as optional extras.

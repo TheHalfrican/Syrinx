@@ -106,11 +106,14 @@ jobs:
       # speech pitch fine-tune (core.py pre-shift + SuggestPitchShift) and its
       # tests genuinely run pyin/pitch_shift — locally it rides in with kokoro,
       # but this venv skips kokoro, and skipping the tests instead would drop
-      # the new helpers below the coverage gate. Still torch-free.
+      # the new helpers below the coverage gate. av is here for the same reason
+      # (media.py's video-container ingest, and the tests encode their own
+      # fixtures with it); it normally rides in with faster-whisper. Both are
+      # still torch-free.
       - name: Install test dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install numpy soundfile dbus-next websockets platformdirs pytest pytest-cov ruff librosa
+          python -m pip install numpy soundfile dbus-next websockets platformdirs pytest pytest-cov ruff librosa av
           python -m pip install -e engine --no-deps
 
       # Lint only — no formatter gate anywhere in this pipeline (deliberate).

@@ -215,6 +215,64 @@ def fake_sd(monkeypatch):
 
 
 @pytest.fixture
+def make_video(tmp_path):
+    """Encode a sine into an audio stream inside a video container — PyAV writes
+    every fixture, so no binary media lives in the repo. ``audio=False`` gives a
+    video-only file (a real container with no audio stream at all).
+
+    ``codec``/``container`` follow the file's extension by default; both encoders
+    used here (native aac, native mpeg4) are in every FFmpeg build, so the CI
+    wheel and a local ffmpeg agree."""
+
+    def _make(
+        name="clip.mp4", secs=1.0, rate=44_100, freq=440.0, amp=0.5,
+        channels=1, audio=True, codec="aac",
+    ):
+        import av
+
+        path = tmp_path / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        out = av.open(str(path), "w")
+        try:
+            if not audio:
+                vs = out.add_stream("mpeg4", rate=10)
+                vs.width = vs.height = 32
+                vs.pix_fmt = "yuv420p"
+                blank = np.zeros((32, 32, 3), dtype=np.uint8)
+                for _ in range(int(secs * 10)):
+                    for pkt in vs.encode(av.VideoFrame.from_ndarray(blank, format="rgb24")):
+                        out.mux(pkt)
+                for pkt in vs.encode(None):
+                    out.mux(pkt)
+                return path
+            layout = "mono" if channels == 1 else "stereo"
+            st = out.add_stream(codec, rate=rate)
+            st.layout = layout
+            n = int(secs * rate)
+            t = np.arange(n) / rate
+            sig = (np.sin(2 * np.pi * freq * t) * amp * 32767).astype(np.int16)
+            # packed s16: interleaved samples in one (1, n*channels) plane
+            packed = np.repeat(sig, channels).reshape(1, -1)
+            size = st.codec_context.frame_size or 1024
+            for i in range(0, n, size):
+                block = packed[:, i * channels : (i + size) * channels]
+                frame = av.AudioFrame.from_ndarray(
+                    np.ascontiguousarray(block), format="s16", layout=layout
+                )
+                frame.sample_rate = rate
+                frame.pts = i
+                for pkt in st.encode(frame):
+                    out.mux(pkt)
+            for pkt in st.encode(None):
+                out.mux(pkt)
+            return path
+        finally:
+            out.close()
+
+    return _make
+
+
+@pytest.fixture
 def make_wav(tmp_path):
     """Write a PCM16 mono sine wav and return its path."""
 

@@ -34,7 +34,7 @@ from .llm import PersonalityLLM
 from .models import ModelManager, ModelNotDownloaded, spec as model_spec, detect_hardware
 from .recording import RecordingManager
 from .vcsetup import SETUP_IDS, VcSetupManager
-from . import audio, effects, models, settings as engine_settings
+from . import audio, effects, media, models, settings as engine_settings
 
 log = logging.getLogger("syrinx.engine.service")
 
@@ -318,8 +318,20 @@ class EngineCore:
             engine = prof.preset_engine or ""
         return engine, (prof.language or "en")
 
+    async def _source(self, path: str) -> str:
+        """The path to actually read for a user-chosen file — a video container
+        becomes its extracted WAV (see media.py). For the callers that already
+        treat "unreadable" as a normal outcome: a failed extraction hands the
+        original back so their own surface reports it, once. Everywhere else
+        calls ``media.resolve`` directly and lets the error out."""
+        try:
+            return await media.resolve(path)
+        except Exception:  # noqa: BLE001
+            log.exception("audio extraction failed for %s", path)
+            return path
+
     async def Transcribe(self, audio_path) -> str:
-        return await self._stt.transcribe(audio_path)
+        return await self._stt.transcribe(await media.resolve(audio_path))
 
     async def TranscribeFile(self, audio_path) -> int:
         """Async transcription for long files — Transcribe blocks the D-Bus
@@ -336,7 +348,7 @@ class EngineCore:
             error = False
             try:
                 text = await self._stt.transcribe_stream(
-                    audio_path,
+                    await media.resolve(audio_path),
                     on_partial=lambda t: self._emit("TranscribeProgress", req_id, t),
                 )
             except Exception:  # noqa: BLE001
@@ -383,7 +395,11 @@ class EngineCore:
                 be = self._tts.vc_backend(engine or ("seed_vc" if music else ""))
                 if music and not hasattr(be, "convert_music"):
                     raise ValueError(f"{be.engine_name} does not support music mode")
-                be.check_source(audio_path)  # cheap cap check before any load
+                # A video source becomes its extracted WAV from here down;
+                # audio_path stays the ORIGINAL so the recipe below pins the
+                # file the user actually picked (Regenerate re-extracts).
+                source = await media.resolve(audio_path)
+                be.check_source(source)  # cheap cap check before any load
                 # No silent multi-GB fetch: every ⇄ engine will pull its own
                 # weights on first convert if asked to load without them. Refuse
                 # here, BEFORE load() touches the network, naming the row to
@@ -400,7 +416,7 @@ class EngineCore:
                     # stages stream back from the worker: separating /
                     # converting / remixing — forwarded verbatim
                     pcm, rate = await be.convert_music(
-                        audio_path, prof,
+                        source, prof,
                         on_stage=lambda s: self._emit("GenerationProgress", gen_id, s, 0.5),
                         semitone=semitones,
                     )
@@ -409,15 +425,15 @@ class EngineCore:
                     # speech pitch fine-tune: pre-shift the SOURCE so every VC
                     # backend (chatterbox_vc/seed_vc/vevo) converts the shifted
                     # take with no per-engine code. semitones==0 → today's path.
-                    src = audio_path
+                    src = source
                     if semitones:
                         src = await asyncio.to_thread(
-                            _pitch_shift_wav, audio_path, semitones
+                            _pitch_shift_wav, source, semitones
                         )
                     try:
                         pcm, rate = await be.convert(src, prof)
                     finally:
-                        if src != audio_path:
+                        if src != source:
                             try:
                                 Path(src).unlink()
                             except OSError:
@@ -488,7 +504,7 @@ class EngineCore:
         measure."""
         try:
             return await asyncio.to_thread(
-                self._suggest_pitch_shift, clip_path, profile_id
+                self._suggest_pitch_shift, await media.resolve(clip_path), profile_id
             )
         except Exception:
             log.exception("SuggestPitchShift(%s, %s) failed", clip_path, profile_id)
@@ -521,7 +537,7 @@ class EngineCore:
 
     async def CloneVoice(self, name, sample_path, ref_text) -> str:
         # ref_text = transcript of the reference clip (needed by Qwen cloning).
-        return await self._tts.clone(name, sample_path, ref_text)
+        return await self._tts.clone(name, await media.resolve(sample_path), ref_text)
 
     # --- voice profiles (JSON payloads for the structured bits) ---------
 
@@ -572,10 +588,11 @@ class EngineCore:
 
     async def AddSample(self, profile_id, audio_path, reference_text) -> str:
         # Auto-transcribe when no transcript is supplied (whisper).
+        src = await media.resolve(audio_path)
         text = reference_text
         if not text.strip():
-            text = await self._stt.transcribe(audio_path)
-        sample = self._profiles.add_sample(profile_id, audio_path, text)
+            text = await self._stt.transcribe(src)
+        sample = self._profiles.add_sample(profile_id, src, text)
         self._tts.invalidate_profile(profile_id)  # rebuild clone prompt next synth
         return json.dumps({"sample_id": sample.id, "reference_text": sample.reference_text})
 
@@ -997,7 +1014,8 @@ class EngineCore:
         ("speech"|"music") is the vc-mode active at save time — the rail filters
         on it and badges music clips with ♫."""
         try:
-            return self._srcclips.save(path, name, transcript, kind).id
+            src = await media.resolve(path)
+            return self._srcclips.save(src, name, transcript, kind).id
         except Exception:  # noqa: BLE001
             log.exception("SaveSourceClip %s failed", path)
             return ""
@@ -1045,18 +1063,20 @@ class EngineCore:
     async def PlayFile(self, path, title) -> int:
         """Audition any local audio file through the normal player (0 if
         unreadable). Used by the ⇄ tab to verify sources before converting."""
-        return self._play_file(path, title)
+        return self._play_file(await self._source(path), title)
 
     async def PlayFileAt(self, path, title, pct) -> int:
         """PlayFile from a fraction (0..1) of the way in — the trim modal's
         selection preview (the app cancels when the end handle is reached)."""
-        return self._play_file(path, title, start_pct=max(0.0, min(1.0, pct)))
+        return self._play_file(
+            await self._source(path), title, start_pct=max(0.0, min(1.0, pct))
+        )
 
     async def FileEnvelope(self, path) -> str:
         """Waveform bars + duration of any local audio file, as JSON
         {"bars": [...], "duration": secs} — the trim modal's display."""
         try:
-            pcm, rate = effects.load_wav(path)
+            pcm, rate = effects.load_wav(await self._source(path))
         except Exception:  # noqa: BLE001
             log.exception("FileEnvelope: unreadable %s", path)
             return "{}"
@@ -1073,15 +1093,19 @@ class EngineCore:
         try:
             import soundfile as sf
 
-            data, rate = sf.read(path, dtype="float32")
+            src = await media.resolve(path)
+            data, rate = sf.read(src, dtype="float32")
             if getattr(data, "ndim", 1) > 1:
                 data = data.mean(axis=1)
             a = max(0, int(start_s * rate))
             b = min(len(data), int(end_s * rate))
             if b - a < int(0.1 * rate):
                 return ""
-            out = Path(path)
-            if out.suffix.lower() != ".wav":
+            out = Path(src)
+            # An extraction (src != path) is a cache entry keyed by the video's
+            # bytes — rewriting it in place would hand the trimmed take back to
+            # every later import of that video. Sibling it, like a non-WAV.
+            if out.suffix.lower() != ".wav" or src != path:
                 out = out.with_name(out.stem + "-trimmed.wav")
             sf.write(str(out), data[a:b], int(rate), subtype="PCM_16")
             # An in-place rewrite of a saved source clip leaves its stored
