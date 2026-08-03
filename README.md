@@ -88,10 +88,16 @@ cargo run -p syrinx-app     # spawns + supervises the engine itself, like Window
 scripts/install-macos-dev.sh
 ```
 
-Build only `-p syrinx-app` here too. System-audio capture rides any loopback
-driver: `brew install blackhole-2ch` (the ⚙ tab shows the same hint when none
-is installed), then route audio to it — a Multi-Output Device in Audio MIDI
-Setup lets you hear what you're capturing.
+Build only `-p syrinx-app` here too. System-audio capture is a **native Core
+Audio process tap** (macOS 14.2+): nothing to install, nothing to route, and it
+follows whatever output you are actually using — Bluetooth included. The first
+system recording asks for *System Audio Recording* (System Settings > Privacy &
+Security > Screen & System Audio Recording); that prompt only reaches you from a
+bundle, so use `scripts/install-macos-dev.sh` rather than a bare `cargo run` if
+you want system audio. On macOS 13 and older the ⚙ tab falls back to a loopback
+driver (`brew install blackhole-2ch`), which you then have to route audio to —
+a Multi-Output Device in Audio MIDI Setup lets you hear what you're capturing.
+Picking a loopback driver explicitly in ⚙ still works on 14.2+ as an override.
 
 Add to your Hyprland config (see `packaging/hyprland.conf`):
 
@@ -123,10 +129,13 @@ the contract tests enforce it.
 same app-supervised JSON-RPC shape as Windows, Retina-native, with ML on
 **MPS**: Kokoro, Qwen TTS, LuxTTS cloning and the personality LLM all
 validated end-to-end on an M3 (STT stays CTranslate2 on CPU — no MPS
-backend there). System-audio capture works through any loopback driver
-(`brew install blackhole-2ch`; proven live with a bit-transparent 440 Hz
-loop), and `scripts/install-macos-dev.sh` wraps the checkout in a signed
-dev `Syrinx.app`. Still to come on mac: in-app dictation, Seed-VC / Vevo
+backend there). System-audio capture is native and driver-free as of
+2026-08-03 — a Core Audio process tap (macOS 14.2+) in the app itself,
+the twin of Windows' WASAPI loopback, so it captures whatever is playing
+wherever it is playing; loopback drivers (`brew install blackhole-2ch`,
+proven live with a bit-transparent 440 Hz loop) stay as the pre-14.2
+fallback and as a manual override. `scripts/install-macos-dev.sh` wraps
+the checkout in a signed dev `Syrinx.app`. Still to come on mac: in-app dictation, Seed-VC / Vevo
 verification (they install, but their workers haven't been MPS-tuned),
 and a self-contained bundle.
 

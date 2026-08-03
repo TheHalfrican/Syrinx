@@ -39,9 +39,22 @@ futures-util.workspace = true
 # NSScreen.backingScaleFactor for the HiDPI diagnostic log. Both crates are
 # already in the graph (winit/slint pull the same 0.6/0.3 objc2 family), so this
 # only names what was there; MainThreadMarker comes from objc2 itself.
+#
+# The rest is the native system-audio tap (capture_mac.rs): objc2-core-audio
+# carries both halves the CATap path needs — the CATapDescription Obj-C class
+# and the AudioHardware*/AudioDevice* C entry points — so one crate replaces a
+# coreaudio-sys bindgen plus hand-written message sends. objc2-foundation builds
+# the aggregate-device dictionary (toll-free bridged to CFDictionary, whose type
+# comes from objc2-core-foundation) and objc2-core-audio-types supplies the
+# AudioBufferList/ASBD the IOProc is handed. All four are the same objc2 0.6 /
+# 0.3 family already in the lock file.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "objc2-core-foundation"] }
+objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-foundation", "objc2-core-audio-types", "AudioHardware"] }
+objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
+objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary"] }
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSString", "NSUUID", "NSValue"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_LibraryLoader"] }

@@ -24,6 +24,13 @@ mod engine_proc;
 #[cfg(target_os = "windows")]
 mod capture_win;
 
+// macOS system-audio capture is app-side too, as a native Core Audio process
+// tap (macOS 14.2+). A loopback driver (BlackHole & friends) stays reachable
+// through the engine's mic path as the pre-14.2 fallback and as a manual
+// override in ⚙.
+#[cfg(target_os = "macos")]
+mod capture_mac;
+
 // Windows global dictation: a hotkey-driven second RPC client (RPC-PROTOCOL.md
 // §1). Linux uses the standalone gtk4/zbus `dictate/` crate instead, so this
 // never compiles there.
@@ -1563,13 +1570,13 @@ async fn stop_pw_record(child: &mut tokio::process::Child) {
 // `parecord` child writing to an app-chosen wav (byte-identical to before); on
 // Windows a `system` capture wraps a native WASAPI loopback thread (the twin of
 // parecord) while the mic still goes through the engine (sounddevice); on macOS
-// the engine owns every capture — system audio included, because a loopback
-// driver is just another CoreAudio input, so the `system` flag stays unused
-// there and the chosen device carries the whole decision (as on Linux).
+// a `system` capture with no explicit device is a native Core Audio process tap
+// (also app-side), and an explicitly chosen loopback driver still goes through
+// the engine's mic path, because such a driver is just another CoreAudio input.
 
 /// A live capture. Linux owns the `parecord` child; on Windows it is either the
-/// engine's mic recording id or a WASAPI loopback for system audio; on macOS it
-/// holds the engine's recording id (the engine owns the wav, path on stop).
+/// engine's mic recording id or a WASAPI loopback for system audio; on macOS
+/// either the engine's recording id or a native process tap.
 #[cfg(target_os = "linux")]
 struct Capture(tokio::process::Child);
 #[cfg(target_os = "windows")]
@@ -1577,16 +1584,22 @@ enum Capture {
     Engine(String),                 // mic via the engine (rec_id)
     Loopback(capture_win::Loopback), // system audio via WASAPI loopback
 }
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
+enum Capture {
+    Engine(String),               // mic — or a hand-picked loopback driver
+    Tap(capture_mac::SystemTap),  // system audio via a native Core Audio tap
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows"), not(target_os = "macos")))]
 struct Capture {
     rec_id: String,
 }
 
 /// Start a capture. `device` is a source name (`.monitor` for system on Linux,
-/// a render-endpoint id for system on Windows, a loopback input name for system
-/// on macOS, a mic name otherwise); `None`/`""` = the platform default.
-/// `system` routes Windows to WASAPI loopback instead of the engine's mic path;
-/// Linux/macOS already encode the choice in `device`.
+/// a render-endpoint id for system on Windows, a loopback input name for a
+/// hand-picked system tap on macOS, a mic name otherwise); `None`/`""` = the
+/// platform default. `system` routes Windows to WASAPI loopback and macOS to
+/// the native process tap instead of the engine's mic path; Linux already
+/// encodes the choice in `device`.
 #[cfg(target_os = "linux")]
 async fn capture_start(
     _proxy: &EngineClient,
@@ -1614,7 +1627,38 @@ async fn capture_start(
         Err(e) => Err(std::io::Error::other(e.to_string())),
     }
 }
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
+async fn capture_start(
+    proxy: &EngineClient,
+    wav: &str,
+    device: Option<&str>,
+    system: bool,
+) -> std::io::Result<Capture> {
+    if system && device.is_none_or(str::is_empty) {
+        // No device means resolve_capture_device found no loopback driver worth
+        // naming, so the native tap is the only thing that can honour "system".
+        // Re-checking availability here (a class lookup) is what guarantees the
+        // request can never quietly become a microphone recording.
+        if !capture_mac::native_tap_available() {
+            return Err(std::io::Error::other(NO_SYSTEM_TAP));
+        }
+        // Blocking pool, not the worker: the very first tap start sits inside
+        // AudioDeviceStart until the user answers the System Audio Recording
+        // prompt, which can be minutes. On the worker that would wedge every
+        // other command the app has in flight.
+        let path = wav.to_string();
+        return tokio::task::spawn_blocking(move || capture_mac::SystemTap::start(&path))
+            .await
+            .map_err(std::io::Error::other)?
+            .map(Capture::Tap);
+    }
+    match proxy.start_recording(device.unwrap_or("")).await {
+        Ok(id) if !id.is_empty() => Ok(Capture::Engine(id)),
+        Ok(_) => Err(std::io::Error::other("device missing or busy")),
+        Err(e) => Err(std::io::Error::other(e.to_string())),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows"), not(target_os = "macos")))]
 async fn capture_start(
     proxy: &EngineClient,
     _wav: &str,
@@ -1643,7 +1687,14 @@ async fn capture_stop(cap: Capture, proxy: &EngineClient, _wav: &str) -> String 
         Capture::Loopback(h) => h.stop(),
     }
 }
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
+async fn capture_stop(cap: Capture, proxy: &EngineClient, _wav: &str) -> String {
+    match cap {
+        Capture::Engine(id) => proxy.stop_recording(&id).await.unwrap_or_default(),
+        Capture::Tap(h) => h.stop(),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows"), not(target_os = "macos")))]
 async fn capture_stop(cap: Capture, proxy: &EngineClient, _wav: &str) -> String {
     proxy.stop_recording(&cap.rec_id).await.unwrap_or_default()
 }
@@ -1664,7 +1715,16 @@ async fn capture_discard(cap: Capture, proxy: &EngineClient) {
         Capture::Loopback(h) => h.discard(),
     }
 }
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
+async fn capture_discard(cap: Capture, proxy: &EngineClient) {
+    match cap {
+        Capture::Engine(id) => {
+            let _ = proxy.cancel_recording(&id).await;
+        }
+        Capture::Tap(h) => h.discard(),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows"), not(target_os = "macos")))]
 async fn capture_discard(cap: Capture, proxy: &EngineClient) {
     let _ = proxy.cancel_recording(&cap.rec_id).await;
 }
@@ -1683,7 +1743,14 @@ fn capture_died(cap: &mut Capture) -> bool {
         Capture::Loopback(h) => h.died(),
     }
 }
-#[cfg(all(not(target_os = "linux"), not(target_os = "windows")))]
+#[cfg(target_os = "macos")]
+fn capture_died(cap: &mut Capture) -> bool {
+    match cap {
+        Capture::Engine(_) => false,
+        Capture::Tap(h) => h.died(),
+    }
+}
+#[cfg(all(not(target_os = "linux"), not(target_os = "windows"), not(target_os = "macos")))]
 fn capture_died(_cap: &mut Capture) -> bool {
     false
 }
@@ -1737,12 +1804,19 @@ async fn resolve_capture_device(
     system: bool,
 ) -> (Option<String>, bool) {
     if system {
-        // The ⚙ "System tap" choice is a loopback INPUT device name — CoreAudio
-        // has no monitor sources, so a loopback driver (BlackHole & friends) is
-        // the tap, and the engine records it through the same sounddevice path
-        // as any mic. Re-enumerate on every request: the stored choice can be a
-        // driver the user has since uninstalled, and falling through to the
-        // default input would hand back the microphone under a "system" label.
+        // Default ("" = let the app choose) is the native Core Audio process
+        // tap, which needs no driver and no routing — `None` is the signal
+        // capture_start reads for it.
+        if cfg.monitor_device.is_empty() && capture_mac::native_tap_available() {
+            return (None, true);
+        }
+        // Otherwise the ⚙ "System tap" choice is a loopback INPUT device name —
+        // CoreAudio has no monitor sources, so a loopback driver (BlackHole &
+        // friends) is the tap, and the engine records it through the same
+        // sounddevice path as any mic. Re-enumerate on every request: the stored
+        // choice can be a driver the user has since uninstalled, and falling
+        // through to the default input would hand back the microphone under a
+        // "system" label.
         let Ok(json) = proxy.list_recording_devices().await else {
             // engine unreachable — not a missing driver; let capture_start
             // report the real failure rather than blaming BlackHole.
@@ -3038,12 +3112,16 @@ async fn list_audio_devices(proxy: &EngineClient) -> (Vec<(String, String)>, Vec
 
 /// Rows for the ⚙ "System tap" dropdown: a leading default row (index 0 =
 /// "let the app choose", stored as an empty `monitor_device`) plus one row per
-/// enumerated tap. macOS words the default row after what it actually does —
-/// pick the first loopback driver — and, when none is installed, says so
-/// outright rather than promising a default that does not exist.
-fn tap_dropdown_names(taps: &[(String, String)]) -> Vec<String> {
+/// enumerated tap. macOS words the default row after what it actually does: the
+/// native Core Audio process tap when the OS has one (14.2+), otherwise the
+/// first loopback driver — and, when neither exists, it says so outright rather
+/// than promising a default that does not exist. `native` is the runtime
+/// availability probe; it is meaningless off macOS.
+fn tap_dropdown_names(taps: &[(String, String)], native: bool) -> Vec<String> {
     let head = if !cfg!(target_os = "macos") {
         "Default sink monitor"
+    } else if native {
+        "System audio (native tap)"
     } else if taps.is_empty() {
         "No loopback device found"
     } else {
@@ -3055,26 +3133,42 @@ fn tap_dropdown_names(taps: &[(String, String)]) -> Vec<String> {
 }
 
 /// The help line under the ⚙ system-tap picker, as `(line, copyable)` — `""`
-/// for the line means no row at all. macOS only: with no driver the line
+/// for the line means no row at all, and the AUDIO DEVICES card shrinks to fit.
+/// macOS only, and only when a *loopback driver* is in play: the native tap
+/// captures whatever is playing wherever it is playing, so the routing caveat
+/// simply does not apply to it. With no native tap and no driver the line
 /// carries the install command (and the ⧉ copies the bare command, the same
-/// split the Hyprland bind hint uses), and with one it warns about the routing
-/// half — a loopback device is a dead end unless the audio is actually sent to
-/// it, and a Multi-Output Device is how you keep hearing it meanwhile.
-/// Linux/Windows taps need neither, and an empty line keeps their card the
-/// exact height it has always been.
-fn tap_hint(taps: &[(String, String)]) -> (&'static str, &'static str) {
+/// split the Hyprland bind hint uses); with a driver actually in use it warns
+/// about the routing half — a loopback device is a dead end unless the audio is
+/// sent to it, and a Multi-Output Device is how you keep hearing it meanwhile.
+/// `selected` is whether the user explicitly picked a driver row (index != 0).
+fn tap_hint(taps: &[(String, String)], native: bool, selected: bool) -> (&'static str, &'static str) {
+    const ROUTING: &str = "A loopback tap hears only what is routed to it — a Multi-Output Device (Audio MIDI Setup) lets you hear it too.";
     if !cfg!(target_os = "macos") {
         ("", "")
+    } else if native {
+        // The native default needs no caveat; only a hand-picked driver does.
+        if selected { (ROUTING, "") } else { ("", "") }
     } else if taps.is_empty() {
         (
             "No loopback device. Install one:  brew install blackhole-2ch",
             "brew install blackhole-2ch",
         )
     } else {
-        (
-            "A loopback tap hears only what is routed to it — a Multi-Output Device (Audio MIDI Setup) lets you hear it too.",
-            "",
-        )
+        (ROUTING, "")
+    }
+}
+
+/// Is the native macOS process tap usable right now? Off macOS this is always
+/// false and the two ⚙ helpers above ignore it.
+fn native_system_tap() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        capture_mac::native_tap_available()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        false
     }
 }
 
@@ -5549,15 +5643,16 @@ async fn run_session(
                     let mic_names: Vec<SharedString> = std::iter::once(SharedString::from("System default"))
                         .chain(st_mics.iter().map(|(_, d)| SharedString::from(d.as_str())))
                         .collect();
-                    let mon_names: Vec<SharedString> = tap_dropdown_names(&st_mons)
+                    let native_tap = native_system_tap();
+                    let mon_names: Vec<SharedString> = tap_dropdown_names(&st_mons, native_tap)
                         .iter()
                         .map(|n| SharedString::from(n.as_str()))
                         .collect();
-                    let (tap_hint, tap_copy) = tap_hint(&st_mons);
                     let mic_idx = st_mics.iter().position(|(n, _)| *n == cfg.mic_device)
                         .map(|i| i as i32 + 1).unwrap_or(0);
                     let mon_idx = st_mons.iter().position(|(n, _)| *n == cfg.monitor_device)
                         .map(|i| i as i32 + 1).unwrap_or(0);
+                    let (tap_hint, tap_copy) = tap_hint(&st_mons, native_tap, mon_idx != 0);
                     let cap_names: Vec<SharedString> =
                         ST_CAP_SECS.iter().map(|(_, l)| SharedString::from(*l)).collect();
                     let cap_idx = ST_CAP_SECS.iter().position(|(s, _)| *s == cap_secs)
@@ -5622,6 +5717,14 @@ async fn run_session(
                         st_mons.get(index - 1).map(|(n, _)| n.clone()).unwrap_or_default()
                     };
                     save_config(&cfg);
+                    // The routing caveat belongs to a hand-picked loopback
+                    // driver, not to the native default, so the hint row (and
+                    // with it the card's height) follows the selection.
+                    let (line, copy) = tap_hint(&st_mons, native_system_tap(), index != 0);
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_st_tap_hint(line.into());
+                        ui.set_st_tap_copy(copy.into());
+                    }).ok();
                 }
                 Some(Cmd::StToggleRefine) => {
                     cfg.refine_dictation = !cfg.refine_dictation;
@@ -6414,39 +6517,66 @@ mod tests {
     #[test]
     fn tap_dropdown_leads_with_a_default_row_then_one_row_per_tap() {
         let taps = vec![dev("BlackHole 2ch"), dev("BlackHole 16ch")];
-        let rows = tap_dropdown_names(&taps);
-        assert_eq!(rows.len(), 3, "a default row plus every tap");
-        assert_eq!(&rows[1..], ["BlackHole 2ch", "BlackHole 16ch"]);
-        // index 0 is always "let the app choose" (stored as an empty
-        // monitor_device); only its wording is per-platform, and macOS drops the
-        // promise entirely when there is nothing to choose from
+        // the driver rows are the same on every platform and in every state —
+        // only row 0 ("let the app choose", stored as an empty monitor_device)
+        // is written from the matrix below
+        for native in [false, true] {
+            let rows = tap_dropdown_names(&taps, native);
+            assert_eq!(rows.len(), 3, "a default row plus every tap");
+            assert_eq!(&rows[1..], ["BlackHole 2ch", "BlackHole 16ch"]);
+        }
         if cfg!(target_os = "macos") {
-            assert_eq!(rows[0], "First loopback device");
-            assert_eq!(tap_dropdown_names(&[]), ["No loopback device found"]);
+            // native tap: the default is the OS itself, drivers are overrides
+            assert_eq!(tap_dropdown_names(&taps, true)[0], "System audio (native tap)");
+            assert_eq!(tap_dropdown_names(&[], true), ["System audio (native tap)"]);
+            // pre-14.2: a driver is the only tap there is…
+            assert_eq!(tap_dropdown_names(&taps, false)[0], "First loopback device");
+            // …and with none installed the row stops promising one
+            assert_eq!(tap_dropdown_names(&[], false), ["No loopback device found"]);
         } else {
-            assert_eq!(rows[0], "Default sink monitor");
-            assert_eq!(tap_dropdown_names(&[]), ["Default sink monitor"]);
+            assert_eq!(tap_dropdown_names(&taps, false)[0], "Default sink monitor");
+            assert_eq!(tap_dropdown_names(&[], false), ["Default sink monitor"]);
+            // `native` never reaches the wording off macOS
+            assert_eq!(tap_dropdown_names(&[], true), ["Default sink monitor"]);
         }
     }
 
     #[test]
-    fn tap_hint_names_the_install_command_only_when_macos_has_no_tap() {
+    fn tap_hint_covers_the_whole_native_and_driver_matrix() {
+        let taps = vec![dev("BlackHole 2ch")];
         if cfg!(target_os = "macos") {
-            let (line, copy) = tap_hint(&[]);
+            // native + default row: no caveat applies, so no row at all — the
+            // whole point of the process tap over a loopback driver
+            assert_eq!(tap_hint(&taps, true, false), ("", ""));
+            assert_eq!(tap_hint(&[], true, false), ("", ""));
+            // native, but the user overrode it with a driver: the routing
+            // caveat is back, because that driver still hears only what is
+            // routed to it
+            let (line, copy) = tap_hint(&taps, true, true);
+            assert!(line.contains("Multi-Output Device"));
+            assert_eq!(copy, "");
+            // pre-14.2, no driver: the line is the fix, and the ⧉ hands over
+            // the bare command rather than the sentence around it
+            let (line, copy) = tap_hint(&[], false, false);
             assert!(line.contains("brew install blackhole-2ch"));
-            // the ⧉ hands over the bare command, not the sentence around it
             assert_eq!(copy, "brew install blackhole-2ch");
-            // with a tap present the advice changes to the routing half — a
-            // loopback device hears nothing until audio is sent to it — and
-            // there is no command left to copy
-            let (line, copy) = tap_hint(&[dev("BlackHole 2ch")]);
+            // pre-14.2 with a driver: routing caveat, nothing left to install
+            let (line, copy) = tap_hint(&taps, false, false);
             assert!(line.contains("Multi-Output Device"));
             assert!(!line.contains("brew"));
             assert_eq!(copy, "");
         } else {
-            // no extra row off macOS, so the AUDIO DEVICES card keeps its height
-            assert_eq!(tap_hint(&[]), ("", ""));
-            assert_eq!(tap_hint(&[dev("Monitor of Built-in Audio")]), ("", ""));
+            // no extra row off macOS in any combination, so the AUDIO DEVICES
+            // card keeps the exact height it has always had
+            for native in [false, true] {
+                for selected in [false, true] {
+                    assert_eq!(tap_hint(&[], native, selected), ("", ""));
+                    assert_eq!(
+                        tap_hint(&[dev("Monitor of Built-in Audio")], native, selected),
+                        ("", "")
+                    );
+                }
+            }
         }
     }
 
@@ -6459,11 +6589,15 @@ mod tests {
         assert_eq!(devices, vec![dev("iMac Microphone")]);
         let taps = mac_loopback_devices(&devices);
         assert!(taps.is_empty(), "a built-in mic is not a system tap");
-        // …and every surface that absence reaches says what to do about it
+        // …and every surface that absence reaches says what to do about it —
+        // but only on the pre-14.2 machines where it is still an absence at all
         if cfg!(target_os = "macos") {
-            assert_eq!(tap_dropdown_names(&taps), ["No loopback device found"]);
-            assert!(tap_hint(&taps).0.contains("brew install blackhole-2ch"));
+            assert_eq!(tap_dropdown_names(&taps, false), ["No loopback device found"]);
+            assert!(tap_hint(&taps, false, false).0.contains("brew install blackhole-2ch"));
             assert!(NO_SYSTEM_TAP.contains("brew install blackhole-2ch"));
+            // on 14.2+ the same driverless machine records system audio anyway
+            assert_eq!(tap_dropdown_names(&taps, true), ["System audio (native tap)"]);
+            assert_eq!(tap_hint(&taps, true, false), ("", ""));
         }
     }
 

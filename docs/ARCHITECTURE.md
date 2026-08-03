@@ -7,10 +7,14 @@
 > ([`RPC-PROTOCOL.md`](RPC-PROTOCOL.md)), systemd/D-Bus activation ↔
 > app-supervised child engine (§13 there), parecord/PipeWire ↔ engine-side
 > sounddevice capture, XDG ↔ platformdirs, CUDA ↔ MPS on Apple silicon
-> (compute only — the seam is inside `detect_device`). macOS system capture
-> is the same engine recorder pointed at a loopback driver (BlackHole et
-> al.); no new native code. The seam design and per-OS findings live in
-> [`../MULTIPLATPLAN.md`](../MULTIPLATPLAN.md).
+> (compute only — the seam is inside `detect_device`). System capture is
+> app-side and native on all three: `parecord <sink>.monitor` on Linux,
+> WASAPI render loopback on Windows (`app/src/capture_win.rs`), and a Core
+> Audio process tap on macOS 14.2+ (`app/src/capture_mac.rs`) — the engine
+> only ever records microphones. macOS below 14.2 falls back to the engine
+> recorder pointed at a loopback driver (BlackHole et al.), which is also what
+> an explicit ⚙ device choice selects. The seam design and per-OS findings
+> live in [`../MULTIPLATPLAN.md`](../MULTIPLATPLAN.md).
 
 ## Design principle
 

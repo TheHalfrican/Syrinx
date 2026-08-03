@@ -1217,6 +1217,110 @@ UI). Native CATap (AudioHardwareCreateProcessTap,
 macOS 14.4+) is the zero-setup upgrade — queued for the packaging
 phase, where its NSAudioCaptureUsageDescription belongs anyway.
 
+**2026-08-03 — the BlackHole requirement dies: macOS system capture
+goes NATIVE via a Core Audio process tap, app-side, the third twin of
+`parecord <sink>.monitor` and WASAPI loopback.** New
+`app/src/capture_mac.rs` (cfg(macos)) is capture_win's architectural
+copy — `SystemTap::start(wav) -> handle` with a setup handshake off a
+dedicated thread, `stop() -> path`, `discard()`, `died()`, the same
+patch-on-finalize mono-PCM16 WavWriter — so the seam gained one enum
+variant (`Capture::Tap`) and nothing else. Crates: **objc2-core-audio
+0.3.2** carries BOTH halves (the `CATapDescription` Obj-C class *and*
+the `AudioHardware*`/`AudioDevice*` C entry points), which is why
+there is no coreaudio-sys bindgen and no hand-rolled msg_send here;
++objc2-core-audio-types (AudioBufferList/ASBD), +objc2-core-foundation
+(the CFDictionary type), +objc2-foundation (NSDictionary/NSArray/
+NSUUID) — all the objc2 0.6 / 0.3 family already in the lock file, so
+the graph gained 2 crates, not a family. `default-features = false`
+drops block2/dispatch2/libc/AudioServerPlugIn; feature `AudioHardware`
+is the only one that matters, and `AudioHardwareBase` does NOT exist
+(cargo tells you). Shape: `initStereoGlobalTapButExcludeProcesses`
+with an EMPTY NSArray = the whole system mix; pin
+`desc.setUUID(NSUUID::new())` BEFORE `AudioHardwareCreateProcessTap`,
+because the aggregate references the tap by that UUID string.
+Aggregate dictionary (NSDictionary cast toll-free to CFDictionary):
+Name / UID(uuid) / IsPrivate=true / IsStacked=false / TapAutoStart=true
+/ TapList=[{SubTapUID: tap uuid, SubTapDriftCompensation: true}] — and
+**no sub-device list at all**. AudioCap's reference names the current
+output as MainSubDevice, which for a global tap only drags the user's
+real (Bluetooth) endpoint into an aggregate for nothing; the tap is
+its own clock and the tap-only dictionary runs fine. IOProc downmixes
+the tap's float32 (interleaved or planar, both handled) to mono i16
+into a Mutex<Vec<i16>> the writer thread drains every 20 ms — `try_lock`,
+never `lock`, on the realtime side; the WAV carries the tap's own rate
+(48 kHz here), nothing resamples. Availability is a runtime
+`AnyClass::get(c"CATapDescription")`, not a version parse; false →
+capture_start refuses with NO_SYSTEM_TAP rather than falling through
+to the engine's mic path (the exact bug class ledgered for Linux).
+
+**TCC is the whole story on this one.** Key is
+`NSAudioCaptureUsageDescription` (kTCCServiceAudioCapture — its own
+category, NOT the mic grant), now emitted by
+scripts/install-macos-dev.sh next to NSMicrophoneUsageDescription.
+Two behaviours that cost the session an hour and will bite packaging:
+(1) tccd attributes the request to the RESPONSIBLE process, and when
+that process has no such key it logs `Refusing authorization request
+for service kTCCServiceAudioCapture … without NSAudioCaptureUsageDescription
+key` and returns denied **with no prompt and no error back to Core
+Audio** — the tap runs and delivers pure zeros. A bare `cargo run` or
+`cargo run --example` from a terminal therefore CANNOT record system
+audio, ever, on any macOS: the terminal is the responsible process.
+The live proof only worked once the probe binary was dropped into a
+minimal ad-hoc-signed .app carrying the key and launched through
+LaunchServices (`open -W …`). (2) When the key IS present,
+`AudioDeviceStart` **blocks inside the call** until the user answers
+the prompt — minutes, potentially — so capture_start's mac arm wraps
+`SystemTap::start` in `spawn_blocking`; on the tokio worker it would
+wedge every other in-flight command. Denial after that is still
+silent, so nothing here can detect it: the silence-after-capture
+warning is the only user-visible safety net (separate agent).
+Packaging implication: the grant keys to the bundle's cdhash, so
+`--force --deep -s -` re-signing on every dev install can re-prompt,
+and a per-binary signature story (helper tools, an embedded engine)
+has to keep the tap inside the SAME identity that owns the grant.
+
+⚙ matrix, now four rows deep (`tap_dropdown_names(taps, native)` /
+`tap_hint(taps, native, selected)`): mac+native → row 0 "System audio
+(native tap)", drivers listed after it as overrides, **no hint row**
+(the routing caveat does not apply — that is the entire point), card
+shrinks via the existing `st-tap-hint != ""` sum; mac+native+user
+picked a driver → routing caveat returns, and StPickMonitor re-pushes
+the hint so the card resizes on the click; mac, no native, drivers →
+routing caveat; mac, no native, none → the brew line + ⧉. Linux/
+Windows unchanged in every combination (asserted over the whole
+cross-product). resolve_capture_device's mac arm returns
+`(None, true)` for the native default; a non-empty monitor_device
+keeps the 2026-07-30 re-enumerate-per-request loopback behaviour
+verbatim.
+
+Gates: clippy `-p syrinx-app -p syrinx-shared --all-targets` clean,
+`cargo test -p syrinx-app` 99 passed (+3 net), `-p syrinx-shared` 1.
+Snapshots via the offscreen harness (new `native` variant, and the
+variants now set the dropdown rows too, not just the hint):
+settings-after-native.png shows the shrunk card, settings-before-hint.png
+the override state. **LIVE PROOF, 2026-08-03, PASS** — 2 s of 440 Hz
+at 0.5 amplitude looped through `afplay` to the CURRENT default output
+(iMac Speakers, untouched) while the bundled probe captured 6 s:
+48 kHz, 287232 samples, sample peak 0.500000 exactly, whole-file rms
+0.293716, loudest-1 s-window **rms 0.353528 vs the theoretical
+0.5/√2 = 0.353553**, FFT peak **440.000 Hz**, and 100.00 % of spectral
+energy inside 430–450 Hz. Bit-transparent, same as the BlackHole
+proof, with nothing installed and nothing routed. The AUHAL -10863
+gotcha from 2026-07-30 does NOT apply: playback stayed audible and
+glitch-free throughout, and both players here are separate processes
+(afplay in the proof; in the app, audio.py's sd.OutputStream lives in
+the engine child while the tap lives in the app) — same-process
+play+record on one device remains the thing not to build.
+
+Residual risks: (a) macOS < 14.2 is UNTESTED — the fallback is exercised
+only by construction (class lookup false → BlackHole path), and Rust
+emits a strong reference to AudioHardwareCreateProcessTap, so whether
+dyld weak-links it below the availability floor rests on ld64's
+tbd annotations rather than on anything we assert; a 13.x box would
+settle it. (b) A default-output change mid-capture is not re-armed
+(the tap is global, so it should not matter, but it is unproven).
+(c) The dropped-samples path (writer stall / try_lock miss) only logs.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~

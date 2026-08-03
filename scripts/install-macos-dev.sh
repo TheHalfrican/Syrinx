@@ -19,6 +19,11 @@
 # the mic prompt gets attributed to whatever terminal launched it, and the grant
 # follows the terminal instead of Syrinx. A bundle (even ad-hoc signed) fixes
 # both: our own usage string, our own TCC identity.
+#
+# System audio (the native Core Audio tap) makes that non-negotiable rather than
+# merely tidy: tccd refuses kTCCServiceAudioCapture outright — no prompt, no
+# error, just a silent tap — when the responsible process has no
+# NSAudioCaptureUsageDescription. A terminal never has one.
 
 set -euo pipefail
 
@@ -267,6 +272,8 @@ cat > "$CONTENTS/Info.plist" <<PLIST_EOF
 	<true/>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Syrinx uses the microphone to test your input device and to record the reference clips it learns a cloned voice from. Audio is processed on this Mac and never leaves it.</string>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Syrinx records the audio your Mac is playing so you can transcribe it or clone a voice from it. Audio is processed on this Mac and never leaves it.</string>
 	<key>LSApplicationCategoryType</key>
 	<string>public.app-category.productivity</string>
 </dict>
@@ -318,7 +325,11 @@ ${BOLD}$APP_NAME.app is installed.${RESET}
   Engine logs     ~/Library/Application Support/syrinx/engine.log
 
 First launch will ask for ${BOLD}microphone${RESET} access — that prompt now names Syrinx
-rather than your terminal, which is the point of the bundle.
+rather than your terminal, which is the point of the bundle. The first
+${BOLD}system-audio${RESET} recording asks separately, for "System Audio Recording"
+(System Settings > Privacy & Security > Screen & System Audio Recording); that
+grant is what the native Core Audio tap needs, and no loopback driver is
+involved. Reinstalling re-signs the bundle, so both prompts can come back.
 
 If this checkout lives under ~/Documents, ~/Desktop or ~/Downloads, the very
 first launch also asks for ${BOLD}files-in-Documents${RESET} access — and the app

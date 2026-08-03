@@ -8,8 +8,12 @@
 //!   cargo run -p syrinx-app --example settings_snapshot -- <out.png> [variant] [WxH]
 //!
 //! Variants (all park the window on ⚙ Settings with macOS-shaped state):
-//!   hint     — a loopback driver is installed: routing-caveat line, no ⧉
-//!   install  — no driver: the brew command plus the ⧉ that copies it
+//!   native   — macOS 14.2+: the native process tap is the default row and
+//!              nothing needs saying, so the card loses its hint row
+//!   hint     — a loopback driver is picked (or the OS is pre-14.2): the
+//!              routing-caveat line, no ⧉
+//!   install  — pre-14.2 with no driver: the brew command plus the ⧉ that
+//!              copies it
 //!   none     — the Linux/Windows shape: no hint row at all
 
 use std::rc::Rc;
@@ -83,8 +87,27 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     ui.set_st_mic_names(names(&["iMac Microphone", "BlackHole 2ch"]));
     ui.set_st_mic_index(0);
-    ui.set_st_mon_names(names(&["BlackHole 2ch"]));
-    ui.set_st_mon_index(0);
+    // row 0 is the "let the app choose" default, worded per the matrix in
+    // main.rs's tap_dropdown_names
+    match variant.as_str() {
+        "native" => {
+            ui.set_st_mon_names(names(&["System audio (native tap)", "BlackHole 2ch"]));
+            ui.set_st_mon_index(0);
+        }
+        "install" => {
+            ui.set_st_mon_names(names(&["No loopback device found"]));
+            ui.set_st_mon_index(0);
+        }
+        "none" => {
+            ui.set_st_mon_names(names(&["Default sink monitor", "Monitor of Built-in Audio"]));
+            ui.set_st_mon_index(0);
+        }
+        // the override: a driver row picked out of a native-capable list
+        _ => {
+            ui.set_st_mon_names(names(&["System audio (native tap)", "BlackHole 2ch"]));
+            ui.set_st_mon_index(1);
+        }
+    }
     ui.set_st_mic_test_supported(true);
     ui.set_system_capture_supported(true);
     // macOS has no dictation surface yet — keep the card off the page
@@ -95,7 +118,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "No loopback device. Install one:  brew install blackhole-2ch",
             "brew install blackhole-2ch",
         ),
-        "none" => ("", ""),
+        "none" | "native" => ("", ""),
         _ => (
             "A loopback tap hears only what is routed to it — a Multi-Output Device (Audio MIDI Setup) lets you hear it too.",
             "",
