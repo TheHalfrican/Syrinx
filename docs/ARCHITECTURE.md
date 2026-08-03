@@ -13,8 +13,13 @@
 > Audio process tap on macOS 14.2+ (`app/src/capture_mac.rs`) — the engine
 > only ever records microphones. macOS below 14.2 falls back to the engine
 > recorder pointed at a loopback driver (BlackHole et al.), which is also what
-> an explicit ⚙ device choice selects. The seam design and per-OS findings
-> live in [`../MULTIPLATPLAN.md`](../MULTIPLATPLAN.md).
+> an explicit ⚙ device choice selects. Dictation is the one flow with no shared
+> mechanism at all: the layer-shell pill below is Wayland-only, so Windows and
+> macOS run it *inside* the app as a second RPC client on a global hotkey —
+> `RegisterHotKey` + `SendInput` (`app/src/dictation_win.rs`, Ctrl+Alt+D) and
+> Carbon `RegisterEventHotKey` + `CGEventPost` (`app/src/dictation_mac.rs`,
+> ⌃⌥D, which needs the Accessibility grant to type). The seam design and
+> per-OS findings live in [`../MULTIPLATPLAN.md`](../MULTIPLATPLAN.md).
 
 ## Design principle
 

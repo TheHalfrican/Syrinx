@@ -37,6 +37,11 @@ mod capture_mac;
 #[cfg(target_os = "windows")]
 mod dictation_win;
 
+// macOS global dictation: the same second RPC client, with Carbon's hotkey and
+// CGEvent unicode injection in place of RegisterHotKey/SendInput.
+#[cfg(target_os = "macos")]
+mod dictation_mac;
+
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
@@ -372,10 +377,27 @@ fn main() -> anyhow::Result<()> {
             target_os = "windows",
             target_os = "macos"
         )));
-        // Dictation ships on Linux (syrinx-dictate) and Windows (the global
-        // hotkey thread below); macOS waits for phase 3. Gates the whole ⚙
+        // Dictation ships on Linux (syrinx-dictate) and, in-app, on Windows and
+        // macOS (the global hotkey threads armed below). Gates the whole ⚙
         // DICTATION card rather than just the Hyprland bind hint.
-        ui.set_dictation_supported(cfg!(any(target_os = "linux", target_os = "windows")));
+        ui.set_dictation_supported(cfg!(any(
+            target_os = "linux",
+            target_os = "windows",
+            target_os = "macos"
+        )));
+        // The in-app chord, named where the user looks for it. Linux says it
+        // with the Hyprland bind row instead (it has a command to copy), so it
+        // leaves this empty.
+        #[cfg(target_os = "windows")]
+        ui.set_st_dictation_hotkey("Ctrl+Alt+D  —  anywhere in Windows".into());
+        #[cfg(target_os = "macos")]
+        {
+            ui.set_st_dictation_hotkey(dictation_mac::HOTKEY_LINE.into());
+            // The Accessibility state as it stands at launch. It is re-read on
+            // every ⚙ open and on every chord press, so a grant made later
+            // clears the hint without a relaunch.
+            ui.set_st_dictation_hint(dictation_mac::untrusted_hint().into());
+        }
         // The ⚙ mic test has a level source on every platform: Win/mac read the
         // §14 engine recorder's RecordingLevel, Linux meters its own parecord
         // child app-side (the same capture path its real recordings use, so the
@@ -1134,6 +1156,13 @@ fn main() -> anyhow::Result<()> {
     // Non-fatal and off the main loop — never blocks startup or the UI.
     #[cfg(target_os = "windows")]
     dictation_win::spawn();
+
+    // The mac twin. Registration must happen HERE, on the main thread and before
+    // the run loop starts: Carbon's hotkey API is not thread safe and its
+    // application event target is dispatched by the NSApplication loop `ui.run()`
+    // is about to enter. The press handler only forwards to a worker thread.
+    #[cfg(target_os = "macos")]
+    dictation_mac::spawn(ui.as_weak());
 
     ui.run()?;
 
@@ -3357,6 +3386,22 @@ fn tap_hint(taps: &[(String, String)], native: bool, selected: bool) -> (&'stati
         )
     } else {
         (ROUTING, "")
+    }
+}
+
+/// The ⚙ DICTATION card's Accessibility line, `""` for no row. macOS only:
+/// injection is gated on a TCC grant there, and a missing grant has to be
+/// visible in the card, not just discovered by a chord that types nothing.
+/// Re-read on every ⚙ open (and on every press, from the dictation worker) so a
+/// grant made in System Settings clears the row without a relaunch.
+fn dictation_hint() -> &'static str {
+    #[cfg(target_os = "macos")]
+    {
+        dictation_mac::untrusted_hint()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        ""
     }
 }
 
@@ -5947,6 +5992,7 @@ async fn run_session(
                     let steps_idx = ST_STEP_OPTS.iter().position(|s| *s == steps)
                         .map(|i| i as i32).unwrap_or(1);
                     let refine = cfg.refine_dictation;
+                    let dict_hint = dictation_hint();
                     let stop_engine = cfg.stop_engine_on_quit;
                     let export_dir = cfg.export_dir.clone();
                     let data_dir = engine_data_dir().to_string_lossy().into_owned();
@@ -5962,6 +6008,7 @@ async fn run_session(
                         ui.set_st_steps_names(ModelRc::from(Rc::new(VecModel::from(steps_names))));
                         ui.set_st_steps_index(steps_idx);
                         ui.set_st_refine(refine);
+                        ui.set_st_dictation_hint(dict_hint.into());
                         ui.set_st_stop_engine(stop_engine);
                         ui.set_st_export_dir(export_dir.into());
                         ui.set_st_data_dir(data_dir.into());

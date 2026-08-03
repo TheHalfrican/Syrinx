@@ -1427,10 +1427,19 @@ export component AppWindow inherits Window {
     // Hyprland dictation hint). On macOS it stays true even with no driver
     // installed — st-tap-hint carries the fix, which a hidden button cannot.
     in property <bool> system-capture-supported: true;
-    // Dictation support — Linux (syrinx-dictate + compositor bind) and Windows
-    // (the global hotkey thread), not macOS yet. SET FROM RUST. Gates the whole
-    // ⚙ DICTATION card, heading included, so mac shows no dead affordance.
+    // Dictation support — Linux (syrinx-dictate + compositor bind), Windows and
+    // macOS (both in-app global hotkey threads). SET FROM RUST. Gates the whole
+    // ⚙ DICTATION card, heading included, so a platform without it shows no
+    // dead affordance.
     in property <bool> dictation-supported: true;
+    // The in-app chord, spelled the way its OS spells it — one line under the
+    // refine toggle. "" hides the row (Linux says it with the Hyprland bind row
+    // instead, which carries a ⧉). SET FROM RUST.
+    in property <string> st-dictation-hotkey: "";
+    // macOS only: injection needs the Accessibility grant, and a missing one
+    // must SAY so — a silent no-op reads as a broken hotkey. "" = granted, or a
+    // platform where the question does not arise. SET FROM RUST.
+    in property <string> st-dictation-hint: "";
     // decorative titlebar chrome — SET FROM RUST per OS (Linux keeps the exact
     // "hyprland · workspace N"; Win/mac get an equivalently subtle string).
     in property <string> desktop-chrome: "hyprland · workspace 3";
@@ -3205,7 +3214,16 @@ export component AppWindow inherits Window {
 
                             if root.dictation-supported : Text { text: "DICTATION"; height: 36px; vertical-alignment: bottom; font-size: 12px; font-weight: 700; color: Theme.name == "win95" || Theme.name == "vista" ? #ffffff : Theme.dim; }
                             if root.dictation-supported : Rectangle {
-                                height: 92px;
+                                // 58px of fixed chrome + the refine toggle, plus
+                                // 34px per optional line: the Hyprland bind, the
+                                // chord line, and 40px for the Accessibility hint
+                                // — the only one here allowed to wrap to two.
+                                // 58+34 is the authored 92px Linux always had;
+                                // Windows (no optional row) loses its dead space.
+                                height: 58px
+                                    + (root.is-linux ? 34px : 0px)
+                                    + (root.st-dictation-hotkey != "" ? 34px : 0px)
+                                    + (root.st-dictation-hint != "" ? 40px : 0px);
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
                                 border-radius: Theme.rad; background: Theme.card-bg;
                                 if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
@@ -3222,8 +3240,30 @@ export component AppWindow inherits Window {
                                             clicked => { root.st-toggle-refine(); }
                                         }
                                     }
+                                    // the in-app chord (Win/mac): one line, no
+                                    // wrap — it is a chord and a place, not prose.
+                                    if root.st-dictation-hotkey != "" : Text {
+                                        text: root.st-dictation-hotkey;
+                                        font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                        vertical-alignment: center; overflow: elide;
+                                        preferred-width: 0px; horizontal-stretch: 1;
+                                    }
+                                    // macOS, untrusted: injection is gated on the
+                                    // Accessibility grant, so the card names the
+                                    // pane rather than letting the chord type
+                                    // nothing. Wraps — hence the explicit height
+                                    // (a wrapping Text with preferred-width 0
+                                    // otherwise asks this fixed-height card for
+                                    // one word per line).
+                                    if root.st-dictation-hint != "" : Text {
+                                        text: root.st-dictation-hint;
+                                        font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                        vertical-alignment: center; wrap: word-wrap;
+                                        height: 32px;
+                                        preferred-width: 0px; horizontal-stretch: 1;
+                                    }
                                     // the compositor keybind hint is Hyprland-specific; hide it
-                                    // off-Linux, where dictation ships in phase 3 (RPC §—).
+                                    // off-Linux, where the chord line above says it instead.
                                     if root.is-linux : HorizontalLayout {
                                         spacing: 6px;
                                         Text {

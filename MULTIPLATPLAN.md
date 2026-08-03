@@ -56,7 +56,7 @@ effectively met.
 | Audio playback (sounddevice/PortAudio) | ✅ | ✅ | none |
 | Mic + VC-source recording | app shells out to `parecord`; ⚙ device pickers list PipeWire sources/monitors | Linux-native | **Keep on Linux** (monitor taps are a feature). Win/mac: engine-side sounddevice recording + device enumeration behind the same capture/picker interface |
 | System-audio capture (create-voice, ⇄ song capture) | `parecord --device=<sink>.monitor` | Linux-native | Win: WASAPI loopback ✅ (2026-07-24, app-side `capture_win.rs` — the native twin of parecord; ◉/⚙/♫ affordances unhidden via `system-capture-supported`) · mac: loopback driver (BlackHole), still phase-3-future; ♫ music mode stays import-file-only on mac |
-| Dictation (dictate/) | pw-record + wtype + wlr-layer-shell + compositor keybind | Wayland-native **by design** | **Untouched, permanently.** Win ✅ (2026-07-24, in-app `dictation_win.rs`: Ctrl+Alt+D + SendInput, no pill) · mac still phase-3-future |
+| Dictation (dictate/) | pw-record + wtype + wlr-layer-shell + compositor keybind | Wayland-native **by design** | **Untouched, permanently.** Win ✅ (2026-07-24, in-app `dictation_win.rs`: Ctrl+Alt+D + SendInput, no pill) · mac ✅ (2026-08-03, in-app `dictation_mac.rs`: ⌃⌥D via Carbon RegisterEventHotKey + CGEvent unicode injection, no pill; needs the Accessibility grant to type) |
 | Paths | XDG (`~/.local/share/syrinx`, XDG_RUNTIME_DIR) | XDG | `platformdirs` (py) + `dirs` (rs) — these ARE OS detection and return the exact current XDG paths on Linux; zero Linux change |
 | Process lifecycle | `setsid nohup` by hand | dev workflow | Linux: keep (optionally graduate to a systemd user unit / D-Bus activation — native polish). Win/mac: app spawns/supervises the engine |
 | Packaging | cargo build + venv by hand | source-first | Per-OS installers, phase 2; Linux stays source-first |
@@ -1640,6 +1640,136 @@ call a 0.1 ms cache hit. Gates: ruff clean, 633 pytest @ **95.65 %**
 `media.py` itself 98 %), clippy `-p syrinx-app -p syrinx-shared
 --all-targets` clean, 106 + 7 cargo tests green, dev bundle reinstalled.
 
+**2026-08-03 (phase 3 closes) — macOS dictation lands: ⌃⌥D anywhere in
+the OS, Carbon hotkey in, CGEvent unicode out.** `app/src/dictation_mac.rs`
+(~490 lines) is the architectural twin of `dictation_win.rs` — same
+second-RPC-client shape (§1: its OWN `EngineClient`, never the UI worker's),
+same toggle (`StartRecording` → `StopRecording` → `Transcribe` → optional
+`RefineTranscript` by req_id with the same 180 s timeout and raw-transcript
+fallback → inject), same "every failure logs and returns to idle", same
+no-pill decision, same `refine_dictation` key re-read per toggle. **Zero
+engine changes and zero protocol changes** — nothing server-side was ever
+OS-gated (`RefineTranscript`/§14 recording are plain methods); the §0/§11
+method, signal and property counts are untouched. RPC-PROTOCOL §1's
+"Connections" bullet now names the dictation
+client per OS in place of the stale "in phase 3 the dictate binary".
+
+**APIs, and why.** Hotkey: Carbon `RegisterEventHotKey` +
+`InstallEventHandler(GetApplicationEventTarget())`. It is present and
+*undeprecated* in the 26.5 SDK (`HIToolbox/CarbonEvents.h`, no deprecation
+attribute), and it is the one global-hotkey API that needs **no TCC grant at
+all** — a `CGEventTap` would demand Input Monitoring merely to listen, which
+was the disqualifier for `livesplit-hotkey`. Injection:
+`CGEventCreateKeyboardEvent(NULL, 0, down/up)` +
+`CGEventKeyboardSetUnicodeString` + `CGEventPost(kCGHIDEventTap)` — virtual
+key 0 and a unicode payload means **no keycode mapping**, so the transcript
+lands identically under any keyboard layout. **Crate cost: zero new
+packages.** `objc2-core-graphics` 0.3.2 was already in the lock file via
+objc2-app-kit ← slint, so Cargo.toml only *names* it (features `CGEvent`,
+`CGEventTypes`, and the non-obvious `CGRemoteOperation` — `CGKeyCode` lives
+there and the keyboard-event constructor is cfg'd on it); the diff to
+Cargo.lock is a single edge. Carbon and the three AX symbols stay raw FFI:
+`objc2-carbon` is an explicitly empty stub, nothing in the objc2 family
+covers HIToolbox events, and `objc2-application-services` would be +1 crate
+for `AXIsProcessTrusted`. Traps: `ItemCount`/`ByteCount` are **u64**
+(declaring them u32 is the classic way to corrupt this call); linking
+HIToolbox directly is refused by ld ("not an allowed client") — the umbrella
+`Carbon` framework is the only link; `Boolean` is a byte, not a Rust `bool`.
+`global-hotkey` 0.8 was the fallback (Carbon-backed, correct) at ~7 effective
+new crates; `enigo` would have dragged in the parallel servo core-graphics
+ecosystem.
+
+**Threading — the one place the twin diverges.** Windows spawns its own
+thread because `RegisterHotKey` delivers `WM_HOTKEY` to the *registering
+thread's* queue. macOS is the opposite: `RunApplicationEventLoop` does not
+exist in 64-bit, the API is documented "not thread safe", and hot-key events
+are dispatched by the **main** event loop (NSApplication pumps Carbon —
+Cocoa and Carbon share dispatch), which winit owns. So registration happens
+on the main thread in `main()` just before `ui.run()`, and the handler — on
+the main thread — does exactly one thing: `tx.send(())` to a worker thread
+that owns the tokio runtime and the engine connection. A 30 s `Transcribe`
+therefore cannot stall the UI, which is the same property the Windows pump
+buys a different way. Verified live: a bare (unbundled, no-run-loop) test
+binary got `RegisterEventHotKey(⌃⌥D) → OSStatus 0`, proving both the link
+and that nothing else on this machine owns the chord.
+
+**The chord: ⌃⌥D.** The literal twin of Windows' Ctrl+Alt+D (⌃ = Ctrl,
+⌥ = Alt) and free of macOS's own defaults — ⌘⌥D is show/hide Dock, ⌃⌘D is
+look-up-in-dictionary, both avoided. Registration is deliberately
+**non-exclusive** (options = 0, not `kEventHotKeyExclusive`): an app that
+already owns the chord keeps it and both are notified. Known caveat, in the
+module header: ⌃⌥ *is* the VoiceOver modifier, so a VoiceOver user should
+rebind (v1 has no rebinding UI, exactly as on Windows).
+
+**TCC, all three questions answered.** (1) The hotkey needs **nothing** —
+verified empirically, and structurally true because Carbon hotkeys are
+narrowly scoped. (2) `CGEventPost` needs the **Accessibility** grant
+(literally `kTCCServicePostEvent`, which System Settings shows *inside* the
+Accessibility pane — Apple DTS's own mapping; `CGPreflightPostEventAccess` is
+the pedantically-exact query, noted in-module if the live test ever shows a
+mismatch with AX trust). Input Monitoring is **not** involved anywhere in
+this module. (3) **No Info.plist key exists for Accessibility** — decisive
+check: the string table of `TCC.framework/Support/tccd` on 26.5 lists all 40
+`NS*UsageDescription` keys TCC honors, and neither `NSAccessibilityUsage
+Description` nor `NSInputMonitoringUsageDescription` is among them (the
+widely-cargo-culted latter is inert). So `install-macos-dev.sh` needed **no
+change at all** — unlike the CATap work, where `NSAudioCaptureUsageDescription`
+genuinely gates the prompt. The one thing that *does* bite: TCC keys the grant
+to the **code signature**, so every `install-macos-dev.sh` re-sign mints a new
+identity and the Accessibility toggle may need re-adding after a reinstall —
+the same dev-loop tax the mic grant already charges.
+
+**Trust handling.** `AXIsProcessTrustedWithOptions(kAXTrustedCheckOptionPrompt)`
+fires **once per app run**, on the **first chord press** — never at launch (an
+app that asks before the user has ever dictated is asking for nothing). The
+header is explicit that the prompt is *asynchronous and does not affect the
+return value*, so the first press returns false, raises the dialog, and — the
+important part — **does not start a recording it could never deliver**. That
+pre-flight is the mac answer to Windows' UIPI clipboard fallback, and it is
+strictly better: Windows cannot know until after the words exist. The ⚙
+DICTATION card carries the hint (`st-dictation-hint`) whenever untrusted,
+refreshed from three places — launch, every ⚙ open, and every press (the
+worker pushes through `upgrade_in_event_loop`, the app's own cross-thread
+plumbing) — so a grant made in System Settings clears the row without a
+relaunch, which the AX trust value does support live (MDM-profile grants
+excepted). Injection re-checks before typing, so a grant revoked mid-take
+surfaces the hint instead of typing nothing.
+
+**Chunking.** `CGEventKeyboardSetUnicodeString` has **no documented cap** —
+the event object round-trips 500 UTF-16 units — but the *delivery* path
+truncates silently at ~20 units (three independent implementations report it;
+nobody explains it). We chunk at **16** units, weighing each `char` whole
+before cutting, so a surrogate pair can never straddle two events (which
+would type two replacement characters instead of one emoji). Each chunk is a
+keydown+keyup pair with `CGEventSetFlags(0)` on both — an injected event
+otherwise **inherits the physically-held modifiers**, and the chord's own ⌃⌥
+can still be down, which is exactly the bug espanso hit. 4 ms between events
+(the field runs 0–20 ms).
+
+**Verified here:** clippy `-p syrinx-app -p syrinx-shared --all-targets -D
+warnings` clean; **117** app tests (+11) + 7 shared green, including chunk-cap
+/ surrogate-pair / round-trip / empty-input coverage and the pure `plan()`
+transition table (untrusted+idle → Blocked, never a recording; trusted toggles
+Start/Finish; grant revoked mid-take still finishes so the words survive).
+Two `--ignored` live natives smokes both pass on this M3: hotkey registration
+→ OSStatus 0, and the trust query answers and agrees with the hint. Offscreen
+snapshots of all four ⚙ DICTATION states (mac trusted / mac untrusted /
+Windows / Linux) read and correct. **This also closes the 2026-07-30 ledger
+item (2)**, the card's hard 92px with a Linux-only second row: the height now
+sums its optional rows (58px chrome + 34 per line + 40 for the wrapping
+Accessibility hint), Linux is provably byte-identical at 58+34 = the authored
+92px, and Windows' dead space became the chord line ("Ctrl+Alt+D — anywhere in
+Windows") rather than shrinking. Both known traps respected: the wrapping hint
+Text carries an explicit 32px height (preferred-width 0 in a fixed-height card
+otherwise asks for one word per line).
+
+**Left for the human, and only this:** the end-to-end chord. Grant
+Accessibility to the reinstalled `Syrinx.app`, then with a third-party app
+focused press ⌃⌥D, speak, press again, and watch the transcript type itself.
+Nothing short of that can be verified from an agent session — dispatch needs
+the app's own NSApplication run loop and a focused foreign window, and the
+grant needs a human at System Settings.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
@@ -1714,12 +1844,16 @@ Windows sessions; each also appears in its origin ledger entry above):
    checklist).
 
 **NEXT SESSION — macOS phase 3 (the port's last frontier):**
-1. System capture: BlackHole loopback driver detection (document install,
-   detect absence gracefully) behind the same `system-capture-supported`
-   capability property; the Capture enum's macOS arm mirrors capture_win.
-2. Dictation: NSEvent/Carbon global hotkey + CGEventPost injection,
-   in-app like dictation_win (dictate/ stays Linux-only).
-3. Before either: a macOS phase-1/2 validation pass (transport, supervised
-   lifecycle, device matrix incl. MPS, packaging) — the Windows campaign's
-   playbook in this file's Findings is the template. No Mac hardware has
-   been touched yet; everything above is design-ready, not started.
+1. ~~System capture: BlackHole loopback driver detection~~ RESOLVED
+   2026-08-03 — and then superseded: the native Core Audio process tap
+   (`capture_mac.rs`) needs no driver at all; the driver path survives as
+   the pre-14.2 fallback and the manual ⚙ override.
+2. ~~Dictation: NSEvent/Carbon global hotkey + CGEventPost injection,
+   in-app like dictation_win~~ RESOLVED 2026-08-03 —
+   `app/src/dictation_mac.rs`, ⌃⌥D, Carbon `RegisterEventHotKey` +
+   CGEvent unicode injection behind the Accessibility grant. See the
+   dated Findings entry above; the live chord test belongs to the user.
+3. ~~Before either: a macOS phase-1/2 validation pass~~ RESOLVED
+   2026-07-29/30 (phases 1 and 2 landed on the M3, MPS included).
+   Remaining mac work is Seed-VC / Vevo MPS verification and a
+   self-contained bundle.

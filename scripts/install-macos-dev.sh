@@ -331,6 +331,13 @@ ${BOLD}system-audio${RESET} recording asks separately, for "System Audio Recordi
 grant is what the native Core Audio tap needs, and no loopback driver is
 involved. Reinstalling re-signs the bundle, so both prompts can come back.
 
+The first time you press the dictation chord (${BOLD}⌃⌥D${RESET}) Syrinx asks for
+${BOLD}Accessibility${RESET} — that grant is what lets it type the transcript into
+whatever app you are in. It needs no Info.plist key (unlike the two above),
+but it does key to the signature, so a reinstall can require re-adding
+Syrinx under Privacy & Security > Accessibility. Until it is granted the
+app records nothing on that chord and the ⚙ DICTATION card says why.
+
 If this checkout lives under ~/Documents, ~/Desktop or ~/Downloads, the very
 first launch also asks for ${BOLD}files-in-Documents${RESET} access — and the app
 sits blank until that dialog is answered (the engine's first file read blocks

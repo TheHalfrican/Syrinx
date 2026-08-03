@@ -54,6 +54,13 @@ objc2-app-kit = { version = "0.3", default-features = false, features = ["std", 
 objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-foundation", "objc2-core-audio-types", "AudioHardware"] }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary"] }
+# Dictation's keystroke injection (dictation_mac.rs): CGEventCreateKeyboardEvent
+# + CGEventKeyboardSetUnicodeString + CGEventPost. Already in the graph via
+# objc2-app-kit, so this names it rather than adding it; CGRemoteOperation is
+# the non-obvious feature — CGKeyCode lives there, and the keyboard-event
+# constructor is cfg'd on it. Carbon's hotkey half has no objc2 binding at all
+# (objc2-carbon is an empty stub), so that stays raw FFI in the module.
+objc2-core-graphics = { version = "0.3", default-features = false, features = ["std", "CGEvent", "CGEventTypes", "CGRemoteOperation"] }
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSString", "NSUUID", "NSValue"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]

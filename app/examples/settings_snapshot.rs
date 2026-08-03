@@ -16,6 +16,12 @@
 //!              copies it
 //!   none     — the Linux/Windows shape: no hint row at all
 //!
+//! ⚙ DICTATION card variants (the card's height sums its optional rows):
+//!   dictation-trusted   — macOS with the Accessibility grant: chord line only
+//!   dictation-untrusted — macOS without it: chord line + the pane hint
+//!   dictation-windows   — the Windows shape: chord line, no hint
+//!   dictation-linux     — the Linux shape: the Hyprland bind row and its ⧉
+//!
 //! Silence-guard variants (a system capture that came back empty):
 //!   tr-silent — ☰ Transcription, the notice row under the source buttons
 //!   vc-silent — ⇄ Converter, the clip armed anyway with the cause on vc-error
@@ -231,6 +237,36 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                     })
                     .collect::<Vec<_>>(),
             )));
+        }
+        return render(&ui, &out, w, h, &variant);
+    }
+
+    // The ⚙ DICTATION card, one variant per platform state. Everything else on
+    // the tab keeps the macOS-native shape so only the card differs between them.
+    if let Some(state) = variant.strip_prefix("dictation-") {
+        ui.set_st_mic_names(names(&["iMac Microphone", "BlackHole 2ch"]));
+        ui.set_st_mon_names(names(&["System audio (native tap)", "BlackHole 2ch"]));
+        ui.set_st_mic_test_supported(true);
+        ui.set_dictation_supported(true);
+        ui.set_st_refine(true);
+        // is-linux also gates the ENGINE card, exactly as on the real platform
+        ui.set_is_linux(state == "linux");
+        if state != "linux" {
+            ui.set_st_dictation_hotkey(
+                if state == "windows" {
+                    "Ctrl+Alt+D  —  anywhere in Windows"
+                } else {
+                    "⌃⌥D  —  anywhere in macOS"
+                }
+                .into(),
+            );
+        }
+        if state == "untrusted" {
+            // main.rs's own string (dictation_mac::TCC_HINT), the longest this
+            // row can carry — so the snapshot shows the two-line worst case
+            ui.set_st_dictation_hint(
+                "Typing the transcript needs Accessibility: System Settings > Privacy & Security > Accessibility".into(),
+            );
         }
         return render(&ui, &out, w, h, &variant);
     }

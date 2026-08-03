@@ -47,9 +47,14 @@ divergence must be called out here rather than silently resolved.
   frames or pack two into one.
 - **Direction:** the client sends **requests**; the server sends **responses**
   (to requests) and **notifications** (signals + `PropertiesChanged`, id-less).
-- **Connections:** exactly **one** client connection is the normal case (the app,
-  or in phase 3 the dictate binary). The spec nonetheless defines multi-client
-  behavior:
+- **Connections:** exactly **one** client connection is the normal case (the
+  app). A **second** is the dictation client: on Linux that is the standalone
+  `syrinx-dictate` binary (D-Bus, not this transport); on Windows and macOS it
+  is a hotkey-driven module *inside* the app (`app/src/dictation_win.rs`,
+  `app/src/dictation_mac.rs`) that opens its **own** `EngineClient` rather than
+  sharing the UI worker's, so a 30 s `Transcribe` never queues behind the UI.
+  It adds no methods and no notifications — it is a client of the surface below,
+  not an extension of it. The spec nonetheless defines multi-client behavior:
   - **Requests** are accepted from **any** authenticated connection.
   - **Notifications** (all signals + `PropertiesChanged`) are **broadcast to
     every** authenticated connection.

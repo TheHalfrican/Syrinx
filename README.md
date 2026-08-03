@@ -2,8 +2,8 @@
 
 A native voice studio — text-to-speech, voice cloning, and global-hotkey
 dictation. Wayland-first on Linux (built for **CachyOS + Hyprland**), and as
-of 2026-07 also fully native on **Windows** and (dictation aside) on
-**macOS** — Apple silicon, ML on MPS.
+of 2026-07 also fully native on **Windows** and **macOS** — Apple silicon,
+ML on MPS.
 
 Named for the *syrinx*, the vocal organ birds sing with (and, in myth, the reeds
 a nymph became — the first pan-pipe).
@@ -134,10 +134,16 @@ backend there). System-audio capture is native and driver-free as of
 the twin of Windows' WASAPI loopback, so it captures whatever is playing
 wherever it is playing; loopback drivers (`brew install blackhole-2ch`,
 proven live with a bit-transparent 440 Hz loop) stay as the pre-14.2
-fallback and as a manual override. `scripts/install-macos-dev.sh` wraps
-the checkout in a signed dev `Syrinx.app`. Still to come on mac: in-app dictation, Seed-VC / Vevo
-verification (they install, but their workers haven't been MPS-tuned),
-and a self-contained bundle.
+fallback and as a manual override. In-app dictation lands 2026-08-03
+(**⌃⌥D**), the twin of the Windows path: a Carbon global hotkey and
+CGEvent unicode injection, so the transcript is typed into whatever app
+has focus. Typing into other apps needs one grant — System Settings >
+Privacy & Security > **Accessibility** — which Syrinx asks for the first
+time you press the chord, and the ⚙ DICTATION card names until it is
+given. `scripts/install-macos-dev.sh` wraps the checkout in a signed dev
+`Syrinx.app`. Still to come on mac: Seed-VC / Vevo verification (they
+install, but their workers haven't been MPS-tuned), and a self-contained
+bundle.
 
 - **Text-to-speech** across seven engines: Kokoro presets (language-filtered),
   and zero-shot cloning with Qwen TTS (1.7B/0.6B), Qwen CustomVoice, LuxTTS
