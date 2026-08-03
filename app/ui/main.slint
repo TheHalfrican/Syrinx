@@ -1409,7 +1409,9 @@ export component AppWindow inherits Window {
     callback vs-play(string);        // audition a reference sample
     callback import-voice();
 
-    property <string> tab: "tts";
+    // in-out only so the offscreen snapshot harness (examples/settings_snapshot.rs)
+    // can park the window on one tab; Rust never writes it in the app itself.
+    in-out property <string> tab: "tts";
     // Leaving ⚙ must stop a running mic test — an open input stream the user
     // can no longer see is exactly the thing a "nothing is saved" affordance
     // may not do. Intercepting the property centrally beats patching all eight
@@ -3089,6 +3091,13 @@ export component AppWindow inherits Window {
                                             text: root.st-tap-hint;
                                             font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
                                             vertical-alignment: center; wrap: word-wrap;
+                                            // a wrapping Text takes its MINIMUM HEIGHT from its
+                                            // preferred width, and preferred-width: 0px means one
+                                            // word per line — hundreds of px, which the card's
+                                            // fixed height cannot grant, so the row lands far below
+                                            // it. 32px is the budget this row was authored for:
+                                            // two lines at 10.5px.
+                                            height: 32px;
                                             preferred-width: 0px; horizontal-stretch: 1;
                                         }
                                         if root.st-tap-copy != "" : VerticalLayout {
