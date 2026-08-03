@@ -20,6 +20,12 @@
 //!   tr-silent — ☰ Transcription, the notice row under the source buttons
 //!   vc-silent — ⇄ Converter, the clip armed anyway with the cause on vc-error
 //!   cv-silent — the create-voice modal, warning label + footer cause line
+//!
+//! Scrolling-list variants (enough rows to force the scrollbar out — use a
+//! short window, e.g. 1200x700, or the content fits and no bar is drawn):
+//!   tts-hist  — ▷ Text to Speech, the HISTORY rail full of generations
+//!   lib-list  — ▤ Audio Library, the clip rows
+//!   vp-list   — ◍ Voices, the profile table (checks header↔row alignment)
 
 use std::rc::Rc;
 
@@ -120,6 +126,73 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_cv_sample_label(KEPT.into());
                 ui.set_cv_error(CAUSE.into());
             }
+        }
+        return render(&ui, &out, w, h, &variant);
+    }
+
+    if variant == "vp-list" {
+        ui.set_tab("voices".into());
+        ui.set_vp_rows(ModelRc::new(VecModel::from(
+            ["Nova", "Atlas", "Wren", "Cinder", "Juniper", "Marlow", "Pike", "Solace"]
+                .iter()
+                .enumerate()
+                .map(|(i, name)| ProfileRow {
+                    id: format!("v{i}").into(),
+                    name: (*name).into(),
+                    desc: "cloned from a 30 s reference".into(),
+                    lang: "en".into(),
+                    engine: if i % 2 == 0 { "Chatterbox" } else { "LuxTTS" }.into(),
+                    samples: format!("{}", i + 1).into(),
+                    gens: format!("{}", i * 7).into(),
+                    avatar: slint::Image::default(),
+                    has_avatar: false,
+                })
+                .collect::<Vec<_>>(),
+        )));
+        return render(&ui, &out, w, h, &variant);
+    }
+
+    if variant == "tts-hist" || variant == "lib-list" {
+        let rows: Vec<(&str, &str, &str)> = vec![
+            ("Nova", "Kokoro · 0:12 · 2026-08-03 14:02", "The quick brown fox jumps over the lazy dog, twice, for good measure."),
+            ("Atlas", "Chatterbox · 0:31 · 2026-08-03 13:44", "Local inference means the audio never leaves this machine."),
+            ("Wren", "Kokoro · 0:07 · 2026-08-03 12:10", "Short one."),
+            ("Cinder", "LuxTTS · 1:04 · 2026-08-02 21:55", "A longer passage that wraps inside the card's message box so the inner scroll view has something to do."),
+            ("Juniper", "Chatterbox · 0:19 · 2026-08-02 18:30", "Testing one, two, three."),
+            ("Marlow", "Kokoro · 0:44 · 2026-08-02 09:12", "Every generation is saved and searchable from the library."),
+            ("Pike", "Seed-VC · 0:26 · 2026-08-01 22:41", "Converted from a reference clip, timbre swapped."),
+            ("Solace", "LuxTTS · 0:58 · 2026-08-01 16:03", "The last row, far enough down that the rail must scroll to reach it."),
+        ];
+        if variant == "tts-hist" {
+            ui.set_tab("tts".into());
+            ui.set_history(ModelRc::new(VecModel::from(
+                rows.iter()
+                    .enumerate()
+                    .map(|(i, (voice, meta, text))| HistItem {
+                        id: format!("h{i}").into(),
+                        voice: (*voice).into(),
+                        meta: (*meta).into(),
+                        text: (*text).into(),
+                        starred: i % 3 == 0,
+                    })
+                    .collect::<Vec<_>>(),
+            )));
+        } else {
+            ui.set_tab("lib".into());
+            ui.set_lib_count_line("8 clips · 3:41 total".into());
+            ui.set_lib_rows(ModelRc::new(VecModel::from(
+                rows.iter()
+                    .enumerate()
+                    .map(|(i, (title, meta, text))| LibItem {
+                        id: format!("l{i}").into(),
+                        title: (*title).into(),
+                        meta: (*meta).into(),
+                        text: (*text).into(),
+                        starred: i % 3 == 0,
+                        tags: if i % 2 == 0 { "demo, keep".into() } else { "".into() },
+                    })
+                    .collect::<Vec<_>>(),
+            )));
         }
         return render(&ui, &out, w, h, &variant);
     }

@@ -1500,6 +1500,36 @@ repeatably, `_initialized` back to 1, the 4-device list identical
 across the bounce, and both an OutputStream and an InputStream open
 fine afterwards.
 
+**2026-08-03 (UI) — the scrollbar gutter: std-widgets' ScrollView paints
+its bar OVER the viewport, so every list whose rows stretch the full
+width had the bar sitting on the last column** (Noah saw it on the TTS
+HISTORY cards and the Audio Library rows; it is platform-independent —
+the app compiles the default `fluent` widget style, whose vertical
+ScrollBar is 14px wide over a full-width Flickable). Mechanism:
+`Theme.sb-gutter: 14px` (theme.slint, skin-independent — it tracks the
+widget style, not the palette), applied as `padding-right` on the layout
+INSIDE each affected ScrollView. Affected + fixed (11): TTS voices grid
+(wide + narrow), TTS history, ☰ captures rail, ⇄ source-clip rail, ⇄
+conversions rail, ▤ library rows, ◍ profile table (its column-header row
+takes `12px + Theme.sb-gutter` so headers stay over the row columns), ◍
+inspector samples, ✧ fx presets, ✧ fx chain. Already clean, untouched: ⚙
+settings and ◈ models (their inner layouts already pad 22px > 14px).
+Deliberately NOT changed: the 9 TextInput ScrollViews (composer,
+history/capture message boxes, transcripts, personality, create-voice)
+— their `viewport-width: self.visible-width` is the wrap width, so a
+gutter there changes text wrapping and scroll extent, which this fix is
+not allowed to touch; and the ThemedDropdown popup list (scrolls past 8
+options, but a permanent 14px inset would visibly unbalance every
+non-scrolling popup, and option text elides). Verified with
+`app/examples/settings_snapshot.rs`, which grows three list variants
+(`tts-hist`, `lib-list`, `vp-list`) that seed 8 dummy rows each — at
+1200x700 the content overflows and the bar is drawn, which is the only
+way the overlap shows. Before/after PNGs: rows now stop 14px short and
+the bar has clear track; the ◍ header row still lines up with the rows'
+columns; ⚙ re-rendered unchanged. Gates: clippy `-p syrinx-app -p
+syrinx-shared --all-targets` clean, 103 + 7 tests green, dev bundle
+reinstalled.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~

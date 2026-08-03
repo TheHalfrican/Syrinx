@@ -1573,7 +1573,7 @@ export component AppWindow inherits Window {
                             // a single-column list below. KEEP THE CARD BODIES IN SYNC.
                             if !narrow : ScrollView {
                                 GridLayout {
-                                    spacing: 16px;
+                                    spacing: 16px; padding-right: Theme.sb-gutter;
                                     for v[i] in voices : Rectangle {
                                         row: floor(i / 3);
                                         col: mod(i, 3);
@@ -1613,7 +1613,7 @@ export component AppWindow inherits Window {
                             // cards are wider than the fullscreen ones and just work.
                             if narrow : ScrollView {
                                 VerticalLayout {
-                                    spacing: 16px;
+                                    spacing: 16px; padding-right: Theme.sb-gutter;
                                     for v[i] in voices : Rectangle {
                                         // the Rust model pads to a multiple of 3 for the wide
                                         // grid — collapse the pad cells instead of showing gaps
@@ -1853,7 +1853,7 @@ export component AppWindow inherits Window {
                                 Text { text: "HISTORY"; font-size: 12px; font-weight: 700; color: Theme.name == "win95" ? #ffffff : Theme.dim; }
                                 ScrollView {
                                     VerticalLayout {
-                                        spacing: 8px;
+                                        spacing: 8px; padding-right: Theme.sb-gutter;
                                         for h[i] in history : Rectangle {
                                             // fixed height so the ScrollView scrolls instead of
                                             // squeezing cards into each other as history grows
@@ -1998,7 +1998,7 @@ export component AppWindow inherits Window {
                             ScrollView {
                                 vertical-stretch: 1;
                                 VerticalLayout {
-                                    spacing: 8px;
+                                    spacing: 8px; padding-right: Theme.sb-gutter;
                                     for c in captures : Rectangle {
                                         // fixed height so the ScrollView scrolls (it squeezes
                                         // flexible children instead)
@@ -2355,7 +2355,7 @@ export component AppWindow inherits Window {
                             ScrollView {
                                 vertical-stretch: 1;
                                 VerticalLayout {
-                                    spacing: 8px;
+                                    spacing: 8px; padding-right: Theme.sb-gutter;
                                     for c in (vc-mode == "music" ? vc-clips-music : vc-clips-speech) : Rectangle {
                                         // fixed height so the ScrollView scrolls
                                         height: 58px;
@@ -2756,7 +2756,7 @@ export component AppWindow inherits Window {
                             ScrollView {
                                 vertical-stretch: 1;
                                 VerticalLayout {
-                                    spacing: 8px;
+                                    spacing: 8px; padding-right: Theme.sb-gutter;
                                     // the toggle picks which conversions show
                                     for h in (vc-mode == "music" ? vc-history-music : vc-history-speech) : Rectangle {
                                         // fixed height so the ScrollView scrolls
@@ -2876,7 +2876,7 @@ export component AppWindow inherits Window {
                         ScrollView {
                             vertical-stretch: 1;
                             VerticalLayout {
-                                spacing: 8px;
+                                spacing: 8px; padding-right: Theme.sb-gutter;
                                 for r in lib-rows : Rectangle {
                                     // fixed height so the ScrollView scrolls
                                     height: 126px;
@@ -3336,9 +3336,10 @@ export component AppWindow inherits Window {
                                     cv-open = true;
                                 } }
                             }
-                            // column headers
+                            // column headers — the extra gutter keeps them over
+                            // the rows, which clear the ScrollView's bar
                             HorizontalLayout {
-                                padding-left: 60px; padding-right: 12px; spacing: 10px;
+                                padding-left: 60px; padding-right: 12px + Theme.sb-gutter; spacing: 10px;
                                 Text { text: "NAME"; font-size: 10.5px; font-weight: 700; color: Theme.dim; horizontal-stretch: 1; }
                                 Text { text: "LANG"; font-size: 10.5px; font-weight: 700; color: Theme.dim; width: 44px; }
                                 Text { text: "DEFAULT MODEL"; font-size: 10.5px; font-weight: 700; color: Theme.dim; width: 96px; }
@@ -3347,7 +3348,7 @@ export component AppWindow inherits Window {
                             }
                             ScrollView {
                                 VerticalLayout {
-                                    spacing: 8px;
+                                    spacing: 8px; padding-right: Theme.sb-gutter;
                                     // fixed row height: ScrollView squeezes flexible children
                                     for r in vp-rows : Rectangle {
                                         height: 56px; border-radius: Theme.rad;
@@ -3451,7 +3452,7 @@ export component AppWindow inherits Window {
                                 ScrollView {
                                     vertical-stretch: 1;
                                     VerticalLayout {
-                                        spacing: 6px;
+                                        spacing: 6px; padding-right: Theme.sb-gutter;
                                         for s in vi-samples : Rectangle {
                                             height: 40px; border-radius: Theme.rad;
                                             border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -4045,7 +4046,7 @@ export component AppWindow inherits Window {
                     ScrollView {
                         vertical-stretch: 1;
                         VerticalLayout {
-                            spacing: 4px;
+                            spacing: 4px; padding-right: Theme.sb-gutter;
                             for p[i] in fxe-presets : Rectangle {
                                 height: 30px; border-radius: Theme.rad;
                                 background: i == fxe-preset-index ? Theme.acc-soft
@@ -4086,7 +4087,7 @@ export component AppWindow inherits Window {
                     ScrollView {
                         vertical-stretch: 1;
                         VerticalLayout {
-                            spacing: 6px;
+                            spacing: 6px; padding-right: Theme.sb-gutter;
                             for r[i] in fxe-chain : Rectangle {
                                 // fixed height per state so the ScrollView scrolls
                                 height: 32px + (r.expanded ? fxe-params.length * 38px + 10px : 0px);

@@ -40,6 +40,12 @@ export global Theme {
     out property <length> win-radius:
         name == "win95" ? 0px : name == "ps5" ? 20px : name == "rice" ? 12px : name == "tui" ? 0px : 10px;
 
+    // std-widgets' ScrollView paints its bar OVER the viewport, so every list
+    // whose rows stretch to the full width must reserve this much on the right
+    // or the bar sits on top of the last column. 14px = the fluent ScrollBar's
+    // width (the style slint-build compiles by default); skin-independent.
+    out property <length> sb-gutter: 14px;
+
     // --- title bar ---
     out property <brush> tb-bg:
         name == "win95" ? @linear-gradient(180deg, #2f9c96, #167f7a)
