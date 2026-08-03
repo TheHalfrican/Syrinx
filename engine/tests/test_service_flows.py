@@ -289,7 +289,7 @@ def test_speak_synthesizes_persists_and_plays(iface, signals, fake_sd):
     assert clip_id == rows[0]["id"] and title == "Heart"
     assert duration == pytest.approx(0.2)
     assert len(json.loads(bars)) == 300
-    assert fake_sd.made[0].frames == int(0.2 * RATE)
+    assert fake_sd.made[0].voiced_frames == int(0.2 * RATE)
 
 
 def test_speak_uses_the_active_style_and_effect(iface, signals):
@@ -670,7 +670,7 @@ def test_play_history_replays_a_stored_clip(iface, signals, fake_sd):
     hid = json.loads(drive(iface, "ListHistory"))[0]["id"]
     fake_sd.made.clear()
     assert drive(iface, "PlayHistory", hid) > 0
-    assert fake_sd.made[0].frames == int(0.2 * RATE)
+    assert fake_sd.made[0].voiced_frames == int(0.2 * RATE)
     assert signals["PlaybackInfo"][-1][1] == hid
 
 
@@ -679,27 +679,27 @@ def test_play_history_at_starts_partway_in(iface, fake_sd):
     hid = json.loads(drive(iface, "ListHistory"))[0]["id"]
     fake_sd.made.clear()
     drive(iface, "PlayHistoryAt", hid, 0.5)
-    assert fake_sd.made[0].frames == pytest.approx(int(0.1 * RATE), abs=1024)
+    assert fake_sd.made[0].voiced_frames == pytest.approx(int(0.1 * RATE), abs=1024)
 
 
 def test_play_sample_auditions_a_profile_reference(iface, make_wav, fake_sd, signals):
     pid = profile(iface, "Nail")
     sid = json.loads(drive(iface, "AddSample", pid, str(make_wav("ref.wav", secs=0.5)), "x"))
     assert drive(iface, "PlaySample", sid["sample_id"]) > 0
-    assert fake_sd.made[0].frames == int(0.5 * RATE)
+    assert fake_sd.made[0].voiced_frames == int(0.5 * RATE)
     assert signals["PlaybackInfo"][-1][2] == "Sample"
 
 
 def test_play_file_auditions_any_local_audio(iface, make_wav, fake_sd, signals):
     path = make_wav("loose.wav", secs=0.5)
     assert drive(iface, "PlayFile", str(path), "") > 0
-    assert fake_sd.made[0].frames == int(0.5 * RATE)
+    assert fake_sd.made[0].voiced_frames == int(0.5 * RATE)
     assert signals["PlaybackInfo"][-1][2] == "loose"  # falls back to the stem
 
 
 def test_play_file_at_starts_partway_in(iface, make_wav, fake_sd):
     drive(iface, "PlayFileAt", str(make_wav("loose.wav", secs=0.5)), "T", 0.5)
-    assert fake_sd.made[0].frames == pytest.approx(int(0.25 * RATE), abs=1024)
+    assert fake_sd.made[0].voiced_frames == pytest.approx(int(0.25 * RATE), abs=1024)
 
 
 def test_preview_effects_plays_an_ad_hoc_chain_without_saving(iface, fake_sd, signals):
@@ -708,7 +708,7 @@ def test_preview_effects_plays_an_ad_hoc_chain_without_saving(iface, fake_sd, si
     fake_sd.made.clear()
     chain = json.dumps([{"type": "gain", "params": {"gain_db": 0.0}}])
     assert drive(iface, "PreviewEffects", hid, chain) > 0
-    assert fake_sd.made[0].frames > 0
+    assert fake_sd.made[0].voiced_frames > 0
     assert signals["PlaybackInfo"][-1][2].endswith("· preview")
     assert len(json.loads(drive(iface, "ListHistory"))) == 1  # nothing new
 

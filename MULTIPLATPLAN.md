@@ -1392,6 +1392,114 @@ delivers zeros with no error (2026-08-03 entry above) — the native
 hint's wording is deliberately about the audio, not the permission,
 and the ⚙ card remains the place a permission story would go.
 
+**2026-08-03 (engine) — two PortAudio truths the engine had never
+accounted for: its device list is a SNAPSHOT, and PaMacCore throws the
+tail away.** Both fixed in `engine/syrinx_engine/audio.py` (+
+`recording.py`), no Rust, no RPC change.
+
+(1) *Stale topology.* The incident: BlackHole 2ch was uninstalled (and
+coreaudiod restarted) under a running engine, and from that moment
+EVERY playback attempt logged `could not open output stream (Error
+opening OutputStream: Internal PortAudio error [PaErrorCode -9986]);
+skipping playback` (+ `||PaMacCore (AUHAL)|| Error on line 1332:
+err='-10851'`) until the engine was restarted. PortAudio snapshots the
+topology at `Pa_Initialize`, so any device appearing or disappearing
+afterwards — driver install/uninstall, USB unplug, Bluetooth earbuds
+dropping, i.e. an ordinary end-user event — leaves the cached list and
+default-device references lying, permanently. Fix is on-demand, not a
+listener: `with_fresh_portaudio_retry(sd, open_fn)` runs the open,
+and on a stale-topology signature bounces PortAudio
+(`sd._terminate()` + `sd._initialize()`, the documented refresh) and
+retries EXACTLY once; a second failure re-raises the FIRST exception
+unchanged, so every existing surface (the "skipping playback" warning,
+`StartRecording` → "", `ListRecordingDevices` → "[]") reads the same.
+Match set is conservative and code-based, not string-based
+(`PortAudioError.args` is `(message, PaErrorCode[, host info])`):
+**-9986** paInternalError (what PaMacCore reports here), **-9985**
+paDeviceUnavailable, **-9996** paInvalidDevice. Format/parameter codes
+are excluded on purpose — -9997 paInvalidSampleRate fails identically
+after a bounce, and retrying it would dress a parameter bug up as a
+device story. Hooked in at four call sites: `audio._play_blocking`'s
+`sd.OutputStream`, `RecordingManager.start`'s `sd.InputStream`,
+`recording.list_devices`' `sd.query_devices` (the §14 enumeration), and
+— by construction — nothing else, because those are the only places the
+engine touches PortAudio (the ⚙ mic meter is the same
+StartRecording/RecordingLevel path, and Linux's parecord arm never
+reaches Python).
+
+**Bounce-only-when-idle** is the load-bearing rule: `_terminate()`
+yanks every live stream out from under its owner, so the audio module
+keeps an `_active_streams` count (`stream_opened()` right after a
+successful open; `stream_closed()` in `_play_blocking`'s finally and in
+`_Recording.finalize`, which is already idempotent). Non-zero ⇒ no
+bounce, log at warning, let the original error propagate — a stale open
+next to a working stream is rare and self-resolves on the next attempt,
+whereas killing a live recording to fix a playback open is not a trade
+anyone would take.
+
+**Index-invalidation audit** (indices do NOT survive a bounce, names
+do): the only saved index in the engine was `RecordingManager.start`'s
+`_resolve_input()` result, computed before the open — so `start` was
+restructured to resolve device AND sample rate INSIDE the retried
+callable, and the WAV is now opened after the stream (it takes the rate
+the stream actually got, and `rec` exists before `stream.start()`,
+which is when PortAudio begins calling back). Everything else came out
+clean: settings persist the device **name**, never an index
+(RPC-PROTOCOL §14's `id` is the name, deliberately); `list_devices`
+reads `sd.default.device[0]` only for the `default` flag and the engine
+never ASSIGNS `sd.default.*`, so a bounce loses no configuration; the
+Rust side stores names too. Not fixed, and deliberately out of scope: a
+`query_devices` that SUCCEEDS while returning a ghost device (BlackHole
+after uninstall) is still stale — the retry only fires on an error. An
+unconditional refresh per enumeration is one line but would kill any
+live recording, so it stays parked.
+
+(2) *The cut-off last word.* Users reported "the last half of the last
+word is always cut off", worse on macOS. `_play_blocking` wrote its
+final block and went straight to `stream.stop()`; PaMacCore's blocking
+I/O (blio) layer DISCARDS its ring buffer on `Pa_StopStream` instead of
+playing it out (long-standing PortAudio macOS behaviour; Windows/Linux
+hosts drain). Engine-dependence was a red herring: Kokoro clips carry
+300-670 ms of trailing padding that absorbs the cut, while Qwen/LuxTTS
+trim to 2 ms / 46 ms past the last speech energy and lose real words.
+Fix is `audio._drain()`, called only when the block loop ran to its
+natural end (a user stop must NOT be padded): silence sized
+`ceil(stream.latency * rate) + one _BLOCK` of margin, pushed through
+the same blocking `stream.write` — a blocking write returns when there
+is ROOM, so filling the buffer with silence IS the proof that every
+real sample was consumed, and it costs no wall time beyond the audio
+that was genuinely still playing. `ctl.stop` is checked between drain
+chunks so cancel/seek responsiveness is untouched (one block ≈ 43 ms).
+**The cap is 2 s, not 1** (`_MAX_DRAIN_SECS`), and that is a
+measurement, not a preference: sounddevice requests PortAudio's "high"
+latency, and the M3's default output — Bluetooth (TOZO NC9) — reports
+`stream.latency = 1.082375 s`, so a 1 s cap would clip the very tail
+this exists to save. The cap never affects cancel latency (that is the
+per-chunk `ctl.stop` check); it only bounds a host reporting nonsense.
+Live smoke on the real default device: a 0.3 s tone took 1.548 s wall
+without the drain and 2.383 s with it — i.e. the old code returned
+~0.8 s before the audio it had queued could possibly have been heard,
+which on a 1.08 s-latency sink is the whole clip.
+
+Gates: `ruff check engine` clean; `pytest engine/tests --cov` 587
+passed, 95.56 % (gate 94). New tests live in the existing mocked-
+sounddevice idiom — `conftest.pa_error()` builds a PortAudioError with
+sounddevice's real `args` shape, `fake_sd` gained
+`_terminate`/`_initialize` (recording into `.bounces`, with an
+`on_bounce` hook that reshuffles `.devs` the way a driver install
+does), `FakeStream` gained `latency` + `voiced_frames`/`tail_zeros` so
+every pre-existing frame-count assertion now reads the clip and ignores
+the pad. Covered: retry-once-then-success (parametrized over all three
+codes), retry-then-fail raises the FIRST error, no retry on -9997 or a
+plain exception, no bounce while a stream is live, a bounce that itself
+throws is not fatal, the recording retry re-resolving a MOVED device
+index, drain on natural end / none on user stop / aborted mid-drain by
+cancel / bounded at 2 s. Standalone PortAudio smoke (not against the
+running engine): `_terminate()` + `_initialize()` cycles cleanly and
+repeatably, `_initialized` back to 1, the 4-device list identical
+across the bounce, and both an OutputStream and an InputStream open
+fine afterwards.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~

@@ -21,6 +21,7 @@ from pathlib import Path
 
 import numpy as np
 
+from .audio import stream_closed, stream_opened, with_fresh_portaudio_retry
 from .profiles import _data_dir
 
 log = logging.getLogger("syrinx.engine.recording")
@@ -96,7 +97,7 @@ def list_devices() -> "list[dict]":
         log.warning("ListRecordingDevices: sounddevice unavailable")
         return []
     try:
-        devices = sd.query_devices()
+        devices = with_fresh_portaudio_retry(sd, sd.query_devices)
         try:
             default_in = sd.default.device[0]
         except Exception:  # noqa: BLE001
@@ -160,6 +161,7 @@ class _Recording:
             self._stream.close()
         except Exception:  # noqa: BLE001
             log.exception("recording %s: stream close failed", self.rec_id)
+        stream_closed()
         try:
             self._wav.close()
         except Exception:  # noqa: BLE001
@@ -198,20 +200,9 @@ class RecordingManager:
         # latest-wins: drop any in-flight capture before starting a new one
         self._discard_current()
 
-        device: "int | str | None" = device_id or None
-        if device is not None:
-            resolved = _resolve_input(sd, device_id)
-            if resolved is not None:
-                device = resolved
-        rate = self._device_rate(sd, device)
         rec_id = uuid.uuid4().hex
         path = _scratch_dir() / f"{rec_id}.wav"
-        wav = wave.open(str(path), "wb")
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(rate)
-
-        rec = _Recording(rec_id, path, None, wav)
+        rec: "_Recording | None" = None
         # Last level emission, monotonic seconds. 0.0 = never, so the first
         # block always reports (the meter must move the instant capture opens).
         last_level = [0.0]
@@ -231,22 +222,48 @@ class RecordingManager:
             except Exception:  # noqa: BLE001 — a broken meter must not stop capture
                 log.exception("recording %s: level callback failed", rec_id)
 
-        try:
-            stream = sd.InputStream(
-                samplerate=rate, channels=1, dtype="int16",
-                device=device, callback=callback,
+        def open_stream() -> "tuple[object, int | str | None, int]":
+            # Device and rate are re-resolved on EVERY attempt: a PortAudio
+            # bounce renumbers indices, so one carried over from the previous
+            # attempt would address a different device (or none).
+            device: "int | str | None" = device_id or None
+            if device is not None:
+                resolved = _resolve_input(sd, device_id)
+                if resolved is not None:
+                    device = resolved
+            rate = self._device_rate(sd, device)
+            return (
+                sd.InputStream(
+                    samplerate=rate, channels=1, dtype="int16",
+                    device=device, callback=callback,
+                ),
+                device,
+                rate,
             )
-            stream.start()
+
+        try:
+            stream, device, rate = with_fresh_portaudio_retry(sd, open_stream)
         except Exception:  # noqa: BLE001 — device missing / busy / no PortAudio
             log.exception("StartRecording failed (device=%r)", device_id)
-            try:
-                wav.close()
-            except Exception:  # noqa: BLE001
-                pass
+            return ""
+        stream_opened()
+
+        # The WAV takes the rate the stream actually opened at, and `rec` must
+        # exist before start() — PortAudio calls back the moment it does.
+        wav = wave.open(str(path), "wb")
+        wav.setnchannels(1)
+        wav.setsampwidth(2)
+        wav.setframerate(rate)
+        rec = _Recording(rec_id, path, stream, wav)
+
+        try:
+            stream.start()
+        except Exception:  # noqa: BLE001 — device grabbed between open and start
+            log.exception("StartRecording failed to start (device=%r)", device_id)
+            rec.finalize()
             path.unlink(missing_ok=True)
             return ""
 
-        rec._stream = stream
         with self._lock:
             self._current = rec
         log.info(

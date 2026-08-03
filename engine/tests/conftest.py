@@ -17,7 +17,14 @@ import wave
 import numpy as np
 import pytest
 
-from syrinx_engine import models
+from syrinx_engine import audio, models
+
+
+@pytest.fixture(autouse=True)
+def no_live_streams(monkeypatch):
+    """audio's live-stream count is module state — a test that leaves it dirty
+    would silently disarm the PortAudio bounce for every test after it."""
+    monkeypatch.setattr(audio, "_active_streams", 0)
 
 
 @pytest.fixture(autouse=True)
@@ -44,19 +51,28 @@ def hf_cache(tmp_path):
     return tmp_path / "hf-cache"
 
 
+# What FakeStream reports as its PortAudio latency — 20 ms, a plausible
+# CoreAudio output figure. audio._drain sizes its trailing silence from it.
+FAKE_LATENCY = 0.02
+
+
 class FakeStream:
     """Stands in for a PortAudio output stream — records what was written."""
 
     def __init__(self, samplerate, channels, dtype):
         self.samplerate = samplerate
         self.channels = channels
+        self.latency = FAKE_LATENCY
         self.written = []
+        self.on_write = None  # test hook: called with the block, before recording it
         self.started = self.stopped = self.closed = False
 
     def start(self):
         self.started = True
 
     def write(self, block):
+        if self.on_write is not None:
+            self.on_write(block)
         self.written.append(np.asarray(block).reshape(-1).copy())
 
     def stop(self):
@@ -68,6 +84,21 @@ class FakeStream:
     @property
     def frames(self):
         return int(sum(len(b) for b in self.written))
+
+    @property
+    def tail_zeros(self):
+        """Trailing all-zero frames — audio._drain's macOS blio padding."""
+        n = 0
+        for block in reversed(self.written):
+            if np.any(block):
+                break
+            n += len(block)
+        return n
+
+    @property
+    def voiced_frames(self):
+        """Frames of the clip itself, i.e. everything before the drain."""
+        return self.frames - self.tail_zeros
 
 
 class FakeInputStream:
@@ -99,6 +130,17 @@ class FakeInputStream:
 
     def close(self):
         self.closed = True
+
+
+class FakePortAudioError(Exception):
+    """Mirrors sounddevice.PortAudioError — ``args`` is ``(message, PaErrorCode)``
+    (plus host-error info on a paUnanticipatedHostError, which the engine's
+    stale-topology check has to look past)."""
+
+
+def pa_error(code=-9986, message="Error opening OutputStream: Internal PortAudio error"):
+    """A PortAudio failure carrying ``code``, shaped exactly as sounddevice raises it."""
+    return FakePortAudioError(f"{message} [PaErrorCode {code}]", code)
 
 
 @pytest.fixture
@@ -145,12 +187,28 @@ def fake_sd(monkeypatch):
     def query_hostapis():
         return list(_hostapis)
 
+    # sd._terminate()/_initialize() — the documented way to make PortAudio
+    # re-read the device topology. ``on_bounce`` lets a test reshuffle .devs
+    # the way a real driver install/uninstall would.
+    bounces = []
+
+    def _terminate():
+        bounces.append("terminate")
+
+    def _initialize():
+        bounces.append("initialize")
+        if module.on_bounce is not None:
+            module.on_bounce()
+
     module = types.SimpleNamespace(
         OutputStream=OutputStream, made=made,
         InputStream=InputStream, in_made=in_made,
         query_devices=query_devices, query_hostapis=query_hostapis,
         devs=_devs, hostapis=_hostapis,
         default=types.SimpleNamespace(device=[0, 1]),
+        PortAudioError=FakePortAudioError,
+        _terminate=_terminate, _initialize=_initialize,
+        bounces=bounces, on_bounce=None,
     )
     monkeypatch.setitem(sys.modules, "sounddevice", module)
     return module

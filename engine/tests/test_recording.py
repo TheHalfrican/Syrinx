@@ -14,7 +14,9 @@ import wave
 
 import pytest
 
-from syrinx_engine import recording
+from conftest import pa_error
+
+from syrinx_engine import audio, recording
 from syrinx_engine.recording import RecordingManager, list_devices
 
 
@@ -181,3 +183,94 @@ def test_latest_wins_cancels_previous(fake_sd):
     assert not p1.exists()          # previous take deleted
     assert mgr.stop(r1) == ""       # superseded id is unknown now
     assert mgr.stop(r2)             # latest finalizes fine
+
+
+# --- stale PortAudio topology (the 2026-08-03 BlackHole incident) ---------
+
+
+def test_a_live_recording_is_registered_so_nothing_bounces_under_it(fake_sd):
+    mgr = RecordingManager()
+    rid = mgr.start("")
+    assert audio._active_streams == 1
+    mgr.stop(rid)
+    assert audio._active_streams == 0
+
+
+def test_a_stale_open_bounces_portaudio_and_re_resolves_the_device(fake_sd):
+    # The bounce renumbers PortAudio's device list, so the retry must resolve
+    # "Fake Mic" again instead of reusing the index from the failed attempt.
+    def reshuffle():
+        fake_sd.devs.insert(0, {"name": "Newly Arrived Mic", "hostapi": 0,
+                                "max_input_channels": 2, "max_output_channels": 0,
+                                "default_samplerate": 44100.0})
+
+    fake_sd.on_bounce = reshuffle
+    real_make = fake_sd.InputStream
+    attempts = []
+
+    def flaky(**kw):
+        attempts.append(kw)
+        if len(attempts) == 1:
+            raise pa_error(-9986, "Error opening InputStream: Internal PortAudio error")
+        return real_make(**kw)
+
+    fake_sd.InputStream = flaky
+
+    mgr = RecordingManager()
+    rid = mgr.start("Fake Mic")
+    assert rid
+    assert fake_sd.bounces == ["terminate", "initialize"]
+    assert attempts[0]["device"] == 0  # the pre-bounce index
+    assert attempts[1]["device"] == 1  # re-resolved after the list moved
+    assert fake_sd.in_made[-1].samplerate == 48000
+    mgr.cancel(rid)
+
+
+def test_a_stale_open_that_stays_broken_leaves_no_wav_behind(fake_sd, tmp_path):
+    def always(**_kw):
+        raise pa_error()
+
+    fake_sd.InputStream = always
+    mgr = RecordingManager()
+    assert mgr.start("") == ""
+    assert fake_sd.bounces == ["terminate", "initialize"]
+    assert list((recording._scratch_dir()).glob("*.wav")) == []
+    assert audio._active_streams == 0
+
+
+def test_a_stream_that_will_not_start_is_cleaned_up(fake_sd):
+    real_make = fake_sd.InputStream
+
+    def refuses(**kw):
+        stream = real_make(**kw)
+        stream.start = lambda: (_ for _ in ()).throw(RuntimeError("device grabbed"))
+        return stream
+
+    fake_sd.InputStream = refuses
+    mgr = RecordingManager()
+    assert mgr.start("") == ""
+    assert list((recording._scratch_dir()).glob("*.wav")) == []
+    assert audio._active_streams == 0  # released, or the next bounce is disarmed
+
+
+def test_enumeration_retries_once_against_a_fresh_device_list(fake_sd):
+    calls = []
+    real_query = fake_sd.query_devices
+
+    def flaky(device=None, kind=None):
+        calls.append((device, kind))
+        if len(calls) == 1:
+            raise pa_error(-9996, "Invalid device")
+        return real_query(device, kind)
+
+    fake_sd.query_devices = flaky
+    assert list_devices() == [{"id": "Fake Mic", "name": "Fake Mic", "default": True}]
+    assert fake_sd.bounces == ["terminate", "initialize"]
+
+
+def test_enumeration_that_stays_broken_is_still_an_empty_list(fake_sd):
+    def always(device=None, kind=None):
+        raise pa_error()
+
+    fake_sd.query_devices = always
+    assert list_devices() == []
