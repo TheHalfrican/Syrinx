@@ -981,6 +981,10 @@ class EngineCore:
     async def UpdateCapture(self, capture_id, text) -> None:
         self._captures.update(capture_id, text)
 
+    async def RenameCapture(self, capture_id, name) -> None:
+        # presentation metadata only — nothing on disk is keyed by the name
+        self._captures.rename(capture_id, name)
+
     async def DeleteCapture(self, capture_id) -> None:
         self._captures.delete(capture_id)
 

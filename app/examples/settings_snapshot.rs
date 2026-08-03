@@ -26,6 +26,10 @@
 //!   tts-hist  — ▷ Text to Speech, the HISTORY rail full of generations
 //!   lib-list  — ▤ Audio Library, the clip rows
 //!   vp-list   — ◍ Voices, the profile table (checks header↔row alignment)
+//!
+//! Capture-name variants (☰ Transcription, the CAPTURES rail):
+//!   tr-rename         — named and unnamed rows side by side
+//!   tr-rename-editing — the same rail behind the rename dialog
 
 use std::rc::Rc;
 
@@ -126,6 +130,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
                 ui.set_cv_sample_label(KEPT.into());
                 ui.set_cv_error(CAUSE.into());
             }
+        }
+        return render(&ui, &out, w, h, &variant);
+    }
+
+    if variant.starts_with("tr-rename") {
+        ui.set_tab("stt".into());
+        ui.set_narrow(w < 1250); // main.rs's own threshold — the 165px rail
+        // (name, timestamp) — an empty name is a capture nobody has labelled,
+        // which must fall back to the timestamp exactly as build_captures does
+        let caps = [
+            ("Standup notes", "Aug 03 · 14:02"),
+            ("", "Aug 03 · 11:40"),
+            ("Interview — part two, the long one", "Aug 02 · 19:07"),
+            ("", "Aug 02 · 09:31"),
+            ("Voicemail", "Aug 01 · 16:55"),
+            ("", "Jul 31 · 22:18"),
+        ];
+        ui.set_captures(ModelRc::new(VecModel::from(
+            caps.iter()
+                .enumerate()
+                .map(|(i, (name, date))| CaptureItem {
+                    id: format!("c{i}").into(),
+                    text: "Recorded transcript text that wraps inside the card's own scroll box."
+                        .into(),
+                    name: (*name).into(),
+                    label: if name.is_empty() { *date } else { *name }.into(),
+                })
+                .collect::<Vec<_>>(),
+        )));
+        ui.set_tr_capture_id("c0".into());
+        if variant == "tr-rename-editing" {
+            ui.set_tr_rename_id("c1".into());
+            ui.set_tr_rename_label("Aug 03 · 11:40".into());
+            ui.set_tr_rename_value("Kitchen table demo".into());
         }
         return render(&ui, &out, w, h, &variant);
     }

@@ -23,7 +23,7 @@ document, not one implementation.
 
 | | Count | Source of truth |
 |---|---|---|
-| Methods | **72** | 72 `@method()` in `service.py`; 72 `fn` (of 87) in `lib.rs` — the §4 table's 68 plus §14's 4 recording methods |
+| Methods | **73** | 73 `@method()` in `service.py`; 73 `fn` (of 88) in `lib.rs` — the §4 table's 69 plus §14's 4 recording methods |
 | Read-only properties | **3** | `ModelLoaded`, `ModelLoadError`, `Backend` → become `GetModelLoaded` / `GetModelLoadError` / `GetBackend` + `PropertiesChanged` |
 | Signals | **12** | 12 `@signal()` → become server→client notifications |
 | Transport-only RPC methods | **5** | `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`, `GetProtocolVersion` (no D-Bus analog; properties/handshake are native there) |
@@ -299,6 +299,7 @@ visible failure rather than an empty result.
 | `SaveCapture` | `[text: string]` | string (capture_id, `""` if empty) | Save a transcript as a capture. |
 | `ListCaptures` | `[]` | string (JSON array) | Captures, newest first. |
 | `UpdateCapture` | `[capture_id: string, text: string]` | → null | Replace a capture's text in place. |
+| `RenameCapture` | `[capture_id: string, name: string]` | → null | Set a capture's display name; blank clears it back to the timestamp. |
 | `DeleteCapture` | `[capture_id: string]` | → null | Delete a capture. |
 
 ### 4.10 Model management & settings
@@ -589,15 +590,15 @@ Notes for the Rust client:
 
 ## 11. Appendix B — Completeness check
 
-- `service.py`: **72** `@method()`, **12** `@signal()`, **3** `@dbus_property`.
-- `lib.rs`: **87** `fn` = **72** methods + **12** signals + **3** properties.
-- §4's method table lists **68** methods (4.1–4.10:
-  4+11+3+3+5+8+16+4+4+10 = **68**) and §14 adds the **4** recording methods for
-  the **72** total; §6 lists all **12** signals; §5 covers both properties.
+- `service.py`: **73** `@method()`, **12** `@signal()`, **3** `@dbus_property`.
+- `lib.rs`: **88** `fn` = **73** methods + **12** signals + **3** properties.
+- §4's method table lists **69** methods (4.1–4.10:
+  4+11+3+3+5+8+16+4+5+10 = **69**) and §14 adds the **4** recording methods for
+  the **73** total; §6 lists all **12** signals; §5 covers both properties.
 - **No `lib.rs` ↔ `service.py` mismatch** was found: names (PascalCase in
   `service.py`, snake_case-of-the-same in `lib.rs`), arities, and signatures
   correspond one-to-one. (The design brief's "68 methods / ~50 methods" figures
-  are approximate; the exact current count is **72**.)
+  are approximate; the exact current count is **73**.)
 - `Authenticate`, `GetModelLoaded`, `GetModelLoadError`, `GetBackend`,
   `GetProtocolVersion` are RPC-transport-only additions with no D-Bus method analog (D-Bus uses native
   properties and has no app-level auth or version handshake).
@@ -801,4 +802,4 @@ queues (its first `"running"` stage says it is waiting), while a second call for
 the *same* id is the `false` rejection above.
 
 With these two methods and one signal the surface is now **72** methods /
-**12** signals.
+**12** signals. (§4.9's later `RenameCapture` makes it **73**.)

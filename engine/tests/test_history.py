@@ -251,6 +251,32 @@ def test_capture_store_crud():
     assert store.list()[0].to_dict()["date"]
 
 
+def test_capture_rename_round_trips_and_blanks_back_out():
+    store = CaptureStore()
+    cid = store.save("dictated text").id
+    assert store.list()[0].name == ""  # new captures start unnamed
+    store.rename(cid, "  Standup notes  ")
+    assert store.list()[0].to_dict()["name"] == "Standup notes"  # stored trimmed
+    store.rename(cid, "   ")
+    assert store.list()[0].name == ""  # blank = back to the timestamp label
+
+
+def test_a_pre_name_captures_table_is_migrated(isolated_env):
+    with sqlite3.connect(isolated_env / "syrinx.db") as c:
+        c.executescript(
+            """
+            CREATE TABLE captures(
+                id TEXT PRIMARY KEY, text TEXT NOT NULL,
+                created_at REAL, updated_at REAL);
+            """
+        )
+        c.execute("INSERT INTO captures VALUES('old','ancient words',1000.0,1000.0)")
+    rows = CaptureStore().list()
+    assert [r.id for r in rows] == ["old"]
+    assert rows[0].text == "ancient words"
+    assert rows[0].name == ""  # the lazily added column's default
+
+
 # --- source clips --------------------------------------------------------
 
 

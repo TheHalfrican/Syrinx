@@ -259,6 +259,9 @@ pub trait Engine {
     /// Replace a capture's text in place (same entry, no new row).
     fn update_capture(&self, capture_id: &str, text: &str) -> zbus::Result<()>;
 
+    /// Set a capture's display name; blank clears it back to the timestamp.
+    fn rename_capture(&self, capture_id: &str, name: &str) -> zbus::Result<()>;
+
     /// Delete a capture.
     fn delete_capture(&self, capture_id: &str) -> zbus::Result<()>;
 

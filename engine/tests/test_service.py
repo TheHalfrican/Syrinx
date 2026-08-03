@@ -378,6 +378,17 @@ def test_capture_lifecycle(iface):
     assert json.loads(call(iface, "ListCaptures")) == []
 
 
+def test_rename_capture_sets_and_clears_the_display_name(iface):
+    cid = call(iface, "SaveCapture", "dictated words")
+    assert json.loads(call(iface, "ListCaptures"))[0]["name"] == ""
+    call(iface, "RenameCapture", cid, " Standup notes ")
+    row = json.loads(call(iface, "ListCaptures"))[0]
+    assert row["name"] == "Standup notes"
+    assert row["date"]  # the fallback label is still there for the app
+    call(iface, "RenameCapture", cid, "")
+    assert json.loads(call(iface, "ListCaptures"))[0]["name"] == ""
+
+
 # --- source clips --------------------------------------------------------
 
 

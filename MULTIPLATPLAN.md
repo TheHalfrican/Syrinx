@@ -1530,6 +1530,42 @@ columns; ⚙ re-rendered unchanged. Gates: clippy `-p syrinx-app -p
 syrinx-shared --all-targets` clean, 103 + 7 tests green, dev bundle
 reinstalled.
 
+**2026-08-03 (feature) — ☰ captures can be named.** Rows in the
+CAPTURES rail were identified by their created-at timestamp alone, so a
+rail of six looked like a rail of six timestamps. Names live where every
+other Syrinx label lives: the SQLite store — `captures.name TEXT DEFAULT
+''` in `syrinx.db`, added by the same PRAGMA-table_info + ALTER migration
+`HistoryStore` (tags/vc_json) and `SourceClipStore` (transcript/kind) use,
+so pre-existing rows open unnamed instead of erroring. Nothing on disk is
+keyed by the name (captures have no audio at all), so this is pure
+presentation metadata and no file is ever renamed. New RPC, §4.9:
+`RenameCapture [capture_id, name] → null`, trimming and blank-clearing
+server-side (`CaptureStore.rename`); §0/§11 counts re-baselined 72 → **73**
+methods (signals/properties unchanged), `test_contract.py`'s arity sweep
+and count guard updated. The wire adds `name` to each `ListCaptures` row
+next to the existing `date`; the app derives the row label with
+`capture_label()` (name if non-blank, else the timestamp) — that fallback
+is why clearing the field is a revert-to-default, and why a new recording
+needs no default written to it. UI follows the two strongest precedents:
+the affordance is a **⋮ row menu** (`CaptureRowMenu`, the history card's
+`RowMenu` narrowed to Load into editor / Rename) replacing the ✎ button,
+which was a duplicate of the row's own click — 🗑 stays a visible sibling;
+the editor is a **centered modal** shaped exactly like the ▤ library tag
+editor (`tr-rename-id != ""`, `LabeledInput`, Cancel / Save name).
+`LabeledInput` gains `autofocus` + `accepted`/`escaped` so Enter commits
+and Escape cancels — the app's first key handling anywhere (Slint
+`TextInput.accepted` / `key-pressed` → `EventResult`), kept inside the one
+component so every future dialog field inherits it. The label is used
+everywhere the capture is referenced: rail header (accent-coloured when
+named, dim when it is a timestamp) and the delete confirm, whose copy
+moves to the quoted form the other four delete kinds already use. Gates:
+clippy `-p syrinx-app -p syrinx-shared --all-targets` clean, 105 + 7 cargo
+tests green, 590 pytest @ 95.58 % (the two `test_contract` download /
+vc-setup flakes passed on the re-run), snapshot variants `tr-rename` /
+`tr-rename-editing` added to `settings_snapshot.rs` (they also set
+`narrow` from the window width, so the 165 px rail is checked too), dev
+bundle reinstalled.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~

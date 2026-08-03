@@ -315,6 +315,11 @@ class EngineInterface(ServiceInterface):
         await self._core.UpdateCapture(capture_id, text)
 
     @method()
+    async def RenameCapture(self, capture_id: "s", name: "s") -> None:  # noqa: F821
+        """Set a capture's display name; blank clears it back to the timestamp."""
+        await self._core.RenameCapture(capture_id, name)
+
+    @method()
     async def DeleteCapture(self, capture_id: "s") -> None:  # noqa: F821
         await self._core.DeleteCapture(capture_id)
 

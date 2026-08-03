@@ -11,7 +11,9 @@ export struct VoiceItem {
     avatar: image, avatar-mode: string, has-avatar: bool,
 }
 export struct HistItem { id: string, voice: string, meta: string, text: string, starred: bool }
-export struct CaptureItem { id: string, text: string, date: string }
+// name = the user's own label ("" = unnamed), label = what the rail shows
+// (the name, else the engine's timestamp string)
+export struct CaptureItem { id: string, text: string, name: string, label: string }
 export struct SourceClipItem { id: string, name: string, meta: string, music: bool }
 export struct LibItem {
     id: string, title: string, meta: string, text: string,
@@ -580,6 +582,34 @@ component RowMenu inherits Rectangle {
     }
 }
 
+// --- per-row menu for a capture card (the history card's ⋮, narrowed to what
+// a text-only capture can do; 🗑 stays a visible sibling) ---
+component CaptureRowMenu inherits Rectangle {
+    callback load();
+    callback rename();
+    property <bool> win95: Theme.name == "win95";
+    width: 18px; height: 18px; border-radius: Theme.rad;
+    background: ta.has-hover ? Theme.acc-soft : transparent;
+    ta := TouchArea { clicked => { pop.show(); } }
+    Text { text: "⋮"; font-size: 14px; color: Theme.dim;
+           horizontal-alignment: center; vertical-alignment: center; }
+    pop := PopupWindow {
+        x: root.width - 150px; y: root.height + 2px;
+        width: 150px; height: 62px;
+        close-policy: close-on-click-outside;
+        Rectangle {
+            background: win95 ? #ffffff : Theme.card-bg;
+            border-width: win95 ? 0px : 1px; border-color: Theme.brd; border-radius: Theme.rad;
+            if win95 : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 3px;
+                RowMenuItem { label: "Load into editor"; chosen => { root.load(); pop.close(); } }
+                RowMenuItem { label: "Rename"; chosen => { root.rename(); pop.close(); } }
+            }
+        }
+    }
+}
+
 // --- labeled text field (create-voice modal) ---
 component LabeledInput inherits VerticalLayout {
     in property <string> label;
@@ -588,6 +618,11 @@ component LabeledInput inherits VerticalLayout {
     // overridable for placements on dark backdrops (vc view on Aero)
     in property <color> label-color: Theme.dim;
     in-out property <string> value;
+    // for a field that IS the dialog: take the caret on open, commit on Enter,
+    // cancel on Escape (single-line only — Enter is a newline when multiline)
+    in property <bool> autofocus: false;
+    callback accepted();
+    callback escaped();
     spacing: 4px;
     Text { text: label; font-size: 11px; font-weight: 700; color: label-color; }
     Rectangle {
@@ -622,6 +657,13 @@ component LabeledInput inherits VerticalLayout {
                 page-height: lisv.visible-height;
                 text <=> value; font-size: 13px; color: Theme.fg; font-family: Theme.font;
                 wrap: multiline ? word-wrap : no-wrap; single-line: !multiline;
+                // select-all so the first keystroke replaces the old value
+                init => { if (root.autofocus) { self.focus(); self.select-all(); } }
+                accepted => { root.accepted(); }
+                key-pressed(e) => {
+                    if (e.text == Key.Escape) { root.escaped(); return EventResult.accept; }
+                    return EventResult.reject;
+                }
                 // keep the caret in view while typing (both axes: multiline
                 // scrolls vertically, single-line fields pan horizontally)
                 cursor-position-changed(cpos) => {
@@ -1076,6 +1118,9 @@ export component AppWindow inherits Window {
     in property <string> tr-notice: "";
     in property <[CaptureItem]> captures;      // persisted transcripts (text only)
     in-out property <string> tr-capture-id;    // loaded capture ("" = unsaved)
+    in-out property <string> tr-rename-id: ""; // capture being renamed ("" = dialog closed)
+    in-out property <string> tr-rename-label;  // its current label, for the dialog title
+    in-out property <string> tr-rename-value;  // edited name ("" = back to the timestamp)
     // --- voice changer (⇄ vc) view ---
     in property <bool> vc-recording;
     in property <string> vc-rec-mode: "mic";   // which source is live
@@ -1303,6 +1348,7 @@ export component AppWindow inherits Window {
     callback vc-audition(string);       // clip id or "scratch" — toggles play/stop
     callback tr-refine();
     callback tr-save-capture();         // save new or update the loaded one
+    callback tr-rename-capture();       // commit tr-rename-value onto tr-rename-id
     callback tr-delete-capture(string); // capture id
     callback apply-fx(string, int);  // history id, effect dropdown index
     callback toggle-loop(bool);
@@ -2021,28 +2067,29 @@ export component AppWindow inherits Window {
                                             HorizontalLayout {
                                                 spacing: 6px;
                                                 Text {
-                                                    text: c.date; font-size: 9.5px; font-family: Theme.mono;
-                                                    color: Theme.dim; vertical-alignment: center; horizontal-stretch: 1;
+                                                    text: c.label; font-size: 9.5px; font-family: Theme.mono;
+                                                    color: c.name == "" ? Theme.dim : Theme.fg;
+                                                    overflow: elide;
+                                                    vertical-alignment: center; horizontal-stretch: 1;
                                                 }
-                                                Rectangle {
-                                                    width: 18px; height: 18px; border-radius: Theme.rad;
-                                                    background: cload.has-hover ? Theme.acc-soft : transparent;
-                                                    cload := TouchArea {
-                                                        clicked => {
-                                                            if (!tr-busy && !tr-recording) {
-                                                                tr-capture-id = c.id;
-                                                                tr-text = c.text;
-                                                            }
+                                                CaptureRowMenu {
+                                                    load => {
+                                                        if (!tr-busy && !tr-recording) {
+                                                            tr-capture-id = c.id;
+                                                            tr-text = c.text;
                                                         }
                                                     }
-                                                    Text { text: "✎"; font-size: 11px; color: Theme.dim;
-                                                           horizontal-alignment: center; vertical-alignment: center; }
+                                                    rename => {
+                                                        root.tr-rename-id = c.id;
+                                                        root.tr-rename-label = c.label;
+                                                        root.tr-rename-value = c.name;
+                                                    }
                                                 }
                                                 Rectangle {
                                                     width: 18px; height: 18px; border-radius: Theme.rad;
                                                     background: cdel.has-hover ? Theme.acc-soft : transparent;
                                                     cdel := TouchArea {
-                                                        clicked => { root.del-kind = "capture"; root.del-id = c.id; root.del-name = c.date; }
+                                                        clicked => { root.del-kind = "capture"; root.del-id = c.id; root.del-name = c.label; }
                                                     }
                                                     Text { text: "🗑"; font-size: 11px; color: Theme.dim;
                                                            horizontal-alignment: center; vertical-alignment: center; }
@@ -4025,6 +4072,37 @@ export component AppWindow inherits Window {
         }
     }
 
+    // --- capture rename (same shape as the tag editor) ---
+    if tr-rename-id != "" : Rectangle {
+        background: #0a0f14d9;
+        TouchArea {}  // swallow clicks to the app behind
+        Rectangle {
+            width: 420px; height: 172px;
+            x: round((parent.width - self.width) / 2 / 1px) * 1px;
+            y: round((parent.height - self.height) / 2 / 1px) * 1px;
+            background: Theme.modal-bg;
+            border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
+            border-radius: 0px; clip: true;
+            if Theme.name == "win95" : Bevel { width: 100%; height: 100%; }
+            VerticalLayout {
+                padding: 18px; spacing: 10px;
+                Text { text: "Rename — " + tr-rename-label; font-size: 15px; font-weight: 700; color: Theme.fg; overflow: elide; }
+                LabeledInput {
+                    label: "CAPTURE NAME"; placeholder: "Leave blank for the recording time";
+                    value <=> tr-rename-value; vertical-stretch: 0; autofocus: true;
+                    accepted => { root.tr-rename-capture(); }
+                    escaped => { tr-rename-id = ""; }
+                }
+                Rectangle {}
+                HorizontalLayout {
+                    spacing: 10px; alignment: end;
+                    TBtn { label: "Cancel"; clicked => { tr-rename-id = ""; } }
+                    TBtn { label: "Save name"; generate: true; min-width: 110px; clicked => { root.tr-rename-capture(); } }
+                }
+            }
+        }
+    }
+
     // --- effects chain editor modal ---
     if fxe-open : Rectangle {
         background: #0a0f14d9;
@@ -4572,7 +4650,7 @@ export component AppWindow inherits Window {
                         : del-kind == "hist"
                             ? "Delete \"" + del-name + "\"? The audio file is removed from disk and from the library."
                         : del-kind == "capture"
-                            ? "Delete the capture from " + del-name + "? Its saved transcript is gone for good."
+                            ? "Delete \"" + del-name + "\"? Its saved transcript is gone for good."
                         : del-kind == "clip"
                             ? "Delete \"" + del-name + "\"? The saved source recording is removed. Conversions made from it stay."
                         : del-kind == "model"

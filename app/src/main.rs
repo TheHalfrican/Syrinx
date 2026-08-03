@@ -95,6 +95,7 @@ enum Cmd {
     TrPickFile,
     TrRefine { text: String },
     TrSaveCapture { id: String, text: String },
+    TrRenameCapture { id: String, name: String },
     TrDeleteCapture { id: String },
     // trim modal (✂ on recordings and history clips)
     TrimShow { ctx: String },
@@ -978,6 +979,17 @@ fn main() -> anyhow::Result<()> {
                 let id = ui.get_tr_capture_id().to_string();
                 let _ = tx.send(Cmd::TrSaveCapture { id, text });
             }
+        });
+    }
+    {
+        let tx = tx.clone();
+        let ui_weak = ui.as_weak();
+        ui.on_tr_rename_capture(move || {
+            let ui = ui_weak.unwrap();
+            let _ = tx.send(Cmd::TrRenameCapture {
+                id: ui.get_tr_rename_id().to_string(),
+                name: ui.get_tr_rename_value().to_string(),
+            });
         });
     }
     {
@@ -3153,6 +3165,14 @@ fn set_history_model(ui: &AppWindow, items: Vec<HistItem>) {
     }
 }
 
+/// A capture's rail label: the name the user gave it, else the timestamp the
+/// engine formatted. Blank (or all-space) names fall back, which is what makes
+/// clearing the field in the rename dialog a revert-to-default.
+fn capture_label(name: &str, date: &str) -> String {
+    let name = name.trim();
+    if name.is_empty() { date.to_string() } else { name.to_string() }
+}
+
 /// Build the captures model from the engine's ListCaptures JSON (newest first).
 fn build_captures(json: &str) -> Vec<CaptureItem> {
     let arr: Vec<serde_json::Value> = serde_json::from_str(json).unwrap_or_default();
@@ -3162,7 +3182,8 @@ fn build_captures(json: &str) -> Vec<CaptureItem> {
             CaptureItem {
                 id: get("id").into(),
                 text: get("text").into(),
-                date: get("date").into(),
+                name: get("name").into(),
+                label: capture_label(get("name"), get("date")).into(),
             }
         })
         .collect()
@@ -5486,6 +5507,19 @@ async fn run_session(
                         }
                     }
                 }
+                Some(Cmd::TrRenameCapture { id, name }) => {
+                    // presentation only — the row keeps its id, text and file-less identity
+                    if let Err(e) = proxy.rename_capture(&id, name.trim()).await {
+                        tracing::error!("rename capture failed: {e}");
+                    }
+                    let items = build_captures(
+                        &proxy.list_captures().await.unwrap_or_else(|_| "[]".into()),
+                    );
+                    ui.upgrade_in_event_loop(move |ui| {
+                        ui.set_tr_rename_id("".into());
+                        set_captures_model(&ui, items);
+                    }).ok();
+                }
                 Some(Cmd::TrDeleteCapture { id }) => {
                     match proxy.delete_capture(&id).await {
                         Ok(_) => {
@@ -7437,12 +7471,28 @@ mod tests {
         assert_eq!(items.len(), 2);
         assert_eq!(items[0].id, "c1");
         assert_eq!(items[0].text, "meeting notes");
-        assert_eq!(items[0].date, "2026-07-23");
+        assert_eq!(items[0].label, "2026-07-23"); // unnamed → the timestamp
         assert_eq!(items[1].id, ""); // missing fields blank out, no panic
 
         for junk in ["", "nope", "{}"] {
             assert!(build_captures(junk).is_empty());
         }
+    }
+
+    #[test]
+    fn build_captures_prefers_the_name_over_the_date() {
+        let items = build_captures(
+            r#"[{"id": "c1", "name": "Standup notes", "date": "2026-07-23"}]"#,
+        );
+        assert_eq!(items[0].name, "Standup notes"); // raw, for the rename field
+        assert_eq!(items[0].label, "Standup notes");
+    }
+
+    #[test]
+    fn capture_label_falls_back_to_the_date_for_a_blank_name() {
+        assert_eq!(capture_label("", "Jul 23 · 09:14"), "Jul 23 · 09:14");
+        assert_eq!(capture_label("   ", "Jul 23 · 09:14"), "Jul 23 · 09:14");
+        assert_eq!(capture_label("  Take 2  ", "Jul 23 · 09:14"), "Take 2");
     }
 
     // --- fx_fmt ----------------------------------------------------------

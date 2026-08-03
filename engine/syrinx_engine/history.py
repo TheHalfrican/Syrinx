@@ -263,6 +263,7 @@ class CaptureItem:
     text: str
     created_at: float
     updated_at: float
+    name: str = ""  # user-given label; "" = show the timestamp instead
 
     def to_dict(self) -> dict:
         return {
@@ -270,6 +271,7 @@ class CaptureItem:
             "text": self.text,
             "created_at": self.created_at,
             "updated_at": self.updated_at,
+            "name": self.name,
             # display string computed here — the app shows it verbatim
             "date": time.strftime("%b %d · %H:%M", time.localtime(self.created_at)),
         }
@@ -279,7 +281,8 @@ class CaptureStore:
     """Transcription captures — text only (no audio), table ``captures``.
 
     Saved from the Transcription view; an update replaces the text of the
-    same row rather than creating a new one.
+    same row rather than creating a new one. ``name`` is presentation-only —
+    an empty one means the rail falls back to the created-at timestamp.
     """
 
     def __init__(self) -> None:
@@ -305,6 +308,10 @@ class CaptureStore:
                 );
                 """
             )
+            # migrate rows created before names existed
+            cols = [r[1] for r in c.execute("PRAGMA table_info(captures)")]
+            if "name" not in cols:
+                c.execute("ALTER TABLE captures ADD COLUMN name TEXT DEFAULT ''")
 
     def save(self, text: str) -> CaptureItem:
         cid = uuid.uuid4().hex[:12]
@@ -320,7 +327,10 @@ class CaptureStore:
         with self._conn() as c:
             rows = c.execute("SELECT * FROM captures ORDER BY created_at DESC").fetchall()
             return [
-                CaptureItem(r["id"], r["text"], r["created_at"] or 0.0, r["updated_at"] or 0.0)
+                CaptureItem(
+                    r["id"], r["text"], r["created_at"] or 0.0, r["updated_at"] or 0.0,
+                    r["name"] or "",
+                )
                 for r in rows
             ]
 
@@ -328,6 +338,14 @@ class CaptureStore:
         with self._conn() as c:
             c.execute(
                 "UPDATE captures SET text=?, updated_at=? WHERE id=?", (text, time.time(), cid)
+            )
+
+    def rename(self, cid: str, name: str) -> None:
+        """Set a capture's display name; blank clears it back to the default."""
+        with self._conn() as c:
+            c.execute(
+                "UPDATE captures SET name=?, updated_at=? WHERE id=?",
+                (name.strip(), time.time(), cid),
             )
 
     def delete(self, cid: str) -> None:

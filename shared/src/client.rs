@@ -63,7 +63,7 @@ impl EngineClient {
     }
 }
 
-/// Generate the 72 method + 3 property-getter dispatchers. Each expands to a
+/// Generate the 73 method + 3 property-getter dispatchers. Each expands to a
 /// `match` that either delegates to the zbus proxy (same method name) or issues
 /// an RPC `call` with the PascalCase method name and the args as positional
 /// JSON. Keeping this a table makes the surface auditable against `lib.rs`.
@@ -158,6 +158,7 @@ engine_methods! {
     fn save_capture(text: &str) -> String => "SaveCapture";
     fn list_captures() -> String => "ListCaptures";
     fn update_capture(capture_id: &str, text: &str) -> () => "UpdateCapture";
+    fn rename_capture(capture_id: &str, name: &str) -> () => "RenameCapture";
     fn delete_capture(capture_id: &str) -> () => "DeleteCapture";
 
     // --- model management & settings -------------------------------------

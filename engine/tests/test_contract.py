@@ -223,7 +223,7 @@ def test_method_surface_matches_across_wrappers():
     iface = EngineInterface()
     dbus_methods = {m.name for m in ServiceInterface._get_methods(iface)}
     assert rpc_methods == dbus_methods
-    assert len(rpc_methods) == 72  # 68 + 4 recording
+    assert len(rpc_methods) == 73  # 69 + 4 recording
     # the 4 transport-only methods have no D-Bus analog (spec §0)
     assert not (set(TRANSPORT_METHODS) & dbus_methods)
 
@@ -321,6 +321,7 @@ def _sweep_args(iface):
         "SaveCapture": ("text",),
         "ListCaptures": (),
         "UpdateCapture": (cap, "edited"),
+        "RenameCapture": (cap, "notes"),
         "DeleteCapture": ("nope",),
         "SaveSourceClip": ("/x.wav", "n", "", "speech"),
         "SetSourceClipTranscript": ("nope", "t"),
