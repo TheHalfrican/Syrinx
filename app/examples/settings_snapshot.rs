@@ -7,7 +7,7 @@
 //! Usage:
 //!   cargo run -p syrinx-app --example settings_snapshot -- <out.png> [variant] [WxH]
 //!
-//! Variants (all park the window on ⚙ Settings with macOS-shaped state):
+//! ⚙ Settings variants (macOS-shaped state):
 //!   native   — macOS 14.2+: the native process tap is the default row and
 //!              nothing needs saying, so the card loses its hint row
 //!   hint     — a loopback driver is picked (or the OS is pre-14.2): the
@@ -15,6 +15,11 @@
 //!   install  — pre-14.2 with no driver: the brew command plus the ⧉ that
 //!              copies it
 //!   none     — the Linux/Windows shape: no hint row at all
+//!
+//! Silence-guard variants (a system capture that came back empty):
+//!   tr-silent — ☰ Transcription, the notice row under the source buttons
+//!   vc-silent — ⇄ Converter, the clip armed anyway with the cause on vc-error
+//!   cv-silent — the create-voice modal, warning label + footer cause line
 
 use std::rc::Rc;
 
@@ -84,6 +89,40 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // the splash covers everything until Rust clears it
     ui.set_booting(false);
     ui.set_tab("settings".into());
+    ui.set_system_capture_supported(true);
+
+    // The silence guard's three surfaces. Every one is the longest string the
+    // guard can produce (the loopback cause), so the snapshot shows the worst
+    // case for elide and for the fixed-height create-voice card.
+    const CAUSE: &str = "A loopback tap hears only what is routed to it — send the audio there with a Multi-Output Device (Audio MIDI Setup).";
+    const KEPT: &str = "⚠ silent capture — kept anyway";
+    if let Some(flow) = variant.strip_suffix("-silent") {
+        match flow {
+            "tr" => {
+                ui.set_tab("stt".into());
+                ui.set_tr_rec_mode("system".into());
+                ui.set_tr_has_source(true);
+                ui.set_tr_status(KEPT.into());
+                ui.set_tr_notice(CAUSE.into());
+            }
+            "vc" => {
+                ui.set_tab("vc".into());
+                ui.set_vc_rec_mode("system".into());
+                ui.set_vc_has_source(true);
+                ui.set_vc_source_label("recorded clip · 0:30".into());
+                ui.set_vc_status(KEPT.into());
+                ui.set_vc_error(CAUSE.into());
+            }
+            _ => {
+                ui.set_tab("voices".into());
+                ui.set_cv_open(true);
+                ui.set_cv_mode("system".into());
+                ui.set_cv_sample_label(KEPT.into());
+                ui.set_cv_error(CAUSE.into());
+            }
+        }
+        return render(&ui, &out, w, h, &variant);
+    }
 
     ui.set_st_mic_names(names(&["iMac Microphone", "BlackHole 2ch"]));
     ui.set_st_mic_index(0);
@@ -109,7 +148,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     ui.set_st_mic_test_supported(true);
-    ui.set_system_capture_supported(true);
     // macOS has no dictation surface yet — keep the card off the page
     ui.set_dictation_supported(false);
 
@@ -127,13 +165,23 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     ui.set_st_tap_hint(hint.into());
     ui.set_st_tap_copy(copy.into());
 
+    render(&ui, &out, w, h, &variant)
+}
+
+fn render(
+    ui: &AppWindow,
+    out: &str,
+    w: u32,
+    h: u32,
+    variant: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
     ui.window().set_size(PhysicalSize::new(w, h));
     ui.show()?;
 
     // take_snapshot() lays out and renders in one go — no event loop needed
     let buffer = ui.window().take_snapshot()?;
     image::save_buffer(
-        &out,
+        out,
         buffer.as_bytes(),
         buffer.width(),
         buffer.height(),

@@ -1543,6 +1543,166 @@ fn recorded_label(wav: &str) -> String {
     }
 }
 
+// --- silence guard for system captures -----------------------------------
+//
+// A system tap with nothing routed into it produces a perfectly valid,
+// perfectly silent WAV. Nothing downstream can tell that apart from a quiet
+// recording, so the app says it here, at the moment the capture finishes.
+
+/// Full-scale peak below which a capture is digital silence rather than quiet
+/// audio: 1e-4 of PCM16's ±32768 is ±3 LSB, i.e. dither and nothing else. Real
+/// speech — even whispered, even across a room — peaks orders of magnitude
+/// above this, so the guard cannot fire on a legitimately quiet take.
+const SILENT_PEAK: f32 = 1e-4;
+/// Takes shorter than this are exempt: a twitch-stop is not a routing failure.
+const SILENCE_MIN_SECS: f64 = 0.5;
+/// Fixed read window for the scan. A 10-minute 48 kHz capture is ~230 MB and
+/// must never be read into memory the way `wav_rms` reads its 30 s clips.
+const SCAN_BUF: usize = 64 * 1024;
+
+/// Peak level and length of a PCM16 WAV, measured by streaming the data chunk.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct WavScan {
+    peak: f32,   // 0..1 full-scale
+    frames: u64, // per channel
+    rate: u32,
+}
+
+impl WavScan {
+    /// Was this capture silence rather than merely quiet? Pure over the scan,
+    /// so the thresholds are testable without touching a file.
+    fn is_silent(&self) -> bool {
+        self.rate > 0
+            && self.frames as f64 / self.rate as f64 >= SILENCE_MIN_SECS
+            && self.peak < SILENT_PEAK
+    }
+}
+
+/// Walk a WAV's chunks and stream-scan its PCM16 data. `None` for anything that
+/// is not PCM16 (every recorder the app drives writes it) or that cannot be
+/// read — the guard stays silent rather than guessing at an unknown layout.
+fn wav_scan(path: &str) -> Option<WavScan> {
+    use std::io::Read;
+    let mut f = std::io::BufReader::new(std::fs::File::open(path).ok()?);
+    let mut riff = [0u8; 12];
+    f.read_exact(&mut riff).ok()?;
+    if &riff[0..4] != b"RIFF" || &riff[8..12] != b"WAVE" {
+        return None;
+    }
+    let (mut rate, mut channels) = (0u32, 0u16);
+    loop {
+        let mut head = [0u8; 8];
+        f.read_exact(&mut head).ok()?;
+        let size = u32::from_le_bytes([head[4], head[5], head[6], head[7]]) as u64;
+        match &head[0..4] {
+            b"fmt " => {
+                let mut fmt = [0u8; 16];
+                f.read_exact(&mut fmt).ok()?;
+                if u16::from_le_bytes([fmt[0], fmt[1]]) != 1
+                    || u16::from_le_bytes([fmt[14], fmt[15]]) != 16
+                {
+                    return None;
+                }
+                channels = u16::from_le_bytes([fmt[2], fmt[3]]);
+                rate = u32::from_le_bytes([fmt[4], fmt[5], fmt[6], fmt[7]]);
+                skip_chunk(&mut f, size.saturating_sub(16))?;
+            }
+            b"data" => {
+                if rate == 0 || channels == 0 {
+                    return None;
+                }
+                // A recorder killed mid-write leaves the size field at 0, so a
+                // zero means "to EOF", not "no audio".
+                let limit = if size == 0 { u64::MAX } else { size };
+                let (peak, samples) = scan_pcm16(&mut f, limit);
+                return Some(WavScan { peak, frames: samples / channels as u64, rate });
+            }
+            // chunk bodies are word-aligned; odd sizes carry a pad byte
+            _ => skip_chunk(&mut f, size + (size & 1))?,
+        }
+    }
+}
+
+fn skip_chunk<R: std::io::Read>(r: &mut R, n: u64) -> Option<()> {
+    use std::io::Read;
+    std::io::copy(&mut r.by_ref().take(n), &mut std::io::sink()).ok().map(|_| ())
+}
+
+/// Peak (0..1) and sample count of `limit` bytes of interleaved PCM16.
+fn scan_pcm16<R: std::io::Read>(r: &mut R, limit: u64) -> (f32, u64) {
+    use std::io::Read;
+    let mut r = r.by_ref().take(limit);
+    let mut buf = vec![0u8; SCAN_BUF];
+    let mut peak = 0u32;
+    let mut samples = 0u64;
+    let mut carry = 0usize; // odd trailing byte straddling two reads
+    loop {
+        let n = match r.read(&mut buf[carry..]) {
+            Ok(0) => break,
+            Ok(n) => n + carry,
+            Err(_) => break,
+        };
+        let pairs = n / 2;
+        for c in buf[..pairs * 2].chunks_exact(2) {
+            peak = peak.max(i16::from_le_bytes([c[0], c[1]]).unsigned_abs() as u32);
+        }
+        samples += pairs as u64;
+        carry = n - pairs * 2;
+        if carry == 1 {
+            buf[0] = buf[n - 1];
+        }
+    }
+    (peak as f32 / 32768.0, samples)
+}
+
+/// Which tap a system capture actually ran on — silence means something
+/// different for each, and only the code that started it knows which.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TapKind {
+    Native,   // macOS Core Audio process tap
+    Loopback, // macOS loopback driver (BlackHole & friends)
+    Sink,     // Linux sink monitor / Windows WASAPI loopback
+}
+
+/// The tap a `system` capture is about to use, from the device resolve_capture_
+/// device handed back. macOS is the only OS with two: `None` there means the
+/// native tap (capture_start's own signal), anything else a loopback driver.
+fn tap_kind(device: Option<&str>) -> TapKind {
+    if !cfg!(target_os = "macos") {
+        TapKind::Sink
+    } else if device.is_none_or(str::is_empty) {
+        TapKind::Native
+    } else {
+        TapKind::Loopback
+    }
+}
+
+/// What silence MEANS for each tap, one sentence, in the ⚙ tap-hint voice.
+fn silence_hint(tap: TapKind) -> &'static str {
+    match tap {
+        TapKind::Native => "Nothing was playing — the native tap hears whatever this Mac is outputting, so start the audio (or unmute it) and record again.",
+        TapKind::Loopback => "A loopback tap hears only what is routed to it — send the audio there with a Multi-Output Device (Audio MIDI Setup).",
+        TapKind::Sink => "Nothing was playing on the tapped output while the capture ran.",
+    }
+}
+
+/// The one-line marker the tight status/label slots show; the sentence above
+/// goes to the flow's notice line, which has room for it.
+const SILENT_CAPTURE: &str = "⚠ silent capture — kept anyway";
+
+/// Did a just-finished capture come out silent, and if so why? `None` for mic
+/// captures (out of scope — the ⚙ meter already shows mic level live) and for
+/// anything with real audio in it. The scan runs on the blocking pool: the
+/// worker loop this is awaited from drives every timer and button in the app.
+async fn silence_warning(path: &str, tap: Option<TapKind>) -> Option<&'static str> {
+    let tap = tap?;
+    let p = path.to_string();
+    let silent = tokio::task::spawn_blocking(move || wav_scan(&p).is_some_and(|s| s.is_silent()))
+        .await
+        .unwrap_or(false);
+    silent.then(|| silence_hint(tap))
+}
+
 /// SIGINT `pw-record` so it finalizes the WAV header, then reap it.
 ///
 /// The wait is bounded: a recorder that shrugs off the SIGINT (freshly spawned
@@ -3601,6 +3761,10 @@ async fn run_session(
     let mut cv_avatar: Option<(String, String, i32, i32, i32, i32)> = None; // staged (path, mode, sx, sy, sw, sh)
     // transcription view state
     let mut tr_rec: Option<Capture> = None;
+    // Which tap the live capture is on — `None` = microphone. Held here, not
+    // read off the toggle argument, because the safety-cap auto-stops have no
+    // argument to read and the other source button stays clickable mid-take.
+    let mut tr_rec_tap: Option<TapKind> = None;
     let mut tr_elapsed: u32 = 0;
     let tr_wav = scratch_wav("syrinx-transcribe.wav");
     const TR_REC_MAX: u32 = 600; // 10 min safety cap
@@ -3608,6 +3772,7 @@ async fn run_session(
     let mut pending_tr_refine: u32 = 0;
     // voice-changer (⇄) view state
     let mut vc_rec: Option<Capture> = None;
+    let mut vc_rec_tap: Option<TapKind> = None;
     let mut vc_elapsed: u32 = 0;
     let vc_wav = scratch_wav("syrinx-convert.wav");
     const VC_REC_MAX: u32 = 180; // matches the engine's SYRINX_VC_MAX_SECS default
@@ -3652,6 +3817,7 @@ async fn run_session(
     let mut lib_filters: (String, i32, i32, bool, i32) = (String::new(), 0, 0, false, 0);
     // create-voice modal state
     let mut cv_rec: Option<Capture> = None;
+    let mut cv_rec_tap: Option<TapKind> = None;
     let cv_wav = scratch_wav("syrinx-cv-record.wav");
     let mut cv_sample: Option<String> = None;
     let mut rec_interval = tokio::time::interval(std::time::Duration::from_secs(1));
@@ -4053,6 +4219,7 @@ async fn run_session(
                 if let Some(cap) = vc_rec.as_mut() {
                     if capture_died(cap) {
                         vc_rec = None;
+                        vc_rec_tap = None;
                         ui.upgrade_in_event_loop(|ui| {
                             ui.set_vc_recording(false);
                             ui.set_vc_status("⚠ recorder exited — try again or check the source".into());
@@ -4065,10 +4232,22 @@ async fn run_session(
                         // engine caps conversion sources — stop and keep the clip
                         if let Some(cap) = vc_rec.take() {
                             let path = capture_stop(cap, &proxy, &vc_wav).await;
+                            let warn = silence_warning(&path, vc_rec_tap.take()).await;
                             if path.is_empty() {
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_vc_recording(false);
                                     ui.set_vc_status("⚠ recorder exited — try again or check the source".into());
+                                }).ok();
+                            } else if let Some(hint) = warn {
+                                vc_source = Some(path.clone());
+                                ui.upgrade_in_event_loop(move |ui| {
+                                    ui.set_vc_recording(false);
+                                    ui.set_vc_has_source(true);
+                                    ui.set_vc_source_label("recorded clip · 3:00".into());
+                                    ui.set_vc_armed_id("".into());
+                                    ui.set_vc_armed_saved(false);
+                                    ui.set_vc_status(SILENT_CAPTURE.into());
+                                    ui.set_vc_error(hint.into());
                                 }).ok();
                             } else {
                             vc_source = Some(path.clone());
@@ -4107,10 +4286,19 @@ async fn run_session(
                         // safety cap — stop and transcribe what we have
                         if let Some(cap) = tr_rec.take() {
                             let path = capture_stop(cap, &proxy, &tr_wav).await;
+                            let warn = silence_warning(&path, tr_rec_tap.take()).await;
                             if path.is_empty() {
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_tr_recording(false);
                                     ui.set_tr_status("⚠ recording failed — try again".into());
+                                }).ok();
+                            } else if let Some(hint) = warn {
+                                tr_source = path.clone();
+                                ui.upgrade_in_event_loop(|ui| {
+                                    ui.set_tr_recording(false);
+                                    ui.set_tr_has_source(true);
+                                    ui.set_tr_status(SILENT_CAPTURE.into());
+                                    ui.set_tr_notice(hint.into());
                                 }).ok();
                             } else {
                             match proxy.transcribe_file(&path).await {
@@ -4139,17 +4327,25 @@ async fn run_session(
                     // hit the cap — auto-stop and keep the clip
                     if let Some(cap) = cv_rec.take() {
                         let path = capture_stop(cap, &proxy, &cv_wav).await;
+                        let tap = cv_rec_tap.take();
                         if path.is_empty() {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_cv_recording(false);
                                 ui.set_cv_sample_label("⚠ recording failed — try again".into());
                             }).ok();
                         } else {
+                            let warn = silence_warning(&path, tap).await;
                             cv_sample = Some(path.clone());
-                            let label = recorded_label(&path);
+                            let label = match warn {
+                                Some(_) => SILENT_CAPTURE.to_string(),
+                                None => recorded_label(&path),
+                            };
                             ui.upgrade_in_event_loop(move |ui| {
                                 ui.set_cv_recording(false);
                                 ui.set_cv_sample_label(label.into());
+                                if let Some(hint) = warn {
+                                    ui.set_cv_error(hint.into());
+                                }
                             }).ok();
                         }
                     }
@@ -4484,10 +4680,12 @@ async fn run_session(
                         match capture_start(&proxy, &cv_wav, target.as_deref(), system).await {
                             Ok(cap) => {
                                 cv_rec = Some(cap);
+                                cv_rec_tap = system.then(|| tap_kind(target.as_deref()));
                                 rec_elapsed = 0;
                                 rec_interval.reset();  // first tick a full second out
                                 ui.upgrade_in_event_loop(|ui| {
                                     ui.set_cv_recording(true);
+                                    ui.set_cv_error("".into());  // last take's silence warning
                                     ui.set_cv_sample_label("● recording… 0s / 30s".into());
                                 }).ok();
                             }
@@ -4503,17 +4701,27 @@ async fn run_session(
                 Some(Cmd::CvStopRecord) => {
                     if let Some(cap) = cv_rec.take() {
                         let path = capture_stop(cap, &proxy, &cv_wav).await;
+                        let tap = cv_rec_tap.take();
                         if path.is_empty() {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_cv_recording(false);
                                 ui.set_cv_sample_label("⚠ recording failed — try again".into());
                             }).ok();
                         } else {
+                            // the clip is kept either way — the warning tells
+                            // the user why it is empty, it does not decide
+                            let warn = silence_warning(&path, tap).await;
                             cv_sample = Some(path.clone());
-                            let label = recorded_label(&path);
+                            let label = match warn {
+                                Some(_) => SILENT_CAPTURE.to_string(),
+                                None => recorded_label(&path),
+                            };
                             ui.upgrade_in_event_loop(move |ui| {
                                 ui.set_cv_recording(false);
                                 ui.set_cv_sample_label(label.into());
+                                if let Some(hint) = warn {
+                                    ui.set_cv_error(hint.into());
+                                }
                             }).ok();
                         }
                     }
@@ -4795,6 +5003,7 @@ async fn run_session(
                     if let Some(cap) = cv_rec.take() {
                         capture_discard(cap, &proxy).await;
                     }
+                    cv_rec_tap = None;
                     cv_sample = None;
                     cv_edit = None;
                     cv_edit_transcript.clear();
@@ -5106,12 +5315,24 @@ async fn run_session(
                     if let Some(cap) = tr_rec.take() {
                         // stop → transcribe (unless the capture came out silent)
                         let path = capture_stop(cap, &proxy, &tr_wav).await;
+                        let tap = tr_rec_tap.take();
                         if path.is_empty() {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_tr_recording(false);
                                 ui.set_tr_status("⚠ recording failed — try again".into());
                             }).ok();
-                        } else if wav_rms(&path).map(|r| r < 0.006).unwrap_or(true) {
+                        } else if let Some(hint) = silence_warning(&path, tap).await {
+                            // a silent system capture is kept and armed (✂ Trim
+                            // and ▶ still reach it); only the pointless
+                            // transcription of digital silence is skipped
+                            tr_source = path.clone();
+                            ui.upgrade_in_event_loop(|ui| {
+                                ui.set_tr_recording(false);
+                                ui.set_tr_has_source(true);
+                                ui.set_tr_status(SILENT_CAPTURE.into());
+                                ui.set_tr_notice(hint.into());
+                            }).ok();
+                        } else if tap.is_none() && wav_rms(&path).map(|r| r < 0.006).unwrap_or(true) {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_tr_recording(false);
                                 ui.set_tr_status("⚠ capture was silent — check the input device".into());
@@ -5160,12 +5381,14 @@ async fn run_session(
                             match capture_start(&proxy, &tr_wav, device.as_deref(), system).await {
                                 Ok(cap) => {
                                     tr_rec = Some(cap);
+                                    tr_rec_tap = system.then(|| tap_kind(device.as_deref()));
                                     tr_elapsed = 0;
                                     rec_interval.reset();  // first tick a full second out
                                     let mode = if system { "system" } else { "mic" };
                                     ui.upgrade_in_event_loop(move |ui| {
                                         ui.set_tr_text("".into());
                                         ui.set_tr_capture_id("".into()); // fresh source = new capture
+                                        ui.set_tr_notice("".into());     // last take's silence warning
                                         ui.set_tr_rec_mode(mode.into());
                                         ui.set_tr_recording(true);
                                         ui.set_tr_status("● recording 0:00".into());
@@ -5188,6 +5411,9 @@ async fn run_session(
                         .await
                     {
                         let path = handle.path().to_string_lossy().to_string();
+                        // an imported file replaces the source the last take's
+                        // silence warning was about
+                        ui.upgrade_in_event_loop(|ui| ui.set_tr_notice("".into())).ok();
                         if let Some(r) = ready_or_notice(&stt_models, &active_stt) {
                             tr_source = path.clone();
                             set_needs_model(&ui, "tr", &r.display, &r.id);
@@ -5307,12 +5533,28 @@ async fn run_session(
                     if let Some(cap) = vc_rec.take() {
                         // stop → arm the clip as the conversion source
                         let path = capture_stop(cap, &proxy, &vc_wav).await;
+                        let tap = vc_rec_tap.take();
                         if path.is_empty() {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_vc_recording(false);
                                 ui.set_vc_status("⚠ recorder exited — try again or check the source".into());
                             }).ok();
-                        } else if wav_rms(&path).map(|r| r < 0.006).unwrap_or(true) {
+                        } else if let Some(hint) = silence_warning(&path, tap).await {
+                            // armed anyway — converting silence is the user's
+                            // call, and ✂ Trim still reaches the clip
+                            vc_source = Some(path.clone());
+                            let e = vc_elapsed;
+                            let label = format!("recorded clip · {}:{:02}", e / 60, e % 60);
+                            ui.upgrade_in_event_loop(move |ui| {
+                                ui.set_vc_recording(false);
+                                ui.set_vc_has_source(true);
+                                ui.set_vc_source_label(label.into());
+                                ui.set_vc_armed_id("".into());
+                                ui.set_vc_armed_saved(false);
+                                ui.set_vc_status(SILENT_CAPTURE.into());
+                                ui.set_vc_error(hint.into());
+                            }).ok();
+                        } else if tap.is_none() && wav_rms(&path).map(|r| r < 0.006).unwrap_or(true) {
                             ui.upgrade_in_event_loop(|ui| {
                                 ui.set_vc_recording(false);
                                 ui.set_vc_status("⚠ capture was silent — check the input device".into());
@@ -5353,6 +5595,7 @@ async fn run_session(
                             match capture_start(&proxy, &vc_wav, device.as_deref(), system).await {
                                 Ok(cap) => {
                                     vc_rec = Some(cap);
+                                    vc_rec_tap = system.then(|| tap_kind(device.as_deref()));
                                     vc_elapsed = 0;
                                     pending_vc_tr = 0;  // a stale transcription no longer applies
                                     vc_tr_clip.clear();
@@ -6608,6 +6851,124 @@ mod tests {
         } else {
             assert_eq!(NO_SYSTEM_TAP, "no default sink monitor found");
         }
+    }
+
+    // --- silence guard ---------------------------------------------------
+
+    /// A PCM16 mono WAV in the temp dir; `extra` is an unknown chunk written
+    /// before `data`, which a real-world WAV (LIST/INFO) often carries.
+    fn wav_file(name: &str, rate: u32, samples: &[i16], extra: bool) -> String {
+        let path = std::env::temp_dir().join(name).to_string_lossy().to_string();
+        let mut b: Vec<u8> = Vec::new();
+        // odd body (5) + its pad byte — the alignment `wav_scan` has to honour
+        let list: &[u8] = if extra { b"LIST\x05\x00\x00\x00INFO\x00\x00" } else { b"" };
+        let data = samples.len() as u32 * 2;
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + list.len() as u32 + data).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        b.extend_from_slice(&1u16.to_le_bytes()); // mono
+        b.extend_from_slice(&rate.to_le_bytes());
+        b.extend_from_slice(&(rate * 2).to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(list);
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data.to_le_bytes());
+        for s in samples {
+            b.extend_from_slice(&s.to_le_bytes());
+        }
+        std::fs::write(&path, b).unwrap();
+        path
+    }
+
+    fn scan(peak: f32, frames: u64, rate: u32) -> WavScan {
+        WavScan { peak, frames, rate }
+    }
+
+    #[test]
+    fn the_classifier_separates_digital_silence_from_quiet_audio() {
+        // the incident: 30 s of nothing at all
+        assert!(scan(0.0, 30 * 48_000, 48_000).is_silent());
+        // dither / a single stuck LSB is still nothing
+        assert!(scan(3.0 / 32768.0, 48_000, 48_000).is_silent());
+        // a hair over the floor is audio, however faint — never flagged
+        assert!(!scan(4.0 / 32768.0, 48_000, 48_000).is_silent());
+        assert!(!scan(0.01, 48_000, 48_000).is_silent());
+        assert!(!scan(1.0, 48_000, 48_000).is_silent());
+        // a twitch-stop is not a routing failure
+        assert!(!scan(0.0, 24_000 - 1, 48_000).is_silent());
+        assert!(scan(0.0, 24_000, 48_000).is_silent(), "0.5 s is the floor, not below it");
+        // a scan with no usable rate can classify nothing
+        assert!(!scan(0.0, 48_000, 0).is_silent());
+    }
+
+    #[test]
+    fn wav_scan_streams_a_real_pcm16_capture() {
+        // 1 s at 48 kHz = 96 kB of PCM, three passes of the 64 kB window, and
+        // an unknown chunk in front of `data` to walk past
+        let loud: Vec<i16> = (0..48_000).map(|i| ((i % 200) as i16 - 100) * 300).collect();
+        let p = wav_file("syrinx-test-loud.wav", 48_000, &loud, true);
+        let s = wav_scan(&p).expect("PCM16 mono is scannable");
+        assert_eq!((s.frames, s.rate), (48_000, 48_000));
+        assert!((s.peak - 30_000.0 / 32768.0).abs() < 1e-4, "peak was {}", s.peak);
+        assert!(!s.is_silent());
+
+        // rms 0.01 speech-shaped clip: quiet, real, and must survive
+        let quiet: Vec<i16> = (0..24_000)
+            .map(|i| ((i as f32 * 0.05).sin() * 0.0141 * 32768.0) as i16)
+            .collect();
+        let p = wav_file("syrinx-test-quiet.wav", 24_000, &quiet, false);
+        assert!(!wav_scan(&p).unwrap().is_silent());
+
+        // 30 s of digital silence — the incident, reproduced
+        let p = wav_file("syrinx-test-silent.wav", 48_000, &vec![0i16; 48_000 * 2], false);
+        assert!(wav_scan(&p).unwrap().is_silent());
+
+        // 0.25 s of silence — exempt
+        let p = wav_file("syrinx-test-short.wav", 48_000, &vec![0i16; 12_000], false);
+        assert!(!wav_scan(&p).unwrap().is_silent());
+
+        // not a WAV at all: no scan, and therefore no warning
+        let p = std::env::temp_dir().join("syrinx-test-notawav.wav");
+        std::fs::write(&p, b"this is not a RIFF file").unwrap();
+        assert!(wav_scan(&p.to_string_lossy()).is_none());
+        assert!(wav_scan("/nonexistent/syrinx.wav").is_none());
+    }
+
+    #[test]
+    fn each_tap_gets_its_own_cause_for_the_silence() {
+        // macOS is the only OS with two taps to tell apart
+        if cfg!(target_os = "macos") {
+            assert_eq!(tap_kind(None), TapKind::Native);
+            assert_eq!(tap_kind(Some("")), TapKind::Native);
+            assert_eq!(tap_kind(Some("BlackHole 2ch")), TapKind::Loopback);
+            // the loopback line repeats the ⚙ hint's fix; the native one must
+            // not, because routing is exactly what a native tap does not need
+            assert!(silence_hint(TapKind::Loopback).contains("Multi-Output Device"));
+            assert!(!silence_hint(TapKind::Native).contains("Multi-Output Device"));
+        } else {
+            assert_eq!(tap_kind(None), TapKind::Sink);
+            assert_eq!(tap_kind(Some("alsa_output.monitor")), TapKind::Sink);
+        }
+        for t in [TapKind::Native, TapKind::Loopback, TapKind::Sink] {
+            let h = silence_hint(t);
+            assert!(h.ends_with('.'), "{h:?} should be one sentence");
+            assert_eq!(h.matches(". ").count(), 0, "{h:?} should be one sentence");
+        }
+        assert!(SILENT_CAPTURE.contains("kept"), "the clip is never discarded");
+    }
+
+    #[test]
+    fn a_mic_capture_is_never_flagged() {
+        // the guard is system-audio only — a quiet room is legitimate, and the
+        // ⚙ meter already shows mic level live
+        let rt = tokio::runtime::Builder::new_current_thread().build().unwrap();
+        let p = wav_file("syrinx-test-mic.wav", 48_000, &vec![0i16; 48_000 * 2], false);
+        assert_eq!(rt.block_on(silence_warning(&p, None)), None);
+        assert!(rt.block_on(silence_warning(&p, Some(TapKind::Sink))).is_some());
+        assert_eq!(rt.block_on(silence_warning("", Some(TapKind::Sink))), None);
     }
 
     // --- is_vc_engine ----------------------------------------------------

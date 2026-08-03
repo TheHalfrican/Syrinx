@@ -1070,6 +1070,10 @@ export component AppWindow inherits Window {
     in property <string> tr-rec-mode: "mic";   // which source is live
     in property <bool> tr-busy;                // transcribing or refining
     in property <string> tr-status;
+    // advisory line under the source row — currently the system-capture
+    // silence guard. tr-status is elided to nothing in a tiled window, so a
+    // sentence needs its own row.
+    in property <string> tr-notice: "";
     in property <[CaptureItem]> captures;      // persisted transcripts (text only)
     in-out property <string> tr-capture-id;    // loaded capture ("" = unsaved)
     // --- voice changer (⇄ vc) view ---
@@ -2156,6 +2160,19 @@ export component AppWindow inherits Window {
                                     overflow: elide; preferred-width: 0px;
                                     horizontal-stretch: 1; horizontal-alignment: right;
                                 }
+                            }
+                            // silence guard (composer error-line pattern:
+                            // elide + ⧉ copy; preferred-width 0 so it can't
+                            // inflate the column)
+                            if tr-notice != "" : HorizontalLayout {
+                                spacing: 6px;
+                                Text {
+                                    text: "⚠ " + tr-notice;
+                                    font-size: 10.5px; font-family: Theme.mono; color: Theme.dim;
+                                    overflow: elide; preferred-width: 0px;
+                                    horizontal-stretch: 1; vertical-alignment: center;
+                                }
+                                CopyBtn { text: tr-notice; }
                             }
                             // whisper (or the refine LLM) isn't downloaded —
                             // the capture is safe, only the model is missing

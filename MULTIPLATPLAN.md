@@ -1321,6 +1321,77 @@ settle it. (b) A default-output change mid-capture is not re-armed
 (the tap is global, so it should not matter, but it is unproven).
 (c) The dropped-samples path (writer stall / try_lock miss) only logs.
 
+**2026-08-03 (later) — the silence guard: a system capture that came
+back empty now SAYS SO, with the cause the tap in use implies.** The
+incident: two 30 s create-voice "System" takes on the M3 produced
+valid, perfectly silent WAVs (rms 0.000000) and the flow accepted
+them; the only warning in the app, `recorded_label`'s "⚠ silent —
+check input / output device", names neither the tap nor the fix, and
+the ⇄/☰ arms of the same check (`wav_rms < 0.006`) DISCARDED the take
+instead of warning about it. Guard is app-side, at the moment
+`capture_stop` returns a path, and system-audio ONLY — mic level is
+already live in the ⚙ meter and a quiet room is legitimate.
+
+Classifier (`WavScan` + `is_silent`, app/src/main.rs): PEAK, not rms —
+`SILENT_PEAK = 1e-4` full scale is ±3 LSB of PCM16, i.e. dither and
+nothing else, so a genuinely quiet take can never trip it (the old
+0.006 rms floor flags real audio 60× above digital silence and is why
+the ⇄/☰ arms threw takes away). `SILENCE_MIN_SECS = 0.5` exempts
+twitch-stops. `wav_scan` walks the chunk table (fmt/data, word-aligned
+skips over LIST & friends, `data` size 0 = read to EOF for a recorder
+killed mid-write) and streams the PCM through a fixed 64 kB window —
+no slurp; measured 0.01 s on a 57.6 MB 10-minute 48 kHz mono capture,
+and it runs on `spawn_blocking` anyway because the worker loop it is
+awaited from drives every timer and button in the app. PCM16-only by
+design: every writer in play (capture_mac/capture_win WavWriter,
+parecord --format=s16le, the engine's `wave` + sd.InputStream
+dtype=int16) produces it, and a guess at any other layout would be a
+lie rather than a warning; non-PCM16 → `None` → no warning.
+
+Cause is carried, not inferred at stop time: `TapKind::{Native,
+Loopback,Sink}` is recorded from resolve_capture_device's device at
+capture_start (mac None = native tap, Some = loopback driver;
+everywhere else Sink) and held beside the Capture, because the safety-
+cap auto-stops have no `system` argument to read and the other source
+button stays clickable mid-take. `silence_hint` mirrors the ⚙ tap_hint
+matrix one sentence deep — native: "Nothing was playing — the native
+tap hears whatever this Mac is outputting, so start the audio (or
+unmute it) and record again."; loopback: "A loopback tap hears only
+what is routed to it — send the audio there with a Multi-Output Device
+(Audio MIDI Setup)."; sink: "Nothing was playing on the tapped output
+while the capture ran."
+
+WARN, never discard, at all six stop sites (✦ create-voice stop + its
+30 s cap, ☰ toggle-stop + its 10 min cap, ⇄ toggle-stop + its 3 min
+cap): the clip is kept, armed and reachable by ✂ Trim; only the
+pointless transcription of digital silence is skipped. Tight slots get
+`SILENT_CAPTURE` ("⚠ silent capture — kept anyway"), the sentence goes
+to each flow's own notice line — cv-error and vc-error already existed
+(composer error-line pattern, elide + ⧉); ☰ had none, so `tr-notice`
+is the one new property + row, styled 10.5px mono dim to match. The
+mic arms of the ⇄/☰ rms check are untouched and now explicitly gated
+`tap.is_none()`, so system captures take the new path exclusively.
+
+Gates: clippy `-p syrinx-app -p syrinx-shared --all-targets` clean,
+`cargo test -p syrinx-app` 103 passed (+4), `-p syrinx-shared` 1.
+Snapshot harness gained `tr-silent` / `vc-silent` / `cv-silent`
+variants (main() split so every variant shares one `render`): the
+create-voice card holds the warning inside its fixed 92px without the
+wrap+preferred-width:0 blowout, and at 900px the ☰ notice row still
+reads in full while tr-status elides to "⚠ …" — which is the whole
+reason it is a separate row. **Verified against the incident files**
+(~/Library/Application Support/syrinx/recordings): all three scan
+peak 0.0 @ 48 kHz — 1437696 / 155648 / 1437696 frames = 29.95 s /
+3.24 s / 29.95 s — and classify SILENT; real audio in the same
+run (a profile sample, a history clip, a vevo reference) scans
+peak 0.32 / 0.37 / 1.00 and classifies NOT silent.
+
+Residual: the guard cannot distinguish "nothing was playing" from
+"the TCC AudioCapture grant was denied", because a denied tap
+delivers zeros with no error (2026-08-03 entry above) — the native
+hint's wording is deliberately about the audio, not the permission,
+and the ⚙ card remains the place a permission story would go.
+
 **LINUX SESSION QUEUE** (consolidated 2026-07-26 — items parked from
 Windows sessions; each also appears in its origin ledger entry above):
 1. ~~`dictate/src/main.rs` still reads only `a.text` from LlmResult~~
