@@ -1911,3 +1911,43 @@ looks safe when someone pays the download. (2) `_f0_float32` rides
 inlines it returns music mode to a LOUD hard error on Metal, not silent
 corruption. (3) Vevo2 remixes peak 0.99 into the normalizer on cpu and
 mps alike — pre-existing, not a device artifact.
+
+**2026-08-04 (engine) — TADA joins the Metal roster: bf16 landed, and the
+live proof caught a hard blocker no op sweep could see.** Noah approved the
+14.6 GB spend; `hume-tada 0.1.9` installed `--no-deps` into the main venv
+and weights fetched through the catalog's own `ModelManager.download`
+("tada-1b" 3.93 GB + tada-codec 10.72 GB + the disclosed unsloth tokenizer
+side-fetch, 16 MB actual vs the "~2 MB" comment — `tokenizer*` also
+matches tokenizer.json), so the Models tab's cached-detection sees the
+files. THE BLOCKER: TADA did not run on MPS at all, in ANY dtype —
+hume-tada's `TadaForCausalLM._lm_head_forward` special-cases mps by
+detouring the head's INPUT through the CPU without ever moving `lm_head`
+with it, so every generate() died on a device mismatch. Its premise (Metal
+can't do >65536 output channels) is stale — `nn.Linear(2048, 128256)`
+runs fine under torch 2.13. Fixed backend-side (tada.py:119-127): on mps,
+override the instance's `_lm_head_forward` with a plain lambda running the
+head in place — plain callable on purpose, since `nn.Module.__setattr__`
+files Module-typed values under `_modules` where the class method still
+shadows them; no reference cycle, `unload()` still frees by refcount.
+Version-coupling noted: an upstream rename of `_lm_head_forward` silently
+reverts to the crashing path (upstream FIX makes ours a harmless no-op).
+THE DTYPE: `elif device == "mps": dtype = torch.bfloat16` (tada.py:88-101)
+— no probe needed (every Metal-capable Mac has bf16), the decoder/wav head
+stays fp32 regardless (from_pretrained's dtype never reaches it), cpu
+stays fp32 (emulated bf16 is slower than what it replaces). Live proof on
+the M3, kokoro reference + 3 text lengths: fp32 baseline sane (one
+stochastic word-drop, WER 0.061 on the paragraph — fp32 was the WORSE
+run); bf16 6/6 texts at WER 0.000 across two replicates, all finite, rms/
+duration in family. Warm timings: short 2.75 s bf16 vs 4.27 fp32 vs 11.50
+cpu; paragraph 7.78 / 11.80 / 33.19; long 12.01 / 18.48 / 51.28 — bf16 is
+~35% faster than fp32-mps and crosses realtime (~0.64x); cpu is ~4.3x
+slower than bf16-mps. Memory: 10.03 GB fp32 → 6.76 GB bf16 steady
+(torch.mps.current_allocated_memory), which also says tada-3b-ml
+(catalog min_vram_gb=8.0) is optimistic on a 24 GB unified box with the
+app resident. Tests: test_device.py grows a TADA section (10, stand-in
+torch/hub/tada per house style — dtype per device incl. rocm→cuda naming,
+both cuda fp32 fallbacks, override beats the class method on Metal and is
+absent elsewhere); suite 662 @ 95.65%, ruff clean. Residuals: hume-tada's
+`_decode_wav` swallows exceptions into `wavs.append(None)` — a future
+decoder regression presents as "TADA produced no audio", not a traceback;
+only the English 1B proven (bf16 on the 3B multilingual path untested).

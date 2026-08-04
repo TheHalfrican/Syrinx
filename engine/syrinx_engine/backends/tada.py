@@ -85,6 +85,10 @@ class TadaBackend:
             allow_patterns=["tokenizer*", "special_tokens*"],
         )
 
+        # bf16 wherever the accelerator has it. Metal always does, and tada's
+        # own decoder stays fp32 (from_pretrained's dtype never reaches it), so
+        # the wav head keeps full precision either way. cpu stays fp32 — its
+        # bf16 kernels are emulated and slower than the thing they replace.
         dtype = torch.float32
         if device == "cuda":
             try:
@@ -92,6 +96,8 @@ class TadaBackend:
                     dtype = torch.bfloat16
             except Exception:  # noqa: BLE001
                 pass
+        elif device == "mps":
+            dtype = torch.bfloat16
 
         # point TADA's aligner + LM at the local ungated tokenizer
         from tada.modules.aligner import AlignerConfig
@@ -110,6 +116,15 @@ class TadaBackend:
         self._model = TadaForCausalLM.from_pretrained(
             repo, config=config, torch_dtype=dtype
         ).to(device)
+        if device == "mps":
+            # tada's _lm_head_forward detours the head through the CPU on mps
+            # (it works around a 65536-output-channel limit) but never moves
+            # lm_head itself — every generate() dies on the device mismatch.
+            # Modern torch has no such limit; run the head in place. The
+            # override must be a plain callable: nn.Module.__setattr__ files a
+            # Module under _modules, where the class method still shadows it.
+            head = self._model.lm_head
+            self._model._lm_head_forward = lambda hidden: head(hidden)
         self._model.eval()
         log.info("TADA %s loaded", self.model_size)
 

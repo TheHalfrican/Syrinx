@@ -203,3 +203,130 @@ def test_llm_loads_in_the_right_dtype(monkeypatch, device, dtype):
     assert engine._device == device
     assert seen["moved_to"] == device
     assert repr(seen["dtype"]) == dtype
+
+
+# --- TADA device + dtype --------------------------------------------------
+
+
+class FakeHead:
+    """Stands in for lm_head — callable, and records that it was called."""
+
+    def __init__(self):
+        self.calls = 0
+
+    def __call__(self, hidden):
+        self.calls += 1
+        return hidden
+
+
+class FakeTadaModel:
+    def __init__(self):
+        self.lm_head = FakeHead()
+        self.moved_to = None
+        self.evaled = False
+
+    def to(self, device):
+        self.moved_to = device
+        return self
+
+    def eval(self):
+        self.evaled = True
+        return self
+
+    def _lm_head_forward(self, hidden):  # the shipped mps detour, unpatched
+        raise AssertionError("class method still shadows the override")
+
+
+def load_tada(monkeypatch, device, cuda_bf16=True):
+    """Run TadaBackend._load_sync against stand-in torch / hub / tada modules
+    and hand back (backend, seen-kwargs, model). torch and hume-tada are
+    outside the CI dependency contract, so every collaborator is a stand-in."""
+    from syrinx_engine.backends import tada as tada_backend
+
+    seen = {}
+    model = FakeTadaModel()
+
+    bf16_probe = cuda_bf16 if callable(cuda_bf16) else (lambda: cuda_bf16)
+    torch_mod = types.SimpleNamespace(
+        cuda=types.SimpleNamespace(is_available=lambda: False,
+                                   is_bf16_supported=bf16_probe),
+        backends=types.SimpleNamespace(
+            mps=types.SimpleNamespace(is_available=lambda: False)),
+        float32=FakeDtype("float32"),
+        bfloat16=FakeDtype("bfloat16"),
+    )
+    hub = types.SimpleNamespace(
+        snapshot_download=lambda repo_id, allow_patterns=None: "/tok/" + repo_id)
+    aligner = types.SimpleNamespace(
+        AlignerConfig=types.SimpleNamespace(tokenizer_name=""))
+    encoder = types.SimpleNamespace(
+        Encoder=types.SimpleNamespace(
+            from_pretrained=lambda repo, subfolder: types.SimpleNamespace(
+                to=lambda d: types.SimpleNamespace(eval=lambda: None))))
+    tada_mod = types.SimpleNamespace(
+        TadaConfig=types.SimpleNamespace(
+            from_pretrained=lambda repo: types.SimpleNamespace(tokenizer_name="")),
+        TadaForCausalLM=types.SimpleNamespace(
+            from_pretrained=lambda repo, config, torch_dtype: seen.update(
+                repo=repo, dtype=torch_dtype) or model),
+    )
+    for name, mod in [("torch", torch_mod), ("huggingface_hub", hub),
+                      ("tada", types.SimpleNamespace()),
+                      ("tada.modules", types.SimpleNamespace()),
+                      ("tada.modules.aligner", aligner),
+                      ("tada.modules.encoder", encoder),
+                      ("tada.modules.tada", tada_mod)]:
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(tada_backend, "install_dac_shim", lambda: None)
+
+    backend = tada_backend.TadaBackend()
+    backend.device = device
+    backend._load_sync()
+    return backend, seen, model
+
+
+@pytest.mark.parametrize(("device", "dtype"), [
+    ("cuda", "bfloat16"),
+    ("rocm", "bfloat16"),   # a HIP build reports itself as cuda to torch
+    ("mps", "bfloat16"),    # Metal has bf16; fp16 overflows this LM's sampling
+    ("cpu", "float32"),     # cpu bf16 is emulated — slower than what it replaces
+])
+def test_tada_loads_in_the_right_dtype(monkeypatch, device, dtype):
+    _backend, seen, _model = load_tada(monkeypatch, device)
+    assert repr(seen["dtype"]) == dtype
+
+
+def test_tada_keeps_fp32_when_cuda_has_no_bf16(monkeypatch):
+    """An older card: the cuda arm probes. Metal's arm doesn't have to —
+    every Metal-capable Mac has bf16."""
+    _backend, seen, _model = load_tada(monkeypatch, "cuda", cuda_bf16=False)
+    assert repr(seen["dtype"]) == "float32"
+
+
+def test_tada_keeps_fp32_when_the_bf16_probe_raises(monkeypatch):
+    def boom():
+        raise RuntimeError("no cuda runtime")
+
+    _backend, seen, _model = load_tada(monkeypatch, "cuda", cuda_bf16=boom)
+    assert repr(seen["dtype"]) == "float32"
+
+
+def test_tada_runs_the_lm_head_in_place_on_metal(monkeypatch):
+    """tada's shipped _lm_head_forward detours through the CPU without moving
+    lm_head with it. The override has to beat the class method, which a
+    Module-typed attribute would not."""
+    _backend, _seen, model = load_tada(monkeypatch, "mps")
+    assert model._lm_head_forward("hidden") == "hidden"
+    assert model.lm_head.calls == 1
+
+
+@pytest.mark.parametrize("device", ["cuda", "cpu"])
+def test_tada_leaves_the_lm_head_alone_off_metal(monkeypatch, device):
+    _backend, _seen, model = load_tada(monkeypatch, device)
+    with pytest.raises(AssertionError):
+        model._lm_head_forward("hidden")
+
+
+def test_tada_moves_the_model_to_the_torch_device(monkeypatch):
+    _backend, _seen, model = load_tada(monkeypatch, "rocm")
+    assert model.moved_to == "cuda" and model.evaled
