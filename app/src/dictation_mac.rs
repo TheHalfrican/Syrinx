@@ -1,5 +1,6 @@
-//! macOS global dictation (v1): Carbon `RegisterEventHotKey` + CGEvent unicode
-//! injection, no pill overlay — the architectural twin of `dictation_win.rs`.
+//! macOS global dictation: Carbon `RegisterEventHotKey` + CGEvent unicode
+//! injection, with a non-activating NSPanel HUD and system sounds for feedback
+//! — the architectural twin of `dictation_win.rs`.
 //!
 //! Same shape as Windows, for the same reasons: the Linux `dictate/` crate is
 //! gtk4 + zbus and never builds here, and the engine only exists while the app
@@ -11,6 +12,14 @@
 //! shared `refine_dictation` settings key) → the text is typed into whatever app
 //! has focus. Every failure logs and returns to idle; nothing here may crash the
 //! app. The RPC surface is untouched — this is a client, not a protocol change.
+//!
+//! Every transition the user could be waiting on emits a `DictationCue`
+//! (`dictation_cue.rs`), which `dictation_hud_mac.rs` turns into a system sound
+//! and a line on a floating pill. v1 shipped without either and the chord was
+//! indistinguishable from a dead key: nothing said the mic was open, nothing
+//! said a 40 s refine was still running, and a missing Accessibility grant was
+//! a log line. The cue calls below are the *only* place this module talks to
+//! the user, and none of them can fail into the state machine.
 //!
 //! Three things are mac-specific:
 //!
@@ -44,6 +53,9 @@ use objc2_core_graphics::{CGEvent, CGEventFlags, CGEventTapLocation};
 use objc2_foundation::{NSDictionary, NSNumber, NSString};
 use syrinx_shared::{EngineClient, EngineEvent};
 use tokio::sync::mpsc;
+
+use crate::dictation_cue::DictationCue;
+use crate::dictation_hud_mac as hud;
 
 /// The chord, spelled for the ⚙ card. Shown, not configurable (v1, as on
 /// Windows) — the ledger records the choice.
@@ -333,9 +345,15 @@ fn worker(mut rx: mpsc::UnboundedReceiver<()>, ui: slint::Weak<crate::AppWindow>
         let mut session: Option<Recording> = None;
         while rx.recv().await.is_some() {
             match plan(session.is_some(), ensure_trusted(&ui)) {
-                Press::Blocked => tracing::warn!(
-                    "dictation: no Accessibility grant — nothing would be typed. {TCC_HINT}"
-                ),
+                Press::Blocked => {
+                    // The ⚙ card already carries the hint, but a user who
+                    // pressed the chord is not looking at ⚙ — say it where they
+                    // are, since to them the key simply did nothing.
+                    hud::emit(DictationCue::Blocked);
+                    tracing::warn!(
+                        "dictation: no Accessibility grant — nothing would be typed. {TCC_HINT}"
+                    );
+                }
                 Press::Start => session = start(&mut engine).await,
                 Press::Finish => {
                     if let Some(rec) = session.take() {
@@ -368,18 +386,26 @@ async fn ensure_engine(engine: &mut Option<Engine>) -> Option<&mut Engine> {
 /// idle → recording. Returns the new session, or `None` on any failure (staying
 /// idle). A transport failure clears the connection so the next press redials.
 async fn start(engine: &mut Option<Engine>) -> Option<Recording> {
-    let eng = ensure_engine(engine).await?;
+    let Some(eng) = ensure_engine(engine).await else {
+        // Not a silent no-op: from the user's side an unreachable engine and a
+        // dead hotkey look exactly alike.
+        hud::emit(DictationCue::Error("Engine unreachable"));
+        return None;
+    };
     // "" device = system default input (§14).
     match eng.client.start_recording("").await {
         Ok(rec_id) if !rec_id.is_empty() => {
+            hud::emit(DictationCue::Listening);
             tracing::info!("dictation: ● recording — ⌃⌥D again to stop");
             Some(Recording { rec_id })
         }
         Ok(_) => {
+            hud::emit(DictationCue::Error("Microphone unavailable"));
             tracing::warn!("dictation: engine could not start recording (device busy/missing)");
             None
         }
         Err(e) => {
+            hud::emit(DictationCue::Error("Could not start recording"));
             tracing::warn!("dictation: start_recording failed: {e}");
             *engine = None; // socket may be dead — force a fresh connect next press
             None
@@ -394,7 +420,13 @@ async fn stop_and_inject(
     rec: Recording,
     ui: &slint::Weak<crate::AppWindow>,
 ) {
+    // Before the first await: the mic just closed, and the user needs to know
+    // that *now* — the span that follows can run to 40 s on a cold refine, and
+    // it is the whole reason the HUD counts seconds.
+    hud::emit(DictationCue::Transcribing);
+
     let Some(eng) = engine.as_mut() else {
+        hud::emit(DictationCue::Error("Engine unreachable"));
         tracing::warn!("dictation: engine lost before stop — recording abandoned");
         return;
     };
@@ -402,10 +434,12 @@ async fn stop_and_inject(
     let path = match eng.client.stop_recording(&rec.rec_id).await {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
+            hud::emit(DictationCue::Error("Recording was lost"));
             tracing::warn!("dictation: stop_recording returned no path");
             return;
         }
         Err(e) => {
+            hud::emit(DictationCue::Error("Recording was lost"));
             tracing::warn!("dictation: stop_recording failed: {e}");
             *engine = None;
             return;
@@ -415,6 +449,7 @@ async fn stop_and_inject(
     let text = match eng.client.transcribe(&path).await {
         Ok(t) => t,
         Err(e) => {
+            hud::emit(DictationCue::Error("Transcription failed"));
             // StopRecording already finalized (and now owns) the WAV in engine
             // scratch, so there is no live recording to cancel — the scratch file
             // is engine-owned and reaped there (§14).
@@ -428,6 +463,9 @@ async fn stop_and_inject(
 
     let text = text.trim().to_string();
     if text.is_empty() {
+        // Not a failure, but it must not read as one either — a HUD that just
+        // vanished would leave the user waiting for text that is never coming.
+        hud::emit(DictationCue::Error("No speech detected"));
         tracing::info!("dictation: (no speech detected)");
         return;
     }
@@ -499,6 +537,7 @@ async fn refine(eng: &mut Engine, raw: &str) -> String {
 /// while looking like success.
 async fn inject(text: &str, ui: &slint::Weak<crate::AppWindow>) {
     if !ensure_trusted(ui) {
+        hud::emit(DictationCue::Blocked);
         tracing::warn!(
             "dictation: Accessibility grant lost — {} chars not typed. {TCC_HINT}",
             text.chars().count()
@@ -509,6 +548,9 @@ async fn inject(text: &str, ui: &slint::Weak<crate::AppWindow>) {
         post_unicode(&chunk);
         tokio::time::sleep(INJECT_GAP).await;
     }
+    // Only after the last event is posted: the confirmation has to mean the
+    // words are in, not that they are on their way.
+    hud::emit(DictationCue::Typed);
 }
 
 /// Split `text` into UTF-16 payloads of at most `CHUNK_UNITS`. A char contributes

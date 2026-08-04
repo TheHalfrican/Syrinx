@@ -50,7 +50,20 @@ futures-util.workspace = true
 # 0.3 family already in the lock file.
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
-objc2-app-kit = { version = "0.3", default-features = false, features = ["std", "NSScreen", "objc2-core-foundation"] }
+# NSScreen is the HiDPI diagnostic; everything after it is the dictation HUD
+# (dictation_hud_mac.rs) — a non-activating NSPanel holding an NSBox pill and an
+# NSTextField line, plus NSSound for the cues and NSWorkspace for the
+# frontmost-app check that proves the panel never steals focus. All of it is
+# this one crate: no package is added, only more of its features compiled.
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std", "objc2-core-foundation",
+    "NSScreen",
+    "NSPanel", "NSWindow", "NSResponder", "NSView", "NSGraphics",
+    "NSBox", "NSTextField", "NSControl", "NSCell", "NSText",
+    "NSColor", "NSFont", "NSFontDescriptor",
+    "NSSound",
+    "NSWorkspace", "NSRunningApplication",
+] }
 objc2-core-audio = { version = "0.3", default-features = false, features = ["std", "objc2", "objc2-foundation", "objc2-core-audio-types", "AudioHardware"] }
 objc2-core-audio-types = { version = "0.3", default-features = false, features = ["std", "CoreAudioBaseTypes"] }
 objc2-core-foundation = { version = "0.3", default-features = false, features = ["std", "CFDictionary"] }
@@ -64,4 +77,4 @@ objc2-core-graphics = { version = "0.3", default-features = false, features = ["
 objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSArray", "NSDictionary", "NSString", "NSUUID", "NSValue"] }
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_LibraryLoader"] }
+windows = { version = "0.62.2", features = ["Win32_Foundation", "Win32_Media_Audio", "Win32_Media_KernelStreaming", "Win32_Media_Multimedia", "Win32_System_Com", "Win32_System_Com_StructuredStorage", "Win32_System_Variant", "Win32_UI_Shell_PropertiesSystem", "Win32_Devices_FunctionDiscovery", "Win32_System_Threading", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_WindowsAndMessaging", "Win32_System_DataExchange", "Win32_System_Memory", "Win32_System_Ole", "Win32_System_LibraryLoader", "Win32_System_Diagnostics_Debug"] }

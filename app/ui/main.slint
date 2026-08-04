@@ -1412,6 +1412,11 @@ export component AppWindow inherits Window {
     in property <float> st-mic-level: 0;
     in property <bool> st-mic-test-supported: false;
     in property <bool> st-refine: false;
+    // The audible half of dictation's feedback (Win/mac in-app dictation only —
+    // the row hides on Linux, whose `syrinx-dictate` has its own pill). Default
+    // ON: a chord that opens the mic silently is the thing this exists to stop.
+    // The *visual* indicator has no toggle; it is the affordance. SET FROM RUST.
+    in property <bool> st-dictation-sounds: true;
     in property <bool> st-stop-engine: true;   // default-on; Rust overwrites from config
     // The ENGINE / "stop engine on quit" card is systemd-specific — hidden on
     // Win/mac, where a spawned engine always dies with the app (RPC §13). Rust
@@ -1456,6 +1461,7 @@ export component AppWindow inherits Window {
     callback st-mic-test-toggle();
     callback st-pick-monitor(int);
     callback st-toggle-refine();
+    callback st-toggle-dictation-sounds();
     callback st-toggle-stop-engine();
     callback st-pick-export-dir();
     callback st-pick-cap(int);
@@ -3220,8 +3226,11 @@ export component AppWindow inherits Window {
                                 // — the only one here allowed to wrap to two.
                                 // 58+34 is the authored 92px Linux always had;
                                 // Windows (no optional row) loses its dead space.
+                                // The sounds toggle is a second full row (38px:
+                                // the refine row's 30 plus the 8 spacing), and
+                                // exists only where the in-app hotkey does.
                                 height: 58px
-                                    + (root.is-linux ? 34px : 0px)
+                                    + (root.is-linux ? 34px : 38px)
                                     + (root.st-dictation-hotkey != "" ? 34px : 0px)
                                     + (root.st-dictation-hint != "" ? 40px : 0px);
                                 border-width: Theme.name == "win95" ? 0px : 1px; border-color: Theme.brd;
@@ -3238,6 +3247,20 @@ export component AppWindow inherits Window {
                                                 ? "Stop post-processing dictation with the LLM"
                                                 : "Let the LLM tidy dictated text automatically";
                                             clicked => { root.st-toggle-refine(); }
+                                        }
+                                    }
+                                    // Win/mac only: the in-app dictation cues.
+                                    // Linux's syrinx-dictate does its own thing
+                                    // and reads nothing from this key.
+                                    if !root.is-linux : HorizontalLayout {
+                                        spacing: 12px;
+                                        Text { text: "Dictation sounds"; font-size: 12.5px; color: Theme.fg; vertical-alignment: center; horizontal-stretch: 1; }
+                                        TBtn {
+                                            label: st-dictation-sounds ? "★ On" : "☆ Off"; generate: st-dictation-sounds;
+                                            tip: st-dictation-sounds
+                                                ? "Stop chiming when dictation starts, stops and finishes"
+                                                : "Chime when dictation starts, stops and finishes";
+                                            clicked => { root.st-toggle-dictation-sounds(); }
                                         }
                                     }
                                     // the in-app chord (Win/mac): one line, no

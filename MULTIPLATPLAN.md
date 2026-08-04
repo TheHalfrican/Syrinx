@@ -1951,3 +1951,49 @@ absent elsewhere); suite 662 @ 95.65%, ruff clean. Residuals: hume-tada's
 `_decode_wav` swallows exceptions into `wavs.append(None)` — a future
 decoder regression presents as "TADA produced no audio", not a traceback;
 only the English 1B proven (bf16 on the 3B multilingual path untested).
+
+**2026-08-04 (app) — dictation gets a voice and a face.** Noah's live test
+PASSED the same morning (both only-live-testable risks retired: winit
+dispatches the Carbon hotkey events, and macOS 26's synthesized-event gate
+passes from the signed bundle) — with the verdict that v1's UX floor was
+too low: zero indication of listening/transcribing/typing, "text just
+kind of shows up", and the blocked-no-grant case was a silent tracing
+line. New `dictation_cue.rs` (pure, both in-app platforms) names the five
+user-visible moments — Listening / Transcribing / Typed / Blocked /
+Error(&'static reason) — and maps each to a system sound + an overlay
+line; the platform modules emit the SAME cues at the same transitions and
+only rendering differs. macOS rendering (`dictation_hud_mac.rs`, raw
+objc2-app-kit, zero new crates): a real non-activating NSPanel —
+NSWindowStyleMaskNonactivatingPanel, NSStatusWindowLevel, canJoinAllSpaces
+| fullScreenAuxiliary | stationary | ignoresCycle, ignoresMouseEvents,
+becomesKeyOnlyIfNeeded, shown ONLY via orderFrontRegardless — because the
+HARD constraint is that the indicator can never take key focus (injection
+targets the focused app; a focus-stealing overlay would swallow its own
+target). Proven live: canBecomeKeyWindow=false and frontmost stayed
+TextEdit across every cue (SYRINX_DICTATION_CUE_DEMO=1 demo hook +
+focus_probe() kept permanently as the re-verification path). Pill:
+320×34 pt fixed, bottom-centre 96 pt above the visible frame (clear of
+Dock/chrome/cursor territory), NSBox + NSTextField, colour-per-state, and
+a live m:ss counter at 1 Hz on the two open-ended states — the answer to
+"is it hung?" during a cold 40 s refine. Sounds: stock
+/System/Library/Sounds via NSSound (Tink open / Pop close / Glass typed /
+Funk blocked / Basso error), instant and engine-independent. Cues wired
+at all 13 transition points in dictation_mac.rs incl. six distinct error
+reasons. ⚙ DICTATION card: "Dictation sounds" toggle row
+(dictation_sounds in settings.json, default ON, Win/mac only; card height
++38 px exact — snapshot-harness verified, no clipping). Windows leg
+STRUCTURAL: same cue seam, MessageBeep audible half (five MB_* values;
+Typed stays silent — Windows has exactly five event sounds), wired at
+every transition incl. its own reason for the UIPI→clipboard fallback;
+the visual overlay is a documented in-file TODO recipe (WS_EX_NOACTIVATE|
+TOPMOST|TOOLWINDOW|LAYERED, SW_SHOWNA) rather than blind-written code
+that could break the win build — joins the win-verification queue
+(build + beeps + toggle + then the overlay). Tests 117→128 (cue table
+exhaustiveness: dismiss/counter opposites, distinct lines+sounds, stock
+sound names, MB_* validity, m:ss incl. past-an-hour; + a live #[ignore]
+NSSound smoke, run, all five resolve+play); clippy clean; Cargo.lock
+unchanged. Residuals: full-screen-app and multi-monitor placement
+unverified (pill follows NSScreen.mainScreen; switch to the
+mouse-containing screen if it bites); pill appearance had only the
+numeric geometry probe — Noah's eyes are the first real look; sound
+choices are one-liners in DictationCue::mac_sound if Glass wears thin.

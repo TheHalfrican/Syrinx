@@ -1,4 +1,5 @@
-//! Windows global dictation (v1): RegisterHotKey + SendInput, no pill overlay.
+//! Windows global dictation: RegisterHotKey + SendInput, with system-event
+//! sounds for feedback and (still) no overlay — see the TODO at `cue()`.
 //!
 //! The Linux `dictate/` crate is gtk4 + zbus and never builds here; and the
 //! engine only exists while the app supervises it (RPC-PROTOCOL.md §13). So on
@@ -13,12 +14,19 @@
 //! `refine_dictation` settings key) → inject the text into the focused window via
 //! synthetic keystrokes, falling back to the clipboard when injection is blocked.
 //!
+//! Feedback mirrors the mac module through the shared `dictation_cue` seam:
+//! every transition the user could be waiting on emits a `DictationCue`, and
+//! `cue()` below renders it. v1 shipped mute and invisible on both platforms
+//! and the chord was indistinguishable from a dead key.
+//!
 //! Everything here is best-effort: a failed toggle logs and returns to idle, and
 //! nothing in this module may crash the app.
 
+use crate::dictation_cue::DictationCue;
 use syrinx_shared::{EngineClient, EngineEvent};
 use tokio::sync::mpsc;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL};
+use windows::Win32::System::Diagnostics::Debug::MessageBeep;
 use windows::Win32::System::DataExchange::{
     CloseClipboard, EmptyClipboard, OpenClipboard, SetClipboardData,
 };
@@ -28,7 +36,7 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     RegisterHotKey, SendInput, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBDINPUT, KEYEVENTF_KEYUP,
     KEYEVENTF_UNICODE, MOD_ALT, MOD_CONTROL, MOD_NOREPEAT, VIRTUAL_KEY,
 };
-use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MSG, WM_HOTKEY};
+use windows::Win32::UI::WindowsAndMessaging::{GetMessageW, MESSAGEBOX_STYLE, MSG, WM_HOTKEY};
 
 /// Our single hotkey registration id (namespaced per-thread; any nonzero value).
 const HOTKEY_ID: i32 = 0xD1C7;
@@ -108,6 +116,45 @@ struct Recording {
     rec_id: String,
 }
 
+/// Tell the user where dictation is. Callable from any thread and never fails
+/// into the state machine — feedback may not be the thing that breaks a take.
+///
+/// The audible half is `MessageBeep`, i.e. the user's *own* system event
+/// sounds: it is a single non-blocking call with no asset to ship, no audio
+/// device to open and no dependence on the engine (a cue has to land the
+/// instant the chord does, and the engine may not even be connected). Volume
+/// rides the system's. The five `MB_*` values come from the shared cue table
+/// (`dictation_cue::win_beep`), which is unit-tested on any host.
+///
+/// TODO(windows, untested-on-windows): the *visual* half. The mac twin puts a
+/// pill on a non-activating `NSPanel` (`dictation_hud_mac.rs`); the Windows
+/// equivalent is a `WS_EX_NOACTIVATE | WS_EX_TOPMOST | WS_EX_TOOLWINDOW |
+/// WS_EX_LAYERED` window — `NOACTIVATE` is the load-bearing flag, since
+/// `SendInput` targets the *foreground* window and an indicator that took
+/// focus would eat its own transcript — shown with `ShowWindow(SW_SHOWNA)`,
+/// positioned bottom-centre of `SPI_GETWORKAREA`, painted from `WM_PAINT` with
+/// `DrawTextW`, and pumped by the existing `hotkey_thread` message loop (which
+/// already has a `GetMessageW` and is idle between presses). The state text,
+/// colours, dismiss timings and the elapsed counter are already platform-free
+/// in `dictation_cue`, so only the window is missing. It is deliberately not
+/// written blind: none of it can be compiled, let alone run, on the Mac this
+/// was developed on, and a window that fails to build would take the whole
+/// Windows target with it. `NOTIFYICONDATA` balloon tips are the cheap
+/// fallback if the layered window proves fiddly.
+fn cue(what: DictationCue) {
+    // Same key the mac side reads, re-read per cue so a ⚙ flip applies to the
+    // next press rather than the next launch.
+    if !crate::load_config().dictation_sounds {
+        return;
+    }
+    let Some(utype) = what.win_beep() else {
+        return; // a cue Windows deliberately passes over in silence
+    };
+    // Returns Err when the sound scheme has no entry for the event; that is the
+    // user's configuration, not our problem.
+    let _ = unsafe { MessageBeep(MESSAGEBOX_STYLE(utype)) };
+}
+
 /// The worker: owns a tokio runtime, a lazily-established engine connection, and
 /// the toggle state machine. `session = None` is idle; `Some(_)` is recording.
 fn worker(mut rx: mpsc::UnboundedReceiver<()>) {
@@ -153,18 +200,26 @@ async fn ensure_engine(engine: &mut Option<Engine>) -> Option<&mut Engine> {
 /// idle → recording. Returns the new session, or `None` on any failure (staying
 /// idle). A transport failure clears the connection so the next press redials.
 async fn start(engine: &mut Option<Engine>) -> Option<Recording> {
-    let eng = ensure_engine(engine).await?;
+    let Some(eng) = ensure_engine(engine).await else {
+        // Not a silent no-op: from the user's side an unreachable engine and a
+        // dead hotkey look exactly alike.
+        cue(DictationCue::Error("Engine unreachable"));
+        return None;
+    };
     // "" device = system default input (§14).
     match eng.client.start_recording("").await {
         Ok(rec_id) if !rec_id.is_empty() => {
+            cue(DictationCue::Listening);
             tracing::info!("dictation: ● recording — Ctrl+Alt+D again to stop");
             Some(Recording { rec_id })
         }
         Ok(_) => {
+            cue(DictationCue::Error("Microphone unavailable"));
             tracing::warn!("dictation: engine could not start recording (device busy/missing)");
             None
         }
         Err(e) => {
+            cue(DictationCue::Error("Could not start recording"));
             tracing::warn!("dictation: start_recording failed: {e}");
             *engine = None; // socket may be dead — force a fresh connect next press
             None
@@ -175,7 +230,12 @@ async fn start(engine: &mut Option<Engine>) -> Option<Recording> {
 /// recording → idle: stop, transcribe, optionally refine, inject. Every failure
 /// path logs and returns to idle; a dead socket clears the connection.
 async fn stop_and_inject(engine: &mut Option<Engine>, rec: Recording) {
+    // Before the first await: the mic just closed, and the user needs to know
+    // that *now* — the span that follows can run to 40 s on a cold refine.
+    cue(DictationCue::Transcribing);
+
     let Some(eng) = engine.as_mut() else {
+        cue(DictationCue::Error("Engine unreachable"));
         tracing::warn!("dictation: engine lost before stop — recording abandoned");
         return;
     };
@@ -183,10 +243,12 @@ async fn stop_and_inject(engine: &mut Option<Engine>, rec: Recording) {
     let path = match eng.client.stop_recording(&rec.rec_id).await {
         Ok(p) if !p.is_empty() => p,
         Ok(_) => {
+            cue(DictationCue::Error("Recording was lost"));
             tracing::warn!("dictation: stop_recording returned no path");
             return;
         }
         Err(e) => {
+            cue(DictationCue::Error("Recording was lost"));
             tracing::warn!("dictation: stop_recording failed: {e}");
             *engine = None;
             return;
@@ -196,6 +258,7 @@ async fn stop_and_inject(engine: &mut Option<Engine>, rec: Recording) {
     let text = match eng.client.transcribe(&path).await {
         Ok(t) => t,
         Err(e) => {
+            cue(DictationCue::Error("Transcription failed"));
             // Cancel/cleanup: StopRecording already finalized (and now owns) the
             // WAV in engine scratch, so there is no live recording to cancel —
             // cancel_recording on a stopped id is a documented no-op (§14). The
@@ -210,6 +273,9 @@ async fn stop_and_inject(engine: &mut Option<Engine>, rec: Recording) {
 
     let text = text.trim().to_string();
     if text.is_empty() {
+        // Not a failure, but it must not read as one either — a user who hears
+        // nothing more assumes the transcript is still coming.
+        cue(DictationCue::Error("No speech detected"));
         tracing::info!("dictation: (no speech detected)");
         return;
     }
@@ -288,6 +354,9 @@ fn inject(text: &str) {
     let expected = inputs.len() as u32;
     let sent = unsafe { SendInput(&inputs, std::mem::size_of::<INPUT>() as i32) };
     if sent == expected {
+        // Only after the last event is posted: the confirmation has to mean the
+        // words are in, not that they are on their way.
+        cue(DictationCue::Typed);
         return;
     }
     // SendInput rarely "fails" in the return-value sense; the real miss is UIPI —
@@ -298,9 +367,19 @@ fn inject(text: &str) {
     tracing::warn!(
         "dictation: injected {sent}/{expected} key events (elevated target?) — using clipboard"
     );
+    // `Blocked` is deliberately not used here: its line names macOS's
+    // Accessibility pane, and Windows' block (UIPI, an elevated target) has a
+    // different name and a different fix — one the user has to act on, hence
+    // its own reason string.
     match copy_to_clipboard(text) {
-        Ok(()) => tracing::info!("dictation: transcript on clipboard — press Ctrl+V to paste"),
-        Err(e) => tracing::error!("dictation: clipboard fallback failed: {e}"),
+        Ok(()) => {
+            cue(DictationCue::Error("Blocked — transcript copied, press Ctrl+V"));
+            tracing::info!("dictation: transcript on clipboard — press Ctrl+V to paste");
+        }
+        Err(e) => {
+            cue(DictationCue::Error("Could not type the transcript"));
+            tracing::error!("dictation: clipboard fallback failed: {e}");
+        }
     }
 }
 

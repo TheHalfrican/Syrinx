@@ -42,6 +42,16 @@ mod dictation_win;
 #[cfg(target_os = "macos")]
 mod dictation_mac;
 
+// What dictation tells the user (sound + overlay line) for a given transition —
+// shared by both in-app platforms so the two state machines emit the same cues.
+// Linux's `dictate/` crate has its own gtk4 pill and never compiles this.
+#[cfg(any(target_os = "windows", target_os = "macos"))]
+mod dictation_cue;
+
+// The macOS half of that: a non-activating NSPanel over every app, and NSSound.
+#[cfg(target_os = "macos")]
+mod dictation_hud_mac;
+
 use slint::{ComponentHandle, Model, ModelRc, SharedString, VecModel};
 use std::collections::HashMap;
 #[cfg(target_os = "linux")]
@@ -128,6 +138,7 @@ enum Cmd {
     StMicTestToggle,
     StPickMonitor { index: usize },
     StToggleRefine,
+    StToggleDictationSounds,
     StToggleStopEngine,
     StPickExportDir,
     StPickCap { index: usize },
@@ -184,6 +195,13 @@ struct AppConfig {
     /// on Linux, where native scaling is left completely untouched.
     #[serde(default)]
     ui_scale: f32,
+    /// The audible half of dictation's feedback (Win/mac in-app dictation only;
+    /// the Linux `dictate` binary has its own pill and reads nothing here). On
+    /// by default: a chord that starts a recording silently is the state this
+    /// setting exists to prevent, so opting *out* is the deliberate act. The
+    /// visual indicator has no toggle — it is the affordance, not a garnish.
+    #[serde(default = "default_true")]
+    dictation_sounds: bool,
     /// One-shot consent for Vevo2's whisper-medium content encoder (~1.5 GB).
     /// It lives inside Amphion's own cache rather than the Models catalog, so
     /// no Download button can ever cover it — this dialog is the only place the
@@ -204,6 +222,7 @@ impl Default for AppConfig {
             export_dir: String::new(),
             stop_engine_on_quit: true,
             ui_scale: 0.0,
+            dictation_sounds: true,
             vevo2_whisper_ack: false,
         }
     }
@@ -359,6 +378,9 @@ fn main() -> anyhow::Result<()> {
         // the ⚙ toggle reflects config from the start, not just after the tab
         // is first opened (SettingsLoad)
         ui.set_st_stop_engine(cfg.stop_engine_on_quit);
+        // Same reason: the DICTATION card shows the real state before the ⚙
+        // tab has ever been opened.
+        ui.set_st_dictation_sounds(cfg.dictation_sounds);
         // The ENGINE / stop-on-quit card is systemd-specific; hide it on Win/mac
         // where a spawned engine always dies with the app (RPC-PROTOCOL.md §13).
         ui.set_is_linux(cfg!(target_os = "linux"));
@@ -729,6 +751,10 @@ fn main() -> anyhow::Result<()> {
     {
         let tx = tx.clone();
         ui.on_st_toggle_refine(move || { let _ = tx.send(Cmd::StToggleRefine); });
+    }
+    {
+        let tx = tx.clone();
+        ui.on_st_toggle_dictation_sounds(move || { let _ = tx.send(Cmd::StToggleDictationSounds); });
     }
     {
         let tx = tx.clone();
@@ -1163,6 +1189,12 @@ fn main() -> anyhow::Result<()> {
     // is about to enter. The press handler only forwards to a worker thread.
     #[cfg(target_os = "macos")]
     dictation_mac::spawn(ui.as_weak());
+
+    // SYRINX_DICTATION_CUE_DEMO=1 walks the HUD through every cue after launch
+    // and logs the focus probe for each — the only way to exercise the overlay
+    // without a mic, an engine or the Accessibility grant. No-op unset.
+    #[cfg(target_os = "macos")]
+    dictation_hud_mac::demo_if_asked();
 
     ui.run()?;
 
@@ -5992,6 +6024,7 @@ async fn run_session(
                     let steps_idx = ST_STEP_OPTS.iter().position(|s| *s == steps)
                         .map(|i| i as i32).unwrap_or(1);
                     let refine = cfg.refine_dictation;
+                    let dict_sounds = cfg.dictation_sounds;
                     let dict_hint = dictation_hint();
                     let stop_engine = cfg.stop_engine_on_quit;
                     let export_dir = cfg.export_dir.clone();
@@ -6008,6 +6041,7 @@ async fn run_session(
                         ui.set_st_steps_names(ModelRc::from(Rc::new(VecModel::from(steps_names))));
                         ui.set_st_steps_index(steps_idx);
                         ui.set_st_refine(refine);
+                        ui.set_st_dictation_sounds(dict_sounds);
                         ui.set_st_dictation_hint(dict_hint.into());
                         ui.set_st_stop_engine(stop_engine);
                         ui.set_st_export_dir(export_dir.into());
@@ -6063,6 +6097,12 @@ async fn run_session(
                     save_config(&cfg);
                     let on = cfg.refine_dictation;
                     ui.upgrade_in_event_loop(move |ui| ui.set_st_refine(on)).ok();
+                }
+                Some(Cmd::StToggleDictationSounds) => {
+                    cfg.dictation_sounds = !cfg.dictation_sounds;
+                    save_config(&cfg);
+                    let on = cfg.dictation_sounds;
+                    ui.upgrade_in_event_loop(move |ui| ui.set_st_dictation_sounds(on)).ok();
                 }
                 Some(Cmd::StToggleStopEngine) => {
                     cfg.stop_engine_on_quit = !cfg.stop_engine_on_quit;
