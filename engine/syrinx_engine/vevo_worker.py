@@ -87,6 +87,41 @@ def _xfade_concat(parts: list, ov: int) -> "np.ndarray":
     return out
 
 
+def _device() -> str:
+    """cuda > mps > cpu — the same order as the main venv's backends.
+
+    CUDA when the venv's torch sees the 4090; Metal on Apple silicon, where
+    both Amphion pipelines take a ``device=`` and push every submodule there
+    (nothing in models/vc/vevo or models/svc/vevo2 hardcodes cuda outside its
+    own infer_*.py entrypoints, which this worker does not use). Measured on
+    an M3, 2026-08-04, warm: a 7 s Vevo-Timbre conversion at 32 flow-matching
+    steps takes 11.5 s on mps against 22.1 s on cpu, and a 30 s Vevo2 song
+    cover 56.5 s against 103.6 s — no unimplemented-operator fallbacks in
+    either graph, so PYTORCH_ENABLE_MPS_FALLBACK stays off and a future
+    missing kernel fails loudly instead of silently crawling on cpu.
+    Overridable via SYRINX_VEVO_DEVICE, which is also how a future
+    bad Metal kernel gets worked around without reinstalling the venv. The
+    AttributeError guard mirrors luxtts_worker: a torch too old to know about
+    Metal has no ``backends.mps`` to ask.
+    """
+    env = os.environ.get("SYRINX_VEVO_DEVICE", "")
+    if env:
+        return env
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        try:
+            if torch.backends.mps.is_available():
+                return "mps"
+        except AttributeError:  # torch too old to know about Metal
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+    return "cpu"
+
+
 def _free_gpu() -> None:
     import gc
 
@@ -95,6 +130,14 @@ def _free_gpu() -> None:
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+    else:
+        try:
+            if torch.backends.mps.is_available():
+                # unified memory: hands the Metal allocator's cached blocks
+                # back, which is what keeps demucs and Vevo2 from overlapping
+                torch.mps.empty_cache()
+        except AttributeError:  # torch too old to know about Metal
+            pass
 
 
 def _drop_pipeline() -> None:
@@ -116,7 +159,7 @@ def _load(kind: str):
     import torch
     from huggingface_hub import snapshot_download
 
-    device = torch.device("cuda") if torch.cuda.is_available() else torch.device("cpu")
+    device = torch.device(_device())
     print(f"vevo-worker: downloading/loading {kind} models on {device}...", file=sys.stderr, flush=True)
     if kind == "timbre":
         from models.vc.vevo.vevo_utils import VevoInferencePipeline
@@ -199,7 +242,6 @@ def _handle_music(req: dict) -> dict:
     """Song cover: demucs vocal split → Vevo2 singing conversion → remix."""
     import librosa
     import soundfile as sf
-    import torch
 
     rid = req.get("id")
     steps = int(req.get("steps", 32))
@@ -212,7 +254,11 @@ def _handle_music(req: dict) -> dict:
     _stage(rid, "separating")
     from demucs.api import Separator
 
-    sep = Separator(model="htdemucs", device="cuda" if torch.cuda.is_available() else "cpu")
+    # htdemucs runs whole on Metal — its stft/istft have MPS kernels in torch
+    # 2.13 and the stems match cpu to 1e-4 rms. Measured on an M3: 4.2 s vs
+    # 7.8 s cpu for a 30 s mix (mps loses on clips under ~10 s, where the
+    # first-call kernel build dominates).
+    sep = Separator(model="htdemucs", device=_device())
     print("vevo-worker: demucs separating...", file=sys.stderr, flush=True)
     _origin, stems = sep.separate_audio_file(req["source"])
     demucs_sr = int(sep.samplerate)

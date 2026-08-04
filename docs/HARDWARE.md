@@ -20,7 +20,10 @@ engines (Qwen-TTS, Chatterbox, TADA) and faster everything else.
 from what torch can see; the active backend is surfaced via the `Backend`
 D-Bus property. A shared `torch_device()` mapping turns the backend name into
 what torch actually addresses (`rocm` → `"cuda"`, `mps` → `"mps"`).
-Isolated-venv workers (LuxTTS) detect their own device the same way.
+Isolated-venv workers (LuxTTS, Seed-VC, Vevo) detect their own device the same
+way. Seed-VC is the odd one out: its package picks a device at import time, so
+the worker re-pins `seed_vc.api._device` / `seed_vc.inference.device` rather
+than passing one in (the package is GPL and stays unpatched).
 
 Environment overrides (all optional):
 
@@ -32,6 +35,8 @@ Environment overrides (all optional):
 | `SYRINX_WHISPER_MODEL` | faster-whisper size (default `base.en`). |
 | `SYRINX_LLM_MODEL` | Personality/refinement LLM (default Qwen3 `1.7B`). |
 | `SYRINX_LUXTTS_DEVICE` | Force the LuxTTS worker onto `cpu` / `cuda` / `mps`. |
+| `SYRINX_SEEDVC_DEVICE` | Force the Seed-VC worker (models + demucs) onto `cpu` / `cuda` / `mps`. |
+| `SYRINX_VEVO_DEVICE` | Force the Vevo worker (both pipelines + demucs) onto `cpu` / `cuda` / `mps`. |
 | `SYRINX_TTS_CHUNK_CHARS` | Long-text chunk size for cloning engines (default 800). |
 | `SYRINX_DICTATE_REFINE` | `1` = dictation pill always runs the LLM cleanup pass. |
 

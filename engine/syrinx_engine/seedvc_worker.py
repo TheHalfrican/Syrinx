@@ -20,7 +20,8 @@ Reply   : {"id": N, "stage": "separating"|"converting"|"remixing"}  (interim)
 Models load once per (f0-condition) into a reusable stream state; switching
 between the speech and singing models drops the other to bound RAM. Long
 sources are fed as ~20 s slices through seed-vc's own streaming crossfade.
-Device: seed_vc.api picks CUDA automatically when the venv's torch sees a GPU.
+Device: cuda > mps > cpu, re-pinned onto seed-vc's import-time snapshots and
+overridable with SYRINX_SEEDVC_DEVICE — see _device() / _pin_device().
 """
 
 import json
@@ -41,6 +42,83 @@ _STATE_F0 = None    # which model the state holds (f0 condition bool)
 
 # One source slice per model call; seed-vc crossfades the joins itself.
 CHUNK_SECS = float(os.environ.get("SYRINX_SEEDVC_CHUNK_SECS", "20"))
+
+
+def _device() -> str:
+    """cuda > mps > cpu — the same order as the main venv's backends.
+
+    seed-vc picks this ladder itself, but at IMPORT time and in two places
+    (``seed_vc.api._device`` and ``seed_vc.inference.device``), so the only
+    way to steer it from outside the GPL package is to restate the ladder and
+    re-pin both snapshots — see _pin_device(). Restating it also makes the
+    ladder overridable, which the package alone is not. Measured on an M3,
+    2026-08-04, warm: a 7 s clip at 25 diffusion steps takes 9.7 s on mps
+    against 23.3 s on cpu, and a 30 s song cover 76.6 s against 161.8 s.
+    Overridable via SYRINX_SEEDVC_DEVICE, which is also how a future bad Metal
+    kernel gets worked around without reinstalling the venv. The AttributeError
+    guard mirrors luxtts_worker: a torch too old to know about Metal has no
+    ``backends.mps`` to ask.
+    """
+    env = os.environ.get("SYRINX_SEEDVC_DEVICE", "")
+    if env:
+        return env
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        try:
+            if torch.backends.mps.is_available():
+                return "mps"
+        except AttributeError:  # torch too old to know about Metal
+            pass
+    except Exception:  # noqa: BLE001
+        pass
+    return "cpu"
+
+
+def _pin_device(dev: str) -> None:
+    """Re-point seed-vc's two import-time device snapshots at *dev*.
+
+    Both modules read their global at CALL time (``load_models`` builds every
+    submodule with ``.to(device)``, and _V1StreamState's methods reference
+    ``_device`` per chunk), so rebinding the attribute before the first load
+    steers the whole V1 path. Done from here rather than by patching
+    site-packages: seed-vc is GPL and stays an unmodified, process-isolated
+    dependency. Missing attributes are not an error — a future seed-vc that
+    takes a device argument would simply have nothing to pin.
+    """
+    import torch
+
+    target = torch.device(dev)
+    for mod_name in ("seed_vc.api", "seed_vc.inference"):
+        mod = sys.modules.get(mod_name)
+        if mod is None:
+            continue
+        for attr in ("_device", "device"):
+            if hasattr(mod, attr):
+                setattr(mod, attr, target)
+
+
+def _f0_float32(state) -> None:
+    """Cast the singing model's f0 track to float32 — Metal has no float64.
+
+    seed-vc's RMVPE extractor returns a float64 numpy array, and both call
+    sites then do ``torch.from_numpy(f0).to(device)``, which on MPS raises
+    outright ("Cannot convert a MPS Tensor to float64"). The f0 is quantized
+    into 512 mel bins two lines later, so float32 is lossless for the model;
+    wrapping the stream state's public ``f0_fn`` attribute fixes it without
+    patching the GPL package. Only applied on Metal — cuda and cpu take
+    float64 fine and stay bit-identical to upstream.
+    """
+    fn = getattr(state, "f0_fn", None)
+    if fn is None:  # speech model — no f0 conditioning
+        return
+
+    def _cast(*args, **kwargs):
+        return np.asarray(fn(*args, **kwargs), dtype=np.float32)
+
+    state.f0_fn = _cast
 
 
 def _audio_data(samples_i16: np.ndarray, rate: int):
@@ -71,7 +149,9 @@ def _ensure_state(f0: bool):
     from seed_vc.api import create_v1_stream_state
 
     _STATE = None  # drop the other model before loading (15 GB box)
-    print(f"seedvc-worker: loading models (f0={f0})...", file=sys.stderr, flush=True)
+    device = _device()
+    _pin_device(device)  # must precede the load: the models go .to(device) there
+    print(f"seedvc-worker: loading models (f0={f0}) on {device}...", file=sys.stderr, flush=True)
     _STATE = create_v1_stream_state(
         target=None,
         new_target_name=None,
@@ -79,6 +159,12 @@ def _ensure_state(f0: bool):
         fp16=False,   # autocast fp16 is a CUDA affair; harmless-off everywhere
         realtime=False,  # offline whisper-small model — quality over latency
     )
+    # seed-vc also loads its whisper-small content encoder at fp16 no matter
+    # the device. On Metal that is the dtype family that broke Qwen-TTS, but
+    # here it survives: the encoder's output is cast straight back to fp32 and
+    # nothing samples from fp16 probabilities. Verified finite on an M3.
+    if device.startswith("mps"):
+        _f0_float32(_STATE)
     _STATE_F0 = f0
     print("seedvc-worker: models loaded", file=sys.stderr, flush=True)
 
@@ -163,13 +249,15 @@ def _stage(rid, name: str) -> None:
 def _handle_music(req: dict) -> dict:
     """Song cover: demucs vocal split → f0-conditioned convert → remix."""
     import librosa
-    import torch
 
     rid = req.get("id")
     _stage(rid, "separating")
     from demucs.api import Separator
 
-    sep = Separator(model="htdemucs", device="cuda" if torch.cuda.is_available() else "cpu")
+    # htdemucs runs whole on Metal — its stft/istft have MPS kernels in torch
+    # 2.13 and the stems match cpu to 1e-4 rms. Measured on an M3: 4.2 s vs
+    # 7.8 s cpu for a 30 s mix.
+    sep = Separator(model="htdemucs", device=_device())
     print("seedvc-worker: demucs separating...", file=sys.stderr, flush=True)
     _origin, stems = sep.separate_audio_file(req["source"])
     demucs_sr = int(sep.samplerate)

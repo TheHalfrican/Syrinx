@@ -7,7 +7,8 @@ LuxTTS. It also pins numpy<2, which alone rules out the engine venv.
 
 Zero-shot, style-preserved, and — unlike ChatterboxVC — f0-conditioned
 singing conversion is available (the "f0" request flag; wired for the music
-mode later). CPU-usable; the worker auto-selects CUDA on the GPU box.
+mode later). CPU-usable; the worker picks cuda > mps > cpu itself
+(SYRINX_SEEDVC_DEVICE overrides).
 """
 
 import asyncio

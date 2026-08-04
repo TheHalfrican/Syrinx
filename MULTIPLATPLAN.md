@@ -1855,5 +1855,59 @@ Windows sessions; each also appears in its origin ledger entry above):
    dated Findings entry above; the live chord test belongs to the user.
 3. ~~Before either: a macOS phase-1/2 validation pass~~ RESOLVED
    2026-07-29/30 (phases 1 and 2 landed on the M3, MPS included).
-   Remaining mac work is Seed-VC / Vevo MPS verification and a
-   self-contained bundle.
+   ~~Remaining mac work is Seed-VC / Vevo MPS verification~~ RESOLVED
+   2026-08-04 (dated entry below); the self-contained bundle remains.
+
+**2026-08-04 (engine) — the VC workers land on Metal; music VC exercised
+end-to-end on mac.** Ledger correction first: the 8/3 note that "speech VC
+ran on CPU" was true only of vevo — `seed_vc/api.py` AND
+`seed_vc/inference.py` both walk cuda→mps→cpu at module import, so Seed-VC
+speech was already on Metal. What Metal actually did to Seed-VC was worse
+than slow: music mode (`f0=True`) hard-crashed every time — seed-vc's RMVPE
+extractor returns a float64 numpy f0 and both call sites do
+`torch.from_numpy(f0).to(device)`, and MPS has no float64 ("Cannot convert
+a MPS Tensor to float64"). Fixed adapter-side without touching the GPL
+package: `_f0_float32()` wraps the stream state's public `f0_fn` (mps-only;
+the f0 is quantized into 512 mel bins two lines downstream, so float32 is
+lossless). Both workers now carry the luxtts-style `_device()` ladder with
+env overrides (`SYRINX_SEEDVC_DEVICE` / `SYRINX_VEVO_DEVICE`, both proven
+live by forcing the cpu benchmark legs). vevo_worker had no rung at all:
+`_load()` was cuda-else-cpu, `_free_gpu()` only knew `torch.cuda`
+(now also `torch.mps.empty_cache()` — unified memory, keeps demucs and
+Vevo2 from overlapping), and both Amphion pipelines take `device=` cleanly
+(nothing outside their unused infer_*.py entrypoints hardcodes cuda).
+seedvc_worker steers the package by re-pinning its two import-time
+snapshots (`_pin_device()` rebinds `seed_vc.api._device` +
+`seed_vc.inference.device` before the first load — both modules read the
+global at call time; inference_realtime/inference_v2 are dead here,
+realtime=False). demucs htdemucs rides the same rung in both workers:
+torch 2.13 has MPS stft/istft kernels, stems match cpu to ~1e-4 rms
+(loses only under ~10 s inputs where kernel builds dominate — music inputs
+are songs, no heuristic). Two dtype non-events, documented in code:
+seed-vc's whisper-small loads fp16 unconditionally and SURVIVES Metal (its
+encoder output is cast straight back to fp32; nothing samples fp16
+probabilities — the actual Qwen-TTS failure mode), and
+PYTORCH_ENABLE_MPS_FALLBACK stays deliberately off (zero missing ops in
+all four graphs; a future missing kernel should fail loudly, not crawl).
+Live proof, all four paths on the M3, warm (2nd request): seedvc speech
+9.7 s mps vs 23.3 s cpu (7 s src, 25 steps); seedvc music 76.6 vs 161.8
+(30 s song, 30 steps); vevo timbre 11.5 vs 22.1 (32 steps); vevo2 music
+56.5 vs 103.6; demucs alone 4.2 vs 7.8 (30 s mix). Every mps output is
+finite, rms-sane, and faster-whisper round-trips the source text VERBATIM
+— and music VC (both engines) is now exercised end-to-end on mac, which
+the 8/3 testing pass never reached. Pulled ~2.9 GB of first-run weights
+(whisper-medium for Vevo2's Coco tokenizer, hubert for Vevo-Timbre, RMVPE,
+htdemucs); Vevo2 FM + amphion/Vevo snapshots were already cached. Tests:
+new `engine/tests/test_vc_worker_device.py` (18, venv-independent
+fake-torch subprocess pattern; ladders, override, `_pin_device` rebinding
++ not-yet-imported no-op, f0 cast), stub torch gains `device`; suite 652
+@ 95.65%. Residuals: (1) tada.py's dtype block stays cuda-gated — the
+main venv has no hume-tada installed and live proof costs ~14.6 GB of
+weights (tada-1b 3.9 + tada-codec 10.7, the codec's allow_patterns pull
+all ten aligners); a bf16-on-Metal op sweep (matmul, softmax, layer_norm,
+SDPA, multinomial, conv1d/T, …) came back all-finite, so the extension
+looks safe when someone pays the download. (2) `_f0_float32` rides
+`_V1StreamState.f0_fn` staying a public attribute — a seed-vc upgrade that
+inlines it returns music mode to a LOUD hard error on Metal, not silent
+corruption. (3) Vevo2 remixes peak 0.99 into the normalizer on cpu and
+mps alike — pre-existing, not a device artifact.
