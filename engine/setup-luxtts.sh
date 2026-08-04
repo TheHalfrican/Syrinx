@@ -14,13 +14,17 @@
 #
 # The app can run this script itself (Models tab → Install). Two seams make that
 # possible without changing anything for a human running it by hand:
-#   * SYRINX_VC_VENV_DIR relocates the venv. UNSET is the historical behavior —
-#     the :+ expansion below collapses to the bare literal, so every path and
-#     command below is byte-identical to what Linux has always run.
+#   * SYRINX_VC_VENV_DIR relocates the venv, and the working directory with it.
+#     UNSET is the historical behavior — the :+ and :- expansions below both
+#     collapse to what was there before, so every path and command is
+#     byte-identical to what a human running this by hand has always got.
+#     SET means the venv AND anything pip or git scribbles relative to cwd land
+#     under it: on macOS this script ships inside a code-signed Syrinx.app, and
+#     a single stray file under Contents/ breaks the bundle's resource seal.
 #   * the syrinx-stage lines are machine-readable phase markers the engine maps
 #     to human labels; the prose "==" banners stay exactly as they were.
 set -euo pipefail
-cd "$(dirname "$0")"
+cd "${SYRINX_VC_VENV_DIR:-$(dirname "$0")}"
 
 VENV="${SYRINX_VC_VENV_DIR:+$SYRINX_VC_VENV_DIR/}.venv-luxtts"
 

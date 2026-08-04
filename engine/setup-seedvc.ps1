@@ -33,7 +33,6 @@
 
 $ErrorActionPreference = 'Stop'
 $PSNativeCommandUseErrorActionPreference = $true
-Set-Location -LiteralPath $PSScriptRoot
 
 function Invoke-Checked {
     # Run a native command and abort if it exits non-zero (set -e equivalent).
@@ -63,6 +62,14 @@ function Install-Pkgs {
 # beside this script, which is what a developer running it by hand has always got.
 $VenvRoot = if ($env:SYRINX_VC_VENV_DIR) { $env:SYRINX_VC_VENV_DIR } else { $PSScriptRoot }
 $Venv = Join-Path $VenvRoot '.venv-seedvc'
+
+# …and work from there, not from the script's own directory. pip and git write
+# scratch files relative to cwd when a build falls back to a legacy path, and
+# the script's directory is inside the installed tree (and, on the macOS twin,
+# inside a code-signed .app whose resource seal a stray file breaks). Unset
+# SYRINX_VC_VENV_DIR still lands on $PSScriptRoot — the historical behavior.
+New-Item -ItemType Directory -Force -Path $VenvRoot | Out-Null
+Set-Location -LiteralPath $VenvRoot
 
 # Create the venv. SYRINX_SEEDVC_PYTHON overrides the interpreter (a full path
 # to python.exe); otherwise the Windows `py` launcher selects 3.12.

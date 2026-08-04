@@ -2150,3 +2150,93 @@ tab say the build shipped without them. Vevo/Seed-VC/LuxTTS therefore
 unavailable in the packaged app UNTIL PHASE 3 relocates the venvs to
 the data dir (Windows venv_root() precedent). Tests 128 + clippy
 clean, no Rust touched; engine/.venv untouched (Jul-29 mtimes).
+
+**2026-08-04 (packaging) — the on-demand VC engines come to the sealed
+bundle: worker venvs move to the data dir, and the setup scripts
+finally ship.** Packaging campaign phase 3, the phase-2 promissory
+note discharged. Phase 2 left setup-{seedvc,vevo,luxtts}.sh out of
+Syrinx.app because POSIX vcsetup put the worker venv BESIDE the setup
+script — inside the code signature — and a file added under Contents/
+does not merely fail `codesign --verify`, it eventually costs the
+bundle its TCC grants (mic, the CATap aggregate, Accessibility all key
+off the designated requirement). The fix is the Windows precedent
+generalised: `venv_root()` = `data_dir()/<subdir>` on EVERY platform,
+`SYRINX_VC_VENV_DIR` exported unconditionally (was win32-only), and
+`venv_candidates()` collapsed to one two-entry list for both OSes —
+data dir first, legacy `engine/.venv-<x>` second. All-POSIX rather
+than mac-only on purpose: Linux could have kept the old location (it
+installs from a checkout nobody signs), but a per-OS split would leave
+the beside-the-script layout alive in exactly one place forever, and
+it costs Linux nothing — the legacy candidate still answers, and a
+hand-run `bash engine/setup-vevo.sh` with the variable unset still
+builds there (both proven on this box: all three checkout venvs still
+resolve). The second candidate introduced a hazard worth naming: a
+reinstall torn open in its torch stage leaves a real interpreter at
+the PREFERRED location with none of the packages behind it, which on
+position alone would shadow a working legacy venv and take voice
+conversion away from someone who had it — the "installed but not
+usable" window `installed()` exists to close, re-opened at the other
+end. `venv_python()` now prefers whichever surviving candidate carries
+the setup's landmark package, order deciding only when there is
+nothing to choose between. THE STALE-SYMLINK QUESTION, answered by
+measurement: `python -m venv` on POSIX SYMLINKS bin/python at the
+interpreter that built it, so an app-driven install writes
+`bin/python3.12 -> /Applications/Syrinx.app/…/python3.12` and
+`pyvenv.cfg home =` the same — a bundle update in place is fine (same
+path, same 3.12.13), a bundle MOVE is not. Live-tested by moving
+Syrinx.app aside: `Path.exists()` follows symlinks, the dangling
+candidate is simply skipped, and the row falls back (checkout) or
+reads "not installed" and offers Install (packaged). No crash, no
+ENOENT out of posix_spawn — the failure mode is a button.
+`resolve_python()` gained a rung 0 above the PATH probe:
+`_bundled_python()`, our own `sys._base_executable` when it contains
+`.app/Contents/` — empty on Linux and in a checkout, so the historical
+ladder is untouched there. Motivation is hermeticity, not correctness
+(a worker venv shares nothing with ours but a C ABI): without it the
+answer depends on how the app was STARTED — LaunchServices' four-entry
+PATH has no python3.12, a Terminal launch inherits the user's and can
+land on a brew/uv 3.12 that a later `brew uninstall` deletes out from
+under a venv symlinked into it. Git is now pre-flighted on POSIX too
+(`ensure_git` was win32-only): vevo clones Amphion and luxtts installs
+two git+https SHAs, so a box without git fails either way — the
+difference is hearing it in two seconds instead of twenty minutes into
+a torch download. macOS is told `xcode-select --install`, never
+git-scm.com: /usr/bin/git is already there as a CLT stub, and
+deliberately NOT vendored (two gits on a box is a support problem).
+AUDIT FINDING, caught before it fired: pinning the venv was necessary
+and not sufficient — `_run` spawned the child with `cwd=script.parent`
+and each script `cd`s to its own dirname, so once the scripts shipped,
+every pip and git in a multi-GB install would have had its working
+directory INSIDE the seal (a legacy sdist build/, an egg-info, a git
+lock is all it takes). Both moved to the venv root; the .ps1 twins
+mirror it (Set-Location relocated below $VenvRoot). Also hardened: the
+generated bin/syrinx-engine shim now sets PYTHONDONTWRITEBYTECODE /
+NUMBA_CACHE_DIR / PYTHONNOUSERSITE itself instead of inheriting them
+from the launcher — redundant under the app, but it made the seal's
+protection POSITIONAL, and the shim is a documented entry point
+(§13.2 probe #1) that a Terminal run or a LaunchAgent reaches directly;
+and backends/luxtts.py pins its worker's cwd to data_dir()/luxtts, the
+way seed_vc.py always has (inheriting was safe only because Finder
+starts an app at "/"). build-macos.sh ships the three .sh into
+Contents/Resources/engine — exactly five ancestor levels above the
+embedded package, which is precisely `script_path()`'s whole budget,
+so the build now PROVES it with the bundle's own interpreter and its
+own vcsetup rather than trusting the arithmetic. LIVE PROOF, packaged
+app at /Applications, driven over its own RPC (second client alongside
+the UI): InstallVcEngine("luxtts") → six stage notifications → done in
+64 s; venv at ~/Library/Application Support/syrinx/luxtts/.venv-luxtts
+(1.4 GB) built by the BUNDLE's CPython 3.12.13; ListModels row flipped
+needs_setup true→false; SetActiveModel(luxtts) + Speak on a cloned
+profile → 5.099 s of 48 kHz audio, zero error events, clip persisted
+to history — the worker log names the data-dir venv's site-packages,
+so the thing that ran is the thing that was installed. And the point
+of the phase: `codesign --verify --strict --deep` CLEAN before, during
+and after, with a find-diff against dist/Syrinx.app showing an
+IDENTICAL 51,994-entry file set — the install and the synthesis added
+nothing to the bundle. Tests 662 -> 671 (+9 in test_vcsetup: the POSIX
+two-candidate order, the bundle script_path layout, the bundled-python
+promotion, the torn-vs-legacy landmark tiebreak, the dangling symlink,
+the child's cwd), coverage 95.76% vs the 94 gate; the two
+test_contract RPC flakes under --cov are pre-existing (verified on a
+stashed tree). No Rust touched. GPL rule held: nothing under
+.venv-seedvc was opened.

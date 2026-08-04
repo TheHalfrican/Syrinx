@@ -37,6 +37,21 @@ def setup_log(monkeypatch, tmp_path):
     return logs
 
 
+@pytest.fixture(autouse=True)
+def data_dir_is_tmp(monkeypatch, tmp_path):
+    """Keep ``venv_root()`` inside tmp_path too.
+
+    Since the phase-3 move the venv root is under the data dir on EVERY
+    platform, and ``_run`` creates it before spawning the child — so without
+    this every streaming test below would leave a real
+    ``~/Library/Application Support/syrinx/<id>`` behind on the developer's
+    machine. conftest's ``isolated_env`` does this and more, but it is opt-in
+    and most of the tests here have no reason to take it; the path it picks is
+    the same one, so the two compose rather than fight.
+    """
+    monkeypatch.setenv("SYRINX_DATA_DIR", str(tmp_path / "data"))
+
+
 def log_for(setup_log, setup_id):
     return setup_log / f"syrinx-setup-{setup_id}.log"
 
@@ -112,6 +127,23 @@ def test_script_path_finds_the_installed_windows_layout(monkeypatch, tmp_path, w
     assert vcsetup.script_path("vevo") == engine / "setup-vevo.ps1"
 
 
+def test_script_path_finds_the_macos_bundle_layout(monkeypatch, tmp_path, mac):
+    """Five levels — the deepest layout we ship, and exactly the walk's budget.
+
+    scripts/build-macos.sh drops the setup scripts at
+    Syrinx.app/Contents/Resources/engine/, and the package sits under that
+    engine's own embedded interpreter. If a future layout buries it deeper this
+    is the test that says so, rather than a Models tab claiming the build
+    shipped without the scripts it is standing on."""
+    engine = tmp_path / "Syrinx.app" / "Contents" / "Resources" / "engine"
+    pkg = engine / ".venv" / "lib" / "python3.12" / "site-packages" / "syrinx_engine"
+    pkg.mkdir(parents=True)
+    (engine / "setup-luxtts.sh").write_text("x")
+    monkeypatch.setattr(vcsetup, "_PKG_DIR", pkg)
+    assert len(pkg.relative_to(engine).parts) == 5
+    assert vcsetup.script_path("luxtts") == engine / "setup-luxtts.sh"
+
+
 def test_setup_dir_override_wins_and_is_not_a_fallback(monkeypatch, tmp_path, posix):
     """The escape hatch is authoritative: pointing it somewhere empty must NOT
     quietly fall back to the ancestor walk, or a typo would be undebuggable."""
@@ -178,10 +210,20 @@ def make_venv(root, name, landmark=True):
     return exe
 
 
-def test_posix_has_exactly_the_historical_candidate(monkeypatch, tmp_path, posix):
+def test_posix_prefers_the_data_dir_and_keeps_the_legacy_location(
+        monkeypatch, tmp_path, posix, isolated_env):
+    """Phase 3 of the macOS packaging campaign moved the POSIX venv under the
+    data dir, for the same shape of reason Windows moved: beside the script is
+    inside a code-signed .app, and a file created there breaks its seal.
+
+    The legacy candidate is not decoration — every dev checkout on the planet
+    has an engine/.venv-seedvc built at the old location, and dropping it would
+    turn a working install into a 4 GB reinstall."""
     monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
     assert vcsetup.venv_candidates("seedvc") == [
-        tmp_path / ".venv-seedvc" / "bin" / "python"]
+        isolated_env / "seedvc" / ".venv-seedvc" / "bin" / "python",
+        tmp_path / ".venv-seedvc" / "bin" / "python",
+    ]
 
 
 def test_windows_prefers_the_short_data_dir_path(monkeypatch, tmp_path, windows,
@@ -194,6 +236,51 @@ def test_windows_prefers_the_short_data_dir_path(monkeypatch, tmp_path, windows,
         isolated_env / "vevo" / ".venv-vevo" / "Scripts" / "python.exe",
         tmp_path / ".venv-vevo" / "Scripts" / "python.exe",
     ]
+
+
+def test_posix_falls_back_to_the_legacy_beside_the_script_venv(
+        monkeypatch, tmp_path, posix, isolated_env):
+    """The dev checkout's engine/.venv-seedvc keeps answering after the move."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    exe = make_venv(tmp_path, ".venv-seedvc")
+    assert vcsetup.venv_python("seedvc") == exe
+    assert vcsetup.installed("seedvc") is True
+
+
+def test_a_venv_symlinked_into_a_bundle_that_moved_reads_as_not_installed(
+        monkeypatch, tmp_path, posix, isolated_env):
+    """`python -m venv` symlinks bin/python at the interpreter that made it,
+    which for an app-driven install is a path inside Syrinx.app. Move or delete
+    the bundle and the symlink dangles; exists() follows symlinks, so the row
+    goes back to offering Install instead of handing a worker a path that
+    posix_spawn will reject with a bare ENOENT."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path / "engine")
+    exe = isolated_env / "luxtts" / ".venv-luxtts" / "bin" / "python"
+    exe.parent.mkdir(parents=True)
+    gone = tmp_path / "Syrinx.app" / "Contents" / "Resources" / "python3.12"
+    exe.symlink_to(gone)
+    assert exe.is_symlink() and not exe.exists()
+    assert vcsetup.venv_python("luxtts") is None
+    assert vcsetup.installed("luxtts") is False
+
+
+def test_a_torn_data_dir_venv_does_not_shadow_a_working_legacy_one(
+        monkeypatch, tmp_path, posix, isolated_env):
+    """The hazard the second candidate introduced, closed by the landmark.
+
+    A reinstall that dies in the torch stage leaves a real interpreter at the
+    preferred location with none of the packages behind it. Taking it on
+    position alone would break voice conversion for someone whose legacy venv
+    was fine — the "installed but not usable" window, re-opened at the other
+    end."""
+    monkeypatch.setattr(vcsetup, "engine_dir", lambda: tmp_path)
+    torn = make_venv(isolated_env / "seedvc", ".venv-seedvc", landmark=False)
+    good = make_venv(tmp_path, ".venv-seedvc")
+    assert vcsetup.venv_python("seedvc") == good
+    assert vcsetup.installed("seedvc") is True
+    # …and once the retried install finishes, the preferred location takes over
+    make_venv(isolated_env / "seedvc", ".venv-seedvc")
+    assert vcsetup.venv_python("seedvc") == torn
 
 
 def test_venv_python_wants_the_interpreter_not_the_directory(monkeypatch, tmp_path, posix):
@@ -413,6 +500,38 @@ def posix_probes(monkeypatch):
     return knobs
 
 
+def test_the_bundled_interpreter_outranks_everything(monkeypatch, mac, posix_probes):
+    """Inside a packaged Syrinx.app the app's own CPython wins outright.
+
+    Any 3.12 would work — a worker venv shares nothing with ours but a C ABI —
+    so this is about hermeticity, not correctness. Without it the answer
+    depends on how the app was started: LaunchServices hands a Finder launch a
+    four-entry PATH with no python3.12 on it, while a shell launch inherits the
+    user's and can land on a brew or uv 3.12 that a `brew uninstall` later
+    deletes out from under a venv symlinked into it."""
+    bundled = "/Applications/Syrinx.app/Contents/Resources/engine/.venv/bin/python3.12"
+    posix_probes.update(which="/opt/brew/bin/python3.12", base=bundled,
+                        uv="/never/reached")
+    probed = []
+
+    def probe(argv):
+        probed.append(argv)
+        return argv[0]
+
+    monkeypatch.setattr(vcsetup, "_probe_python", probe)
+    assert vcsetup.resolve_python("luxtts") == bundled
+    assert probed == [[bundled]]  # PATH was never even asked
+
+
+def test_a_checkout_interpreter_is_not_mistaken_for_a_bundled_one(posix_probes):
+    """The promotion is keyed on ``.app/Contents/`` and nothing else, so a dev
+    checkout and every Linux box keep the historical PATH-first ladder."""
+    posix_probes["base"] = "/Users/dev/src/Syrinx/engine/.venv/bin/python3.12"
+    assert vcsetup._bundled_python() == ""
+    posix_probes["base"] = "/Applications/Syrinx.app/Contents/Resources/x/python3.12"
+    assert vcsetup._bundled_python() == posix_probes["base"]
+
+
 def test_posix_prefers_python312_on_path(monkeypatch, posix, posix_probes):
     """Linux's historical answer stays Linux's answer: the interpreter the
     scripts' bare `python3.12` would have found is probed FIRST, so setting
@@ -555,7 +674,7 @@ def test_git_already_present_adds_nothing_to_path(monkeypatch):
     assert vcsetup.ensure_git() == ""
 
 
-def test_missing_git_without_winget_names_git_scm(monkeypatch):
+def test_missing_git_without_winget_names_git_scm(monkeypatch, windows):
     monkeypatch.setattr(vcsetup, "_git_works", lambda exe: False)
     monkeypatch.setattr(vcsetup, "_winget", lambda: "")
     with pytest.raises(vcsetup.VcSetupError) as ei:
@@ -563,7 +682,26 @@ def test_missing_git_without_winget_names_git_scm(monkeypatch):
     assert "git-scm.com" in str(ei.value)
 
 
-def test_winget_installs_git_and_returns_the_dir_to_prepend(monkeypatch, tmp_path):
+@pytest.mark.parametrize("fixture, wanted", [("mac", "xcode-select --install"),
+                                             ("posix", "distribution's git")])
+def test_missing_git_on_posix_is_a_pre_flight_failure(monkeypatch, request,
+                                                      fixture, wanted):
+    """POSIX installs no git — it refuses BEFORE the first download.
+
+    vevo clones Amphion and luxtts pip-installs two git+https SHAs, so a box
+    without git fails either way; the difference is whether the user hears it
+    in two seconds or twenty minutes into a torch download. macOS is told to
+    run xcode-select rather than sent to git-scm.com, because /usr/bin/git is
+    already there as a stub that installs the real thing."""
+    request.getfixturevalue(fixture)
+    monkeypatch.setattr(vcsetup, "_git_works", lambda exe: False)
+    with pytest.raises(vcsetup.VcSetupError) as ei:
+        vcsetup.ensure_git()
+    assert wanted in str(ei.value)
+
+
+def test_winget_installs_git_and_returns_the_dir_to_prepend(monkeypatch, tmp_path,
+                                                            windows):
     """A fresh Git install updates the MACHINE PATH, which our already-captured
     environment block will never see — hence the explicit prepend."""
     monkeypatch.setenv("ProgramFiles", str(tmp_path))
@@ -898,8 +1036,23 @@ def test_the_child_environment_carries_the_quiet_flags(monkeypatch, tmp_path, se
     # the clone location is passed explicitly so the script and vevo_worker.py
     # cannot disagree (setup-vevo.sh derives its default from $HOME)
     assert seen["SYRINX_VEVO_AMPHION"] == str(vcsetup.amphion_dir())
-    # POSIX must NOT relocate the venv — that is the Linux byte-identity promise
-    assert seen["SYRINX_VC_VENV_DIR"] is None
+
+
+def test_the_child_works_from_the_venv_root_not_the_script_dir(
+        monkeypatch, tmp_path, setup_log):
+    """The script's own directory is inside the signed .app on macOS.
+
+    A setup child is nothing but pip and git, and both write scratch files
+    relative to cwd when a build falls back to a legacy path. One of those
+    under Contents/ breaks the bundle's resource seal exactly as surely as the
+    venv would have — so the cwd moves with the venv."""
+    ok, _events = run_install(
+        monkeypatch, tmp_path,
+        "import os, sys; sys.stdout.write(os.getcwd() + '\\n')\n",
+        setup_id="luxtts")
+    assert ok is True
+    seen = log_for(setup_log, "luxtts").read_text(encoding="utf-8").strip()
+    assert os.path.realpath(seen) == os.path.realpath(vcsetup.venv_root("luxtts"))
 
 
 PY_ENV_SCRIPT = (
@@ -936,8 +1089,12 @@ def test_the_child_is_told_which_python_to_build_its_venv_from(
 
     seen = json.loads(log_for(setup_log, "luxtts").read_text(encoding="utf-8").strip())
     assert seen["SYRINX_LUXTTS_PYTHON"] == "/resolved/python3.12"
-    # …while the venv relocation stays the Windows-only half of the block
-    assert (seen["SYRINX_VC_VENV_DIR"] is not None) is is_win
+    # …and so is the venv relocation, since phase 3. It was the Windows half of
+    # this block until macOS needed the same move for the seal rather than for
+    # MAX_PATH; one placement rule now, on a directory that already exists when
+    # the child starts (the script only makes the last component).
+    assert seen["SYRINX_VC_VENV_DIR"] == str(vcsetup.venv_root("luxtts"))
+    assert vcsetup.venv_root("luxtts").is_dir()
 
 
 def test_an_unresolvable_python_fails_the_install_with_its_own_sentence(

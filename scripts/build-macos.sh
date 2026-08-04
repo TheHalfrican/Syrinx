@@ -30,6 +30,7 @@
 #   Contents/Resources/syrinx.icns
 #   Contents/Resources/engine/.venv/         embedded CPython 3.12 + all deps
 #   Contents/Resources/engine/tools/         vendored sox + its dylib closure
+#   Contents/Resources/engine/setup-*.sh     the on-demand VC engine installers
 #
 # `.venv` is a lie of convenience, exactly as on Windows: it is a whole Python
 # *prefix* (python-build-standalone), not a virtualenv. The name keeps the
@@ -518,8 +519,8 @@ ok "package set matches"
 # Everything pip put in bin/ carries an absolute `#!` pointing at the staging
 # path — dead on the target and, worse, a build-machine path baked into a
 # shipped artifact. None of those scripts is ever invoked: the engine calls no
-# console entry points, and vcsetup.py drives setup scripts (not shipped, see
-# below) through an explicit interpreter path. So bin/ is reduced to the
+# console entry points, and vcsetup.py drives the setup scripts of step 8
+# through an explicit interpreter path, never a name. So bin/ is reduced to the
 # interpreter, its aliases, and our shim, which kills the whole class of stale
 # shebangs rather than rewriting each one into a polyglot.
 #
@@ -543,6 +544,21 @@ cat > "$PYPREFIX/bin/syrinx-engine" <<SHIM_EOF
 # \`-m syrinx_engine\` runs engine/syrinx_engine/__main__.py:main — byte-identical
 # to what [project.scripts] syrinx-engine points at. The app spawns this with no
 # arguments (docs/RPC-PROTOCOL.md §13.2); "\$@" is here for hand-running it.
+#
+# The three seal guards are repeated from Contents/MacOS/Syrinx deliberately.
+# The launcher exports them and this shim inherits them, so under the app they
+# are redundant — but that makes the bundle's protection POSITIONAL, and this
+# file is a documented, executable entry point (§13.2 probe #1 names it). Set
+# them here too and anything that reaches the engine without descending from
+# the launcher — a Terminal debug run, a LaunchAgent, a future helper — still
+# cannot write a .pyc into site-packages or a numba cache beside librosa's .py,
+# both of which are inside the signature. They are idempotent; see the launcher
+# for what each one is actually defending against.
+PYTHONDONTWRITEBYTECODE=1
+NUMBA_CACHE_DIR="\${NUMBA_CACHE_DIR:-\$HOME/Library/Caches/syrinx/numba}"
+PYTHONNOUSERSITE=1
+export PYTHONDONTWRITEBYTECODE NUMBA_CACHE_DIR PYTHONNOUSERSITE
+
 exec "\$(dirname -- "\$0")/python$PYVER" -m syrinx_engine "\$@"
 SHIM_EOF
 chmod 755 "$PYPREFIX/bin/syrinx-engine"
@@ -618,7 +634,77 @@ log "Precompiling bytecode"
 ok "compileall rewrote every .pyc against /Applications/$APP_NAME.app"
 
 # --------------------------------------------------------------------------
-# 8. vendor sox
+# 8. the on-demand VC engine installers
+#
+# Seed-VC (GPL-3.0), Vevo's Amphion checkpoints (CC-BY-NC) and LuxTTS (git-only)
+# are never bundled — they are installed per-user, on request, by these three
+# scripts, which the Models tab runs for the user through vcsetup.py. Phase 2
+# deliberately left them out: on POSIX the venv went BESIDE the script, and
+# beside a script that lives at Contents/Resources/engine is *inside the
+# signature*. Phase 3 moved the venv (and the child's cwd) to the data dir on
+# every platform, so shipping them is now the honest thing to do — without them
+# script_path() returns None and three engines are permanently unavailable in
+# the packaged app.
+#
+# Contents/Resources/engine is exactly five levels above the package
+# (.venv/lib/python3.12/site-packages/syrinx_engine), which is exactly what
+# script_path()'s ancestor walk reaches; engine/tests/test_vcsetup.py pins that
+# layout so a future move fails there rather than in the field.
+#
+# What the scripts shell out to, and what a bare Mac has:
+#   bash    /bin/bash — ships with macOS. (3.2, and these scripts are 3.2-clean.)
+#   python  never by name: vcsetup resolves an interpreter and passes the full
+#           path in SYRINX_<X>_PYTHON. In the bundle that is the app's own
+#           embedded CPython 3.12, so a Mac with no Python at all still works.
+#   git     needed by setup-vevo (clones Amphion) and setup-luxtts (two
+#           git+https pins). /usr/bin/git is a Command Line Tools stub on a
+#           bare Mac; vcsetup.ensure_git() pre-flights it and fails the install
+#           in two seconds with "run xcode-select --install" rather than
+#           twenty minutes into a torch download. Deliberately NOT vendored:
+#           git is ~50 MB with its own template/exec closure, Apple ships a
+#           real one for free, and two gits on a box is a support problem.
+#   nvidia-smi  probed with `command -v`, absent on every Mac, so the scripts
+#           take their CPU/MPS branch. No macOS-specific edit was needed.
+#   network  yes — several GB of wheels. These installs are online by
+#           definition; the bundle's own first launch is not.
+#
+# Copied with install -m 755 rather than rsync'd: three named files, mode set
+# explicitly (a .sh sourced by `bash <path>` does not need +x, but a user who
+# finds them in the bundle and runs one directly should not have to know that).
+
+log "Shipping the on-demand setup scripts"
+for stem in seedvc vevo luxtts; do
+    src="$ROOT/engine/setup-$stem.sh"
+    [[ -f "$src" ]] || die "engine/setup-$stem.sh is missing — the packaged app
+     would report that this build shipped without the setup scripts, and
+     Seed-VC / Vevo / LuxTTS would be permanently unavailable in it."
+    install -m 755 "$src" "$ENGINE/setup-$stem.sh"
+done
+ok "$ENGINE_REL/setup-{seedvc,vevo,luxtts}.sh"
+
+# Prove the ancestor walk actually reaches them from where the package landed,
+# using the bundle's own interpreter and its own copy of vcsetup — the same
+# code path the Models tab will take. A build that shipped the scripts into a
+# directory script_path() cannot see would look fine and be useless.
+"$PYBIN" - "$ENGINE" <<'PY' || die "the shipped setup scripts are not where script_path() looks"
+import sys
+from pathlib import Path
+
+from syrinx_engine import vcsetup
+
+engine = Path(sys.argv[1]).resolve()
+for sid in vcsetup.SETUP_IDS:
+    found = vcsetup.script_path(sid)
+    if found is None:
+        sys.exit(f"  script_path({sid!r}) is None — the walk does not reach {engine}")
+    if found.parent != engine:
+        sys.exit(f"  script_path({sid!r}) found {found}, expected it under {engine}")
+print(f"  script_path() resolves all {len(vcsetup.SETUP_IDS)} setups inside the bundle")
+PY
+ok "script_path() sees them from the embedded package"
+
+# --------------------------------------------------------------------------
+# 9. vendor sox
 #
 # The qwen backend imports the `sox` Python package, which shells out to the
 # `sox` BINARY at import time. The dev launcher solves that by putting
@@ -645,7 +731,7 @@ ok "compileall rewrote every .pyc against /Applications/$APP_NAME.app"
 # arm64 refuses to execute or dlopen a Mach-O whose signature does not match its
 # contents, and the failure mode is SIGKILL from the kernel with no message. So
 # the fourteen rewritten files get an immediate ad-hoc repair signature below,
-# purely so they are loadable for the env -i proof that follows; step 13
+# purely so they are loadable for the env -i proof that follows; step 14
 # replaces it with the real one.
 
 log "Vendoring sox"
@@ -744,7 +830,7 @@ env -i "$TOOLS/bin/sox" --version >/dev/null 2>&1 \
 ok "sox runs under env -i"
 
 # --------------------------------------------------------------------------
-# 9. icon — packaging/syrinx.svg -> Resources/syrinx.icns, best effort
+# 10. icon — packaging/syrinx.svg -> Resources/syrinx.icns, best effort
 #    (identical ladder to scripts/install-macos-dev.sh: rsvg-convert, qlmanage, sips)
 
 ICON_OK=0
@@ -797,7 +883,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 10. the launcher
+# 11. the launcher
 #
 # Unlike the dev bundle's, nothing here is substituted at build time: every path
 # is derived from $0 when it runs. That is the difference between "a bundle that
@@ -861,7 +947,7 @@ chmod 755 "$MACOS/$LAUNCHER"
 ok "Contents/MacOS/$LAUNCHER"
 
 # --------------------------------------------------------------------------
-# 11. Info.plist
+# 12. Info.plist
 #
 # The usage strings and the bundle ID match scripts/install-macos-dev.sh exactly.
 # The ID especially: same ID + same certificate = same designated requirement =
@@ -910,7 +996,7 @@ plutil -lint "$CONTENTS/Info.plist" >/dev/null || die "generated Info.plist is m
 ok "Contents/Info.plist"
 
 # --------------------------------------------------------------------------
-# 12. move into place
+# 13. move into place
 #
 # Same volume, so this is a rename. Every write to the bundle is now finished —
 # which is the precondition for signing: codesign seals what is on disk, and
@@ -927,7 +1013,7 @@ APP_SIZE="$(human "$APP")"
 ok "dist/$APP_NAME.app  ($APP_SIZE)"
 
 # --------------------------------------------------------------------------
-# 13. sign, inside out
+# 14. sign, inside out
 #
 # Order is structural, not stylistic. The bundle's signature seals a record of
 # every nested binary's cdhash, so each of them has to be final first; and
@@ -1085,7 +1171,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 14. self-containment proof
+# 15. self-containment proof
 #
 # `env -i` with nothing but HOME and the system PATH: no SYRINX_* variables, no
 # PATH entry that could reach Homebrew or the checkout, no PYTHONPATH. The
@@ -1127,7 +1213,7 @@ else
 fi
 
 # --------------------------------------------------------------------------
-# 15. DMG
+# 16. DMG
 #
 # A plain drag-to-Applications volume: the app and a symlink, compressed (UDZO).
 # Not a fancy background-image layout — that needs an AppleScript pass through
@@ -1182,15 +1268,14 @@ the certificate are the dev bundle's too, which means the microphone,
 system-audio and Accessibility grants carry over as well: same designated
 requirement, no re-prompt, no tccutil reset.
 
-${YELLOW}Not shipped, on purpose:${RESET} engine/setup-{seedvc,vevo,luxtts}.sh. Seed-VC is
-GPL-3.0 and the Amphion clone is a git checkout; on Linux and Windows alike they
-install on demand into their own venvs, and on POSIX vcsetup.py puts that venv
-*beside the setup script* — which inside a signed bundle would mean writing into
-the bundle and breaking its seal. Leaving the scripts out makes vcsetup's
-script_path() return None and the Models tab say this build shipped without
-them, which is the honest answer until those venvs are relocated to the data
-dir (Phase 3). Voice conversion through Vevo/Seed-VC is therefore unavailable in
-the packaged app; everything else — TTS, STT, dictation, effects, capture — is not.
+${YELLOW}Installed on demand, not bundled:${RESET} Seed-VC (GPL-3.0), Vevo's Amphion
+checkpoints (CC-BY-NC) and LuxTTS (git-only). Their three setup scripts DO ship
+now, at Contents/$ENGINE_REL/, and the Models tab runs them for the user; the
+venv each one builds lands under ~/Library/Application Support/syrinx/<id>/,
+never inside the bundle, so a completed install leaves the code signature as
+clean as it was. Those installs want the network and, for Vevo and LuxTTS, a
+working git — a bare Mac is told to run \`xcode-select --install\` before the
+first byte is downloaded rather than after several GB of it.
 
 Gatekeeper will refuse this bundle on any Mac that did not mint the signing
 certificate. That is what Developer ID is for; set SYRINX_SIGN_IDENTITY and

@@ -780,9 +780,11 @@ without the client knowing anything about engine paths.
 
 **Script selection is per-OS.** The engine locates
 `setup-<stem>.sh` (POSIX) or `setup-<stem>.ps1` (win32) by walking up from its
-own package directory — which covers both a checkout (`engine/`) and an
-installed bundle (`engine\.venv\Lib\site-packages\…` → `engine\`, so the Windows
-bundle ships the `.ps1` files). POSIX spawns `bash <script>`; win32 spawns
+own package directory — which covers a checkout (`engine/`, one level), an
+installed Windows tree (`engine\.venv\Lib\site-packages\…` → `engine\`, four,
+so the Windows bundle ships the `.ps1` files) and the macOS app bundle
+(`Syrinx.app/Contents/Resources/engine/.venv/lib/python3.12/site-packages/…`,
+five — the whole budget). POSIX spawns `bash <script>`; win32 spawns
 `pwsh` when it is present and falls back to `powershell.exe` (5.1) otherwise,
 always `-NoProfile -ExecutionPolicy Bypass -File`. If no script is found the
 method still returns `true` and the failure arrives as a clean `"error"` —
@@ -793,9 +795,29 @@ byte):
 
 | Var | Meaning |
 |---|---|
-| `SYRINX_VC_VENV_DIR` | Parent directory for the `.venv-<stem>` the script creates. Unset ⇒ the script's own directory, which is what Linux and macOS use. The engine sets it on **win32 only**, to a short per-user data-dir path, because a venv nested under an installed `site-packages` tree overflows `MAX_PATH` while pip writes deep dependency paths. |
+| `SYRINX_VC_VENV_DIR` | Parent directory for the `.venv-<stem>` the script creates, **and** the working directory the script runs from. Unset ⇒ the script's own directory, which is what a human running one by hand still gets. The engine sets it on **every platform**, to a per-setup slice of the data dir (`<data>/{seedvc,vevo,luxtts}`): on win32 because a venv nested under an installed `site-packages` tree overflows `MAX_PATH` while pip writes deep dependency paths, and on macOS because the setup scripts ship inside a code-signed `Syrinx.app` — a venv (or a stray pip scratch file) written beside them adds a file under `Contents/` and breaks the bundle's resource seal. Linux gained the move for symmetry; venvs at the legacy beside-the-script location keep being found (see below). |
 | `SYRINX_VC_SETUP_DIR` | Escape hatch: look for the setup scripts here instead of walking ancestors. |
 | `SYRINX_VC_SETUP_TIMEOUT` | Whole-install timeout in seconds (default **5400**). Exceeding it kills the child and reports `"error"`. |
+
+**Where the venv lands, and where it is looked for.** A setup builds
+`<data>/<setup_id>/.venv-<stem>`. The engine probes **two** locations, best
+first: that one, then the legacy `engine/.venv-<stem>` (win32:
+`engine\.venv-<stem>`) beside the script, so a venv built before the move — or
+by a developer running the script by hand with no `SYRINX_VC_VENV_DIR` set —
+keeps working instead of asking for a multi-GB reinstall. When both exist, the
+one carrying the setup's landmark package wins, so a reinstall torn open in its
+`torch` stage cannot shadow a working venv at the other location. The probe is
+on the *interpreter* and follows symlinks: `python -m venv` on POSIX symlinks
+`bin/python` at the interpreter that built it, which for an install driven by
+the packaged macOS app is a path inside `Syrinx.app` — move or delete the
+bundle and the row simply reads "not installed" and offers Install again.
+
+**Prerequisite: git.** `"vevo"` clones Amphion and `"luxtts"` installs two
+`git+https` pins, so both need `git` on `PATH`. It is checked *before* the first
+download on every platform. win32 installs it (below); POSIX fails the setup
+immediately with a per-OS sentence — macOS names `xcode-select --install`
+(`/usr/bin/git` is already there as a Command Line Tools stub), Linux names the
+distribution's package.
 
 **Windows prerequisite bootstrap.** A stock Windows box has neither a
 venv-capable Python nor Git, so on win32 (and only after the user has consented

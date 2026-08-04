@@ -19,9 +19,9 @@ and it must never drag torch into the Models tab's status query.
 Three environment variables steer it (all documented in ``docs/RPC-PROTOCOL.md``):
 
 * ``SYRINX_VC_VENV_DIR`` — where the setup script puts its ``.venv-<x>``. Unset
-  means "beside the script", which is exactly today's Linux behavior; the engine
-  only sets it on Windows, where nesting a venv under an installed tree's
-  ``site-packages`` blows past MAX_PATH.
+  means "beside the script", which is what a human running the script by hand
+  has always got; the engine now sets it on **every** platform, to a per-setup
+  slice of the data dir (see :func:`venv_root`).
 * ``SYRINX_VC_SETUP_DIR`` — escape hatch pointing at the scripts directly, for
   layouts the ancestor walk below does not anticipate.
 * ``SYRINX_VC_SETUP_TIMEOUT`` — seconds before a wedged install is killed.
@@ -148,6 +148,17 @@ _NO_PYTHON_HINTS = {
 }
 
 
+# The same shape, for the other prerequisite. macOS names xcode-select rather
+# than git-scm.com on purpose: /usr/bin/git is already there as a stub, one
+# command turns it into a real git, and sending a Mac user to a downloadable
+# installer would leave two gits on the box.
+_NO_GIT_HINTS = {
+    "darwin": "run `xcode-select --install` in Terminal to get Apple's command "
+              "line tools, then click Install again.",
+    "linux": "install your distribution's git package, then click Install again.",
+}
+
+
 def _no_python() -> str:
     return _NO_PYTHON_HINTS.get(_PLATFORM, "install Python 3.12, then click Install again.")
 
@@ -172,11 +183,28 @@ def amphion_dir() -> Path:
 
 
 def venv_root(setup_id: str) -> Path:
-    """The directory a setup's venv is created *inside* on Windows.
+    """The directory a setup's venv is created *inside*. Every platform.
 
-    Under the data dir rather than beside the script: an installed Syrinx puts
-    the engine at ``…\\engine\\.venv\\Lib\\site-packages``, and a second venv
-    nested under that overflows MAX_PATH the moment pip unpacks torch.
+    Under the data dir rather than beside the script. Windows moved first, for
+    length: an installed Syrinx puts the engine at
+    ``…\\engine\\.venv\\Lib\\site-packages``, and a second venv nested under
+    that overflows MAX_PATH the moment pip unpacks torch. macOS forced the same
+    move for a harder reason — a shipped Syrinx.app is *code-signed*, and a
+    signature seals a hash of every file under ``Contents/``. Creating a
+    ``.venv-luxtts`` beside the setup script inside the bundle does not merely
+    look untidy: ``codesign --verify`` flips to "file added" on the spot, and a
+    bundle whose seal is broken eventually loses its TCC grants (the
+    microphone, the system-audio tap, Accessibility) because the designated
+    requirement no longer matches.
+
+    Applied to **all** POSIX rather than gated on ``darwin``, so there is one
+    placement rule and not three. Linux is the platform that could have kept
+    the old location — it installs from a checkout, which nobody signs — but a
+    per-OS split would mean the beside-the-script layout survived in exactly
+    one place and had to be reasoned about forever. It costs Linux nothing:
+    :func:`venv_candidates` still finds venvs at the old location, and a
+    developer running ``bash engine/setup-vevo.sh`` by hand (no
+    ``SYRINX_VC_VENV_DIR`` in the environment) still gets one there.
     """
     return data_dir() / SETUPS[setup_id].subdir
 
@@ -185,11 +213,22 @@ def script_path(setup_id: str) -> "Path | None":
     """The setup script for *setup_id* on this OS, or None if it wasn't shipped.
 
     ``SYRINX_VC_SETUP_DIR`` wins outright. Otherwise walk up from the package
-    dir: a checkout finds ``engine/`` one level up, while an installed Windows
-    tree sits at ``engine\\.venv\\Lib\\site-packages\\syrinx_engine`` and finds
-    it at four. Five levels is one more than any layout we ship, and returning
-    None (rather than guessing) is what lets the caller say "this build shipped
-    without the setup scripts" instead of failing with a confusing spawn error.
+    dir. Three layouts have to land inside the walk:
+
+    * a checkout — ``engine/syrinx_engine`` → ``engine/`` at **one**;
+    * the installed Windows tree —
+      ``engine\\.venv\\Lib\\site-packages\\syrinx_engine`` → **four**;
+    * the macOS bundle —
+      ``Contents/Resources/engine/.venv/lib/python3.12/site-packages/syrinx_engine``
+      → **five**, which is the whole budget. It is deliberately not raised for
+      headroom: five is exactly the deepest layout we ship, one more level
+      would start matching directories no layout of ours owns, and
+      ``tests/test_vcsetup.py`` pins each of the three so a future layout that
+      buries the package deeper fails there rather than in the field.
+
+    Returning None (rather than guessing) is what lets the caller say "this
+    build shipped without the setup scripts" instead of failing with a
+    confusing spawn error.
     """
     s = SETUPS.get(setup_id)
     if s is None:
@@ -209,33 +248,23 @@ def script_path(setup_id: str) -> "Path | None":
 def venv_candidates(setup_id: str) -> "list[Path]":
     """Every interpreter path a setup's venv could plausibly live at, best first.
 
-    POSIX has exactly one — beside the script, byte-identical to before this
-    module existed. Windows has two because the venv root moved: the data-dir
-    location is what the engine asks for now, and the legacy beside-the-script
-    location keeps venvs built by hand before this landed working.
+    Two on every platform, and the same two for the same reason: the data-dir
+    location (:func:`venv_root`) is what the engine asks for now, and the
+    legacy beside-the-script location is kept as a lower-priority candidate so
+    a venv that already exists — hand-built by a developer, or built by a
+    Syrinx from before the move — keeps being found instead of silently
+    reading as "not installed" and asking for a multi-GB reinstall.
+
+    One list for both OSes rather than a branch: the only per-OS fact left is
+    where a venv keeps its interpreter, which is the ``rel`` tuple.
     """
     s = SETUPS[setup_id]
-    if _IS_WIN:
-        return [
-            venv_root(setup_id) / f".venv-{s.venv}" / "Scripts" / "python.exe",
-            engine_dir() / f".venv-{s.venv}" / "Scripts" / "python.exe",
-        ]
-    return [engine_dir() / f".venv-{s.venv}" / "bin" / "python"]
-
-
-def venv_python(setup_id: str) -> "Path | None":
-    """The venv's interpreter, or None when the setup hasn't been run.
-
-    Checking the *interpreter* rather than the venv directory is deliberate: a
-    torn install (killed mid-``pip``, or a cancel) leaves the directory behind
-    and the old directory-existence check called that "installed".
-    """
-    if setup_id not in SETUPS:
-        return None
-    for cand in venv_candidates(setup_id):
-        if cand.exists():
-            return cand
-    return None
+    rel = ("Scripts", "python.exe") if _IS_WIN else ("bin", "python")
+    name = f".venv-{s.venv}"
+    return [
+        venv_root(setup_id).joinpath(name, *rel),
+        engine_dir().joinpath(name, *rel),
+    ]
 
 
 def site_packages(venv_dir: Path) -> "list[Path]":
@@ -259,6 +288,40 @@ def _has_landmark(s: _Setup, python: Path) -> bool:
     in — not whichever candidate we would prefer today.
     """
     return any((sp / s.landmark).is_dir() for sp in site_packages(python.parent.parent))
+
+
+def venv_python(setup_id: str) -> "Path | None":
+    """The venv's interpreter, or None when the setup hasn't been run.
+
+    Checking the *interpreter* rather than the venv directory is deliberate: a
+    torn install (killed mid-``pip``, or a cancel) leaves the directory behind
+    and the old directory-existence check called that "installed".
+
+    ``exists()`` follows symlinks, and that is load-bearing on macOS rather
+    than incidental. ``python -m venv`` on POSIX symlinks ``bin/python`` at the
+    interpreter it was run from, which for an install driven by the packaged
+    app is a path *inside* ``Syrinx.app``. Move or delete the bundle and that
+    symlink dangles — ``exists()`` says False, this candidate is skipped, and
+    the row reads "not installed" and offers Install again. That is the failure
+    mode we want: a dead symlink must never be handed to a worker, where it
+    would surface as an ``ENOENT`` from ``posix_spawn`` with no explanation.
+
+    When more than one candidate is present the landmark decides, which is a
+    guard the second candidate created. A torn install at the data-dir location
+    (venv made, ``pip install torch`` died) would otherwise shadow a perfectly
+    good legacy venv beside the script and take a working engine away from
+    someone who had one — the exact "installed but not usable" window
+    :func:`installed` exists to close, re-opened at the other end. Preferring a
+    candidate that carries the landmark closes it again; with nothing to choose
+    between (no landmark anywhere) the order in :func:`venv_candidates` stands.
+    """
+    if setup_id not in SETUPS:
+        return None
+    found = [c for c in venv_candidates(setup_id) if c.exists()]
+    if not found:
+        return None
+    s = SETUPS[setup_id]
+    return next((c for c in found if _has_landmark(s, c)), found[0])
 
 
 def installed(setup_id: str) -> bool:
@@ -355,6 +418,36 @@ def _base_python() -> str:
     return ""
 
 
+def _bundled_python() -> str:
+    """Our own interpreter, but only when it is the one shipped inside a
+    macOS ``.app`` — otherwise ``""``.
+
+    A packaged Syrinx carries a whole relocatable CPython 3.12 at
+    ``Syrinx.app/Contents/Resources/engine/.venv``, and that is the interpreter
+    the worker venvs should be built from. Any CPython 3.12 would *work* — a
+    worker venv installs its own torch and its own everything, and shares
+    nothing with ours but a C ABI — so this is not correctness, it is
+    hermeticity: the bundled interpreter is the only 3.12 on the machine whose
+    existence is guaranteed by the app being there at all.
+
+    Without this, the PATH probe below decides, and what it finds depends on
+    how the app was started. LaunchServices hands a Finder-launched app a
+    four-entry PATH with no ``python3.12`` on it, so Finder already lands here
+    via :func:`_base_python`; a shell-launched one inherits the user's PATH and
+    can land on a brew or uv 3.12 instead. Same app, same click, two different
+    interpreters underneath a 4 GB install is not a difference worth having —
+    especially since the alternative is an interpreter the user can
+    ``brew uninstall`` out from under a venv that symlinks into it.
+
+    The substring test rather than a ``sys.platform`` check plus a path walk:
+    ``.app/Contents/`` is the one thing that is true of a bundled interpreter
+    and false of every checkout, uv store and Homebrew prefix. It is empty on
+    Linux and on a macOS dev checkout, so the ladder below is unchanged there.
+    """
+    base = _base_python()
+    return base if ".app/Contents/" in base else ""
+
+
 def _uv_python() -> str:
     """What ``uv python find 3.12`` points at, or ``""`` — guarded end to end.
 
@@ -380,22 +473,30 @@ def _uv_python() -> str:
 
 
 def _posix_python_candidates():
-    """The POSIX probe order, best first — a generator because step 3 costs a
-    subprocess of its own, which a box that answered at step 1 must not pay.
+    """The POSIX probe order, best first — a generator because the last step
+    costs a subprocess of its own, which a box that answered earlier must not pay.
 
+    0. The interpreter inside our own ``.app``, when there is one (see
+       :func:`_bundled_python`). Nothing else on a user's Mac is as certain to
+       still be there tomorrow, and a packaged app that resolved differently
+       depending on whether it was double-clicked or run from a terminal would
+       be needlessly hard to support. Empty everywhere else, so 1–3 below are
+       untouched on Linux and in a dev checkout.
     1. ``python3.12`` on PATH. This is what the setup scripts' own
        ``${SYRINX_*_PYTHON:-python3.12}`` default has always resolved to, so
        probing it first keeps Linux landing on the exact same interpreter it
        lands on today — the change is a no-op there by construction.
     2. Our own base interpreter (see :func:`_base_python`). This is the macOS
-       fix: the app's LaunchServices environment hands the engine a four-entry
-       PATH with no ``~/.local/bin`` in it, so on a uv-managed Mac step 1 finds
-       nothing and the script died with "python3.12: command not found" (field
-       report, 2026-07-30) even though a perfectly good 3.12 was running it.
+       *checkout* fix: the app's LaunchServices environment hands the engine a
+       four-entry PATH with no ``~/.local/bin`` in it, so on a uv-managed Mac
+       step 1 finds nothing and the script died with "python3.12: command not
+       found" (field report, 2026-07-30) even though a perfectly good 3.12 was
+       running it.
     3. ``uv python find 3.12`` — the last resort for a 3.12 that exists but is
        neither on PATH nor ours.
     """
-    for finder in (lambda: shutil.which("python3.12"), _base_python, _uv_python):
+    for finder in (_bundled_python, lambda: shutil.which("python3.12"),
+                   _base_python, _uv_python):
         found = finder()
         if found:
             yield [found]
@@ -495,9 +596,22 @@ def ensure_git(on_stage=None) -> str:
     works). A fresh winget install of Git updates the machine PATH, but our own
     environment block was captured at engine start-up and will not see it —
     hence the explicit prepend rather than trusting inheritance.
+
+    Windows is the only platform we *install* on. Everywhere else this is a
+    pre-flight: it fails the setup before the first download rather than
+    letting ``git clone`` (vevo) or a ``pip install git+https://`` (luxtts) die
+    somewhere in the middle of a multi-GB install with a message about a
+    resolver. macOS deliberately does not vendor git — ``/usr/bin/git`` is a
+    stub that installs the Xcode Command Line Tools on first use, so a bare Mac
+    gets a system dialog and one command, not a broken app.
     """
     if _git_works("git"):
         return ""
+    if not _IS_WIN:
+        raise VcSetupError(
+            "Git is needed to fetch this engine's source but is not installed "
+            f"— {_NO_GIT_HINTS.get(_PLATFORM, _NO_GIT_HINTS['linux'])}"
+        )
     winget = _winget()
     if not winget:
         raise VcSetupError(
@@ -713,15 +827,22 @@ class VcSetupManager:
         # same one the bare name already resolved to, so nothing moves.
         env[s.py_env] = resolve_python(s.id, stage)
 
-        if _IS_WIN:
-            if s.needs_git:
-                extra_path = ensure_git(stage)
-                if extra_path:
-                    env["PATH"] = extra_path + os.pathsep + env.get("PATH", "")
-            # Windows only — on POSIX the venv stays beside the script, which is
-            # where the backends look and is byte-identical to today.
-            env["SYRINX_VC_VENV_DIR"] = str(venv_root(s.id))
-            Path(env["SYRINX_VC_VENV_DIR"]).mkdir(parents=True, exist_ok=True)
+        # Also every platform, since phase 3 of the macOS packaging campaign.
+        # The scripts' `${SYRINX_VC_VENV_DIR:+…/}` expansion means unset is
+        # still "beside the script" for a human running one by hand; setting it
+        # here is what keeps an app-driven install out of a signed .app bundle
+        # (macOS) and off the far side of MAX_PATH (Windows). See venv_root.
+        #
+        # Created before the child starts rather than left to `python -m venv`:
+        # the script asks for `$SYRINX_VC_VENV_DIR/.venv-<x>`, and venv only
+        # makes the LAST component of that path.
+        env["SYRINX_VC_VENV_DIR"] = str(venv_root(s.id))
+        Path(env["SYRINX_VC_VENV_DIR"]).mkdir(parents=True, exist_ok=True)
+
+        if s.needs_git:
+            extra_path = ensure_git(stage)
+            if extra_path:
+                env["PATH"] = extra_path + os.pathsep + env.get("PATH", "")
 
         log_path.parent.mkdir(parents=True, exist_ok=True)
         tail: "deque[str]" = deque(maxlen=40)
@@ -730,7 +851,17 @@ class VcSetupManager:
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
             env=env,
-            cwd=str(script.parent),
+            # The venv root, NOT the script's directory. That used to be the
+            # same answer and is not any more: on macOS the script's directory
+            # is inside a code-signed Syrinx.app, and a setup child spends its
+            # life running pip and git — tools that write scratch files
+            # relative to cwd when they feel like it (a legacy sdist build
+            # dir, an egg-info, a git lock). One of those landing under
+            # Contents/ breaks the bundle's resource seal exactly as surely as
+            # the venv would have. The scripts `cd` for themselves too, to the
+            # same place and for the same reason; both are needed, because
+            # neither can assume the other ran.
+            cwd=env["SYRINX_VC_VENV_DIR"],
             **_NO_WINDOW,
         )
         self._procs[s.id] = proc

@@ -16,7 +16,7 @@ import numpy as np
 
 from . import detect_device
 from .. import chunking, vcsetup
-from ..paths import worker_log_path
+from ..paths import data_dir, worker_log_path
 
 log = logging.getLogger("syrinx.engine.tts.luxtts")
 
@@ -38,9 +38,9 @@ class LuxTTSBackend:
     async def _ensure_worker(self) -> None:
         if self._proc is not None and self._proc.returncode is None:
             return
-        # Resolved per launch, never cached at import: the venv's location is
-        # per-OS AND per-layout (Windows puts it under the data dir to dodge
-        # MAX_PATH), and the Models tab can build it while the engine is already
+        # Resolved per launch, never cached at import: the venv lives under the
+        # data dir on every platform now but may still be found at the legacy
+        # beside-the-script location, and the Models tab can build it while the engine is already
         # running — the user should be able to speak immediately afterwards
         # without restarting Syrinx. vcsetup owns that knowledge for all three
         # isolated-venv engines, so the backend never guesses a path again.
@@ -52,11 +52,20 @@ class LuxTTSBackend:
             )
         _STDERR_LOG.parent.mkdir(parents=True, exist_ok=True)
         errfile = open(_STDERR_LOG, "ab")
+        # Pinned cwd, for the reason seed_vc.py pins one: an ML package that
+        # writes a relative path (a checkpoint dir, a cache, a debug dump) puts
+        # it wherever the engine happened to start, and for the packaged app
+        # that could be inside a code-signed Syrinx.app. Inheriting was safe by
+        # luck — Finder starts an app at "/" — and this makes it safe by
+        # construction.
+        work_dir = data_dir() / "luxtts"
+        work_dir.mkdir(parents=True, exist_ok=True)
         self._proc = await asyncio.create_subprocess_exec(
             str(lux_py), str(_WORKER),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=errfile,
+            cwd=str(work_dir),
         )
         log.info("LuxTTS worker started (pid %s)", self._proc.pid)
 
