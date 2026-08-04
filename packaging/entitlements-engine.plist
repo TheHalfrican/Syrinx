@@ -1,0 +1,120 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	Entitlements for the *embedded interpreter* of the self-contained bundle —
+	Contents/Resources/engine/.venv/bin/python3.12, the process the launcher's
+	shim execs and the one that actually runs the ML stack. Applied by
+	scripts/build-macos.sh together with codesign's `options runtime`; the
+	vendored `sox` binary in Contents/Resources/engine/tools/bin gets the same
+	file, because it is the only other Mach-O in the bundle that is an
+	executable rather than a library.
+
+	This is the second entitlements file that packaging/entitlements-app.plist's
+	closing comment promised. Everything here is a permission the *interpreter*
+	needs and the Rust binary does not; nothing here belongs in that file, and
+	the app binary must not gain any of it to save a plist.
+
+	Mind the prose, exactly as in entitlements-app.plist: a double hyphen is
+	illegal inside an XML comment, and while plutil lints such a file happily,
+	the parser codesign hands it to (AMFIUnserializeXML) rejects it outright
+	with a bare "syntax error near line N". Write flag names without their
+	leading dashes.
+
+	NOT sandboxed, for the same reasons the app is not: the engine reads and
+	writes audio anywhere the user points it, spawns isolated worker venvs, and
+	talks to Core Audio directly.
+
+	Plain .so / .dylib files — the several hundred that pip wheels drop into
+	site-packages, plus torch's own lib dir — get *no* entitlements. An
+	entitlement is a property of a main executable's code signature; a library
+	loaded into someone else's process inherits that process's entitlements and
+	its own would be ignored. They are signed (with the same identity, so the
+	seal holds) and nothing more.
+-->
+<plist version="1.0">
+<dict>
+	<!--
+		The one that makes an embedded CPython work at all.
+
+		The hardened runtime refuses to let a process dlopen any Mach-O whose
+		signature does not chain to the same Team ID as the process's own (or
+		to Apple). Every .so in every pip wheel is signed by its wheel builder,
+		by the linker's ad hoc signature, or by nobody — none of which is us.
+		Without this flag the first `import numpy` dies in dyld with
+		"code signature invalid", and there is no way to hear about it earlier:
+		the check happens at load, not at launch.
+
+		Re-signing the whole wheel tree with our identity (which build-macos.sh
+		does anyway, for the resource seal) does not remove the need. Library
+		validation compares Team IDs, and a self-signed certificate has no Team
+		ID at all, so even a uniformly re-signed tree fails the comparison. A
+		real Developer ID build would have one and could in principle drop this
+		flag, but only if every last .so were re-signed with it, which is
+		exactly what we do and still cannot verify from here. Keep the flag.
+	-->
+	<key>com.apple.security.cs.disable-library-validation</key>
+	<true/>
+
+	<!--
+		llvmlite / numba. librosa (pulled in by kokoro and by the voice
+		conversion paths) JIT compiles hot loops through numba, which allocates
+		its code pages through LLVM's MCJIT memory manager. That manager asks
+		for writable memory and then makes it executable, and it does so
+		WITHOUT the MAP_JIT flag that com.apple.security.cs.allow-jit is scoped
+		to. Under the hardened runtime that transition is refused and the
+		process takes SIGKILL (Namespace CODESIGNING) at first compile, not at
+		import, so it surfaces as "the engine died halfway through a
+		conversion" rather than as a load error.
+
+		allow-jit would be the tighter flag and is deliberately NOT used: it
+		only covers MAP_JIT mappings, which is not what MCJIT makes. This is
+		the entitlement Apple documents for exactly this case (unsigned
+		executable memory from a JIT that predates MAP_JIT).
+	-->
+	<key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+	<true/>
+
+	<!--
+		The microphone and the system audio tap, again — and "again" is the
+		point. The hardened runtime is per-process and does not propagate
+		across posix_spawn, so the entitlement the app carries buys the engine
+		nothing: the interpreter is a separate hardened process and needs its
+		own pass through the same HAL gate, or every Core Audio *input* stream
+		it opens is dead before TCC is ever consulted.
+
+		TCC responsibility does flow the other way. The engine is spawned by
+		Syrinx.app, so tccd attributes its recording to the app's bundle
+		identity and answers it with the app's grant, with the app's usage
+		strings on the prompt. The engine has no Info.plist and needs none.
+		Two different mechanisms, both required, only one of them inherited.
+
+		Note the spelling: com.apple.security.device.microphone is the App
+		Sandbox key and does nothing here. This is the one the runtime honours.
+	-->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+
+	<!--
+		Considered and left out:
+
+		* com.apple.security.cs.allow-dyld-environment-variables — the launcher
+		  sets PATH and a handful of SYRINX_/PYTHON_ variables, none of which
+		  are DYLD_*. The vendored sox closure is re-pointed with
+		  install_name_tool at build time precisely so that no DYLD_LIBRARY_PATH
+		  is needed at runtime; adding the flag would make that laziness
+		  possible, which is the wrong direction.
+
+		* com.apple.security.cs.allow-jit — see the MCJIT note above. It does
+		  not cover what numba does, and holding both flags would be strictly
+		  more permission for no behaviour.
+
+		* com.apple.security.cs.disable-executable-page-protection — the
+		  nuclear option that turns off W^X wholesale.
+		  allow-unsigned-executable-memory is enough for MCJIT; this is not
+		  needed and would be a much larger hole.
+
+		* com.apple.security.automation.apple-events, .files.user-selected.* and
+		  the rest of the App Sandbox keys — meaningless outside a sandbox.
+	-->
+</dict>
+</plist>

@@ -2070,3 +2070,83 @@ why the engine's capture is attributed to Syrinx.app and keeps working.
 Tests 128 + clippy clean (unchanged — no app code touched). NOAH'S
 ONE-TIME MIGRATION PENDING: five tccutil resets, re-grant each prompt
 once, grants then survive every rebuild.
+
+**2026-08-04 (packaging) — the self-contained fat bundle: Syrinx.app
+runs on a Mac that has never seen the repo.** Packaging campaign
+phase 2. New `scripts/build-macos.sh [--skip-build] [--no-dmg]` →
+dist/Syrinx.app (1.7 GB) + dist/Syrinx-0.1.0.dmg (807 MB UDZO,
+/Applications-symlink drag layout); ~2 min warm-cache build, and the
+dev installer stays for the two-minute rebuild loop. Shape: embedded
+python-build-standalone CPython 3.12.13 COPIED from uv's managed store
+(same interpreter the pins were proven on down to the patch level —
+every .so and .pyc is ABI-keyed cp312; uv's EXTERNALLY-MANAGED marker
+deleted from the copy, pip refuses the prefix otherwise and
+--break-system-packages would assert the opposite of the truth) at
+Contents/Resources/engine/.venv (".venv" is a lie of convenience
+matching the Windows bundle and engine_proc's probe vocabulary;
+Resources-not-Helpers measured fine under --strict on 26.5); launcher
+computes SYRINX_ENGINE_CMD from $0 — probe #1 is load-bearing, the
+exe-ancestor probe can never reach Resources; bin/ PRUNED to
+interpreter+aliases+a 3-line /bin/sh shim `syrinx-engine` that execs
+sibling python -m syrinx_engine (kills pip's absolute-shebang class
+outright — every pip console script bakes the build path); pins =
+`pip freeze` from engine/.venv as constraints (THE proven closure, not
+*a* resolve; -e line dropped, pytest/ruff tooling dropped, `name @
+https://` lines split to a second --no-deps file — pip rejects URLs in
+-c), two-pass install (real resolve of wheel[qwen] proves pyproject
+satisfiable at the pins, then --no-deps sweep reproduces the dev
+venv's hume-tada-style deliberate-conflict installs), then a both-ways
+freeze-reconciliation gate. Vendored sox + 13-dylib closure
+(otool -L walk off the pristine Homebrew files, dest names from each
+lib's LC_ID_DYLIB — brew ships libogg.0.8.6.dylib but references say
+libogg.0.dylib; @executable_path/../lib + @loader_path rewrites; env
+-i proof). THREE LEDGER-GRADE FINDINGS: (1) install_name_tool ⇒
+SIGKILL on arm64 — the rewrite invalidates brew's signature and the
+kernel kills exec/dlopen of invalid Mach-Os with NO message (reads
+exactly like a missing dylib); ad-hoc repair signature immediately
+after, real signature supersedes. (2) THE ENGINE PIP-INSTALLS INTO
+ITS OWN BUNDLE AT WARMUP: misaki/en.py:500 `if not
+spacy.util.is_package: spacy.cli.download` — spaCy is NOT an orphan
+(misaki[en] pulls it) and en_core_web_sm is NOT optional; first launch
+of an early build added files under Contents/ and flipped codesign
+--verify from clean to "file added". Fix: ship the 15 MB model via the
+URL-pins file; post-fix a full launch+TTS leaves the seal CLEAN. (3)
+.pyc co_filename leaked the checkout path into 16,757 files —
+compileall -f -s/-p rewrites to /Applications/Syrinx.app/…,
+--invalidation-mode unchecked-hash also makes them copy-proof
+(timestamp .pycs go stale under ditto and Python then wants to write
+inside the seal). Launcher belt-and-suspenders for the seal:
+PYTHONDONTWRITEBYTECODE=1, NUMBA_CACHE_DIR=~/Library/Caches/syrinx/
+numba (librosa cache=True defaults BESIDE the .py), PYTHONNOUSERSITE=1
+(user site must not shadow bundled versions), and the vendored tools
+dir on PATH with /opt/homebrew deliberately absent. Signing: Phase-1
+identity, inside-out, 472 libs + 6 exes in 13 s (batched xargs -n 64
+codesign — per-file processes would take minutes in keychain opens;
+Mach-O discovery by magic number not extension, MH_EXECUTE split at
+offset 12; symlinks skipped, codesign follows them); libraries get
+identity-only (entitlements are a main-executable property), embedded
+python3.12 + sox get runtime + NEW packaging/entitlements-engine.plist
+(disable-library-validation — hardened CPython can't dlopen
+nobody-signed wheel .so; allow-unsigned-executable-memory — llvmlite
+MCJIT; audio-input — hardened runtime doesn't propagate across
+posix_spawn so the ENGINE process needs its own HAL pass while TCC
+responsibility still flows from the app), syrinx-app keeps its Phase-1
+pair, bundle last; --timestamp only when SYRINX_SIGN_IDENTITY came
+from outside (notarization wants it; thousands of network round-trips
+for a self-minted cert don't). PROOFS: strict verify passes in dist/,
+inside the DMG, and at /Applications; DR byte-identical to the dev
+bundle (same ID + same cert = Noah's grants carried, zero prompts);
+env -i engine boots + binds RPC on bundle files alone (probe sets
+SYRINX_DATA_DIR *and* SYRINX_RPC_ENDPOINT — discovery_path falls back
+to the pre-override default dir, one env var would drop rpc.json onto
+a live dev engine's); LIVE at /Applications: backend=mps, models
+loaded 6 s, RPC Speak → 3.175 s audio → SpeakEnded, TTS ROUND TRIP OK;
+absolute-path grep 6 hits all upstream-inert (scipy LC_RPATHs to its
+gcc build box, soundfile's unused brew fallback branch, _sysconfigdata
+build prefix, rustc paths in syrinx-app). NOT SHIPPED, on purpose:
+setup-{seedvc,vevo,luxtts}.sh — POSIX vcsetup puts worker venvs BESIDE
+the script, i.e. inside the seal; script_path()→None makes the Models
+tab say the build shipped without them. Vevo/Seed-VC/LuxTTS therefore
+unavailable in the packaged app UNTIL PHASE 3 relocates the venvs to
+the data dir (Windows venv_root() precedent). Tests 128 + clippy
+clean, no Rust touched; engine/.venv untouched (Jul-29 mtimes).
