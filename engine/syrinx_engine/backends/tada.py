@@ -26,7 +26,6 @@ import numpy as np
 
 from . import detect_device, empty_device_cache, torch_device
 from .. import chunking
-from ..dac_shim import install_dac_shim
 from ..paths import data_dir
 
 log = logging.getLogger("syrinx.engine.tts.tada")
@@ -63,6 +62,11 @@ class TadaBackend:
         return torch_device(self.device)
 
     def _load_sync(self) -> None:
+        # Imported here, not at module top: dac_shim imports torch the moment
+        # it loads, and this module must stay importable torch-free — the CI
+        # suite runs against stand-in collaborators and never installs torch.
+        from ..dac_shim import install_dac_shim
+
         install_dac_shim()  # before any tada import
 
         import torch

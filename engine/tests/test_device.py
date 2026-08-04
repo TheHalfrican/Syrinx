@@ -270,14 +270,19 @@ def load_tada(monkeypatch, device, cuda_bf16=True):
             from_pretrained=lambda repo, config, torch_dtype: seen.update(
                 repo=repo, dtype=torch_dtype) or model),
     )
+    # dac_shim is stood in at the sys.modules level, not setattr'd on the
+    # backend: _load_sync imports it lazily (the real one imports torch the
+    # moment it loads, and this suite runs torch-free), so there is no module
+    # attribute to patch until it is too late.
+    shim = types.SimpleNamespace(install_dac_shim=lambda: None)
     for name, mod in [("torch", torch_mod), ("huggingface_hub", hub),
+                      ("syrinx_engine.dac_shim", shim),
                       ("tada", types.SimpleNamespace()),
                       ("tada.modules", types.SimpleNamespace()),
                       ("tada.modules.aligner", aligner),
                       ("tada.modules.encoder", encoder),
                       ("tada.modules.tada", tada_mod)]:
         monkeypatch.setitem(sys.modules, name, mod)
-    monkeypatch.setattr(tada_backend, "install_dac_shim", lambda: None)
 
     backend = tada_backend.TadaBackend()
     backend.device = device

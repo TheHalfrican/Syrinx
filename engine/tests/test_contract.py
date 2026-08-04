@@ -87,7 +87,7 @@ async def exercise_download_signal_flow(a):
 
     a.core._models.download = fake_download
     assert await a.call("DownloadModel", "kokoro") is True
-    await a.wait_for("ModelProgress")
+    await a.wait_for("ModelProgress", count=2)
     progs = [p for (n, p) in a.notifications if n == "ModelProgress"]
     assert progs == [["kokoro", 0.5, "downloading"], ["kokoro", 1.0, "done"]]
 
@@ -100,7 +100,7 @@ async def exercise_vc_setup_signal_flow(a):
 
     a.core._vcsetup.install = fake_install
     assert await a.call("InstallVcEngine", "seedvc") is True
-    await a.wait_for("VcSetupProgress")
+    await a.wait_for("VcSetupProgress", count=2)
     progs = [p for (n, p) in a.notifications if n == "VcSetupProgress"]
     assert progs == [
         ["seedvc", "creating the isolated environment…", "running", ""],

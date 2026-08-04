@@ -36,9 +36,14 @@ class EngineCallError(Exception):
 
 
 class _Adapter:
-    async def wait_for(self, name, timeout=2.0):
+    async def wait_for(self, name, timeout=2.0, count=1):
+        # count matters on the RPC transport: notifications arrive frame by
+        # frame over a real websocket, so "the first ModelProgress is here"
+        # says nothing about the second. An exercise that asserts on the full
+        # list must wait for the full list, or it races the read loop and
+        # flakes — reliably on slow CI runners, rarely on a warm dev box.
         async def poll():
-            while not any(n == name for n, _ in self.notifications):
+            while sum(1 for n, _ in self.notifications if n == name) < count:
                 await asyncio.sleep(0.005)
         await asyncio.wait_for(poll(), timeout)
 
