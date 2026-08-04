@@ -1997,3 +1997,76 @@ unverified (pill follows NSScreen.mainScreen; switch to the
 mouse-containing screen if it bites); pill appearance had only the
 numeric geometry probe — Noah's eyes are the first real look; sound
 choices are one-liners in DictationCue::mac_sound if Glass wears thin.
+
+**2026-08-04 (packaging) — the dev bundle gets a signing identity that
+holds still; TCC grants stop dying on rebuild.** Packaging campaign
+phase 1 (of: identity → self-contained fat bundle → runtime writes out
+of the sealed bundle → DMG verification matrix → docs). The disease,
+proven live the same morning: Noah's dictation went Blocked after a
+reinstall and stayed Blocked through every Accessibility checkbox
+toggle — ad-hoc signing has no certificate to name, so TCC's designated
+requirement falls back to `cdhash H"…"`, i.e. the binary itself; every
+rebuild orphans every grant behind checkboxes that rewrite the same dead
+row (`tccutil reset Accessibility sh.syrinx.app` was the session's
+recovery). The cure: `scripts/dev-signing-identity.sh` mints a
+self-signed codeSigning cert ("Syrinx Dev Signing", RSA-2048/SHA-256,
+EKU critical codeSigning — codesign refuses identities without it, with
+an error that names no reason) in a DEDICATED keychain
+(~/Library/Keychains/syrinx-signing.keychain-db, fixed open password —
+nothing secret, prompt-free is the requirement; --remove is one unlink
+and restores the search list). Prompt-free mechanics that took
+research: `security import -A -T codesign` is only half —
+post-10.12 keys also carry a partition list, so
+`set-key-partition-list -S apple-tool:,apple:,codesign:` or first use
+prompts anyway; OpenSSL 3 writes PBES2 PKCS#12 that Security.framework
+can't read (needs -legacy) while LibreSSL — /usr/bin/openssl — has no
+such flag and writes the old format natively, so try/fall-back; the
+cert is deliberately NEVER trusted (find-identity reports "0 valid
+identities" + CSSMERR_TP_NOT_TRUSTED and that is FINE — codesign signs
+with the key, trust evaluation never runs; add-trusted-cert would throw
+an auth dialog and buy nothing); the keychain locks at login (not the
+login password), so the installer runs `--unlock` pre-flight or
+codesign throws a GUI dialog mid-build. install-macos-dev.sh: identity
+resolution SYRINX_SIGN_IDENTITY (the Developer-ID hook — the only thing
+that changes on that day) → "Syrinx Dev Signing" if present → ad-hoc +
+hint (fallback kept verbatim, not half-modernised); signing is now
+per-binary and inside-out, NO --deep (the bundle signature seals a
+RECORD of nested code — cdhash + requirement — so syrinx-app must be
+final first): syrinx-app gets `--options runtime` + NEW
+packaging/entitlements-app.plist + `-i sh.syrinx.app` (identifier
+pinned so binary DR == bundle DR == what tccutil names), then the
+bundle; the shell launcher can't carry hardened runtime (Mach-O load
+command) but IS sealed — edit it in place and verification fails.
+Entitlements: exactly ONE — com.apple.security.device.audio-input,
+which the hardened runtime gates BEFORE TCC (no prompt, dead device)
+and which covers BOTH mic and the CATap (the tap is read through a
+private aggregate's input streams — same HAL gate); every omission
+documented in-file (CGEventPost/RegisterEventHotKey have no runtime
+gate; JIT/library-validation exceptions belong to phase 2's embedded
+CPython on its OWN signature, not here). GOTCHA ledgered in the plist
+itself: `--` is illegal inside XML comments — plutil lints it happily
+but AMFIUnserializeXML (what codesign parses entitlements with) fails
+with a bare "syntax error near line N"; write flag names dash-less in
+comments. THE PROOF: two identity-signed installs with the binary
+deliberately changed between them (sha256 c4d8d489→3f73fe48, cdhash
+5ada3865→9508b3a3) produced byte-identical DRs — `identifier
+"sh.syrinx.app" and certificate leaf = H"4973bec4…"` — bundle and
+inner binary both, stable across five installs incl. an ad-hoc detour
+and back. Hardened-runtime self-signed launches fine on 26.5
+(flags=0x10000(runtime)); spctl still rejects (origin=Syrinx Dev
+Signing) — expected, Gatekeeper is Developer ID's job. tccutil service
+names verified EMPIRICALLY on 26.5 (tccutil validates bundle ID before
+service name — probe against an installed bundle or learn nothing):
+Microphone / AudioCapture (the system-audio tap's service —
+"SystemAudioCapture" from 2026 blog posts is NOT valid) / ScreenCapture
+(shares the tap's Settings pane) / Accessibility / PostEvent (shares
+Accessibility's pane) — reset all five in the one-time migration, else
+a stale row hides behind a checkbox. Phase-2 notes: sign the embedded
+tree inside-out, walk every Mach-O explicitly; hardened-runtime CPython
+needs disable-library-validation (pip-wheel .so files are signed by
+nobody) in a SECOND entitlements file; hardened runtime does NOT
+propagate across posix_spawn but TCC responsibility DOES — which is
+why the engine's capture is attributed to Syrinx.app and keeps working.
+Tests 128 + clippy clean (unchanged — no app code touched). NOAH'S
+ONE-TIME MIGRATION PENDING: five tccutil resets, re-grant each prompt
+once, grants then survive every rebuild.

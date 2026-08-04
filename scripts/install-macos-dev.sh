@@ -24,6 +24,22 @@
 # merely tidy: tccd refuses kTCCServiceAudioCapture outright — no prompt, no
 # error, just a silent tap — when the responsible process has no
 # NSAudioCaptureUsageDescription. A terminal never has one.
+#
+# The bundle gets us an identity; a *certificate* is what makes that identity
+# hold still. TCC keys every grant to the designated requirement of the code
+# that asked, and an ad-hoc signature has no certificate to name, so the DR
+# falls back to the binary's own cdhash — which changes on every rebuild,
+# orphaning the grant behind a checkbox that no longer does anything. Signed
+# with scripts/dev-signing-identity.sh's self-signed cert instead, the DR is
+#
+#     identifier "sh.syrinx.app" and certificate leaf = H"…"
+#
+# and the grants survive rebuilds. Run that script once; this one finds it.
+#
+# Signing is per-binary and hardened, not `--deep`: syrinx-app is signed first
+# with `--options runtime` and packaging/entitlements-app.plist, then the bundle
+# is signed around it. That is the shape a Developer ID build wants, so the day
+# there is one, SYRINX_SIGN_IDENTITY is the only thing that changes.
 
 set -euo pipefail
 
@@ -35,6 +51,8 @@ BUNDLE_ID="sh.syrinx.app"
 LAUNCHER="Syrinx"          # Contents/MacOS/Syrinx — CFBundleExecutable
 APP_BIN="syrinx-app"       # the copied release binary the launcher execs
 BREW_BIN="/opt/homebrew/bin"
+DEV_IDENTITY="Syrinx Dev Signing"          # what scripts/dev-signing-identity.sh makes
+ENTITLEMENTS="packaging/entitlements-app.plist"
 
 if [[ -t 1 ]]; then
     BOLD=$'\033[1m'; RED=$'\033[31m'; GREEN=$'\033[32m'
@@ -82,9 +100,14 @@ Syrinx macOS dev launcher.
 
 usage: scripts/install-macos-dev.sh [--uninstall]
 
-  (no args)     build the release app, assemble Syrinx.app around it, ad-hoc
-                sign it and install it to /Applications (or ~/Applications)
+  (no args)     build the release app, assemble Syrinx.app around it, sign it
+                and install it to /Applications (or ~/Applications)
   --uninstall   delete the installed Syrinx.app
+
+env:
+  SYRINX_SIGN_IDENTITY   codesign identity to use. Defaults to "Syrinx Dev
+                         Signing" when scripts/dev-signing-identity.sh has
+                         made it, and to ad-hoc when nothing else is there.
 
 The engine keeps running from this checkout — see the header comment.
 EOF
@@ -103,6 +126,43 @@ ENGINE_CMD="$ROOT/engine/.venv/bin/syrinx-engine"
 [[ -x "$ENGINE_CMD" ]] || die \
     "engine/.venv/bin/syrinx-engine not found — run the engine setup first:
        cd engine && python3 -m venv .venv && .venv/bin/pip install -e ."
+
+# --------------------------------------------------------------------------
+# signing identity — resolved here, before the build, so the hint about the
+# missing identity lands before the several minutes of cargo rather than after
+#
+#   1. $SYRINX_SIGN_IDENTITY, verbatim — the Developer ID hook. Nothing else in
+#      this script has to change on the day there is one.
+#   2. "Syrinx Dev Signing", if scripts/dev-signing-identity.sh has made it.
+#   3. ad-hoc, with a hint. Still installs, still runs; just goes back to
+#      re-granting everything after every rebuild.
+#
+# The identity's keychain locks itself at login (its password is not the login
+# password), and codesign reaching for a locked key throws a GUI dialog into the
+# middle of a build. --unlock is silent and never fails: if it can't, we simply
+# don't find the identity below and fall through to ad-hoc.
+"$ROOT/scripts/dev-signing-identity.sh" --unlock 2>/dev/null || true
+
+# grep on the whole listing, not on the "Valid identities only" tail: a
+# self-signed cert is untrusted by design, so it is *matching* but never valid,
+# and codesign does not care about the difference.
+if [[ -n "${SYRINX_SIGN_IDENTITY-}" ]]; then
+    SIGN_ID="$SYRINX_SIGN_IDENTITY"
+    SIGN_KIND=identity
+elif security find-identity -p codesigning 2>/dev/null | grep -q "\"$DEV_IDENTITY\""; then
+    SIGN_ID="$DEV_IDENTITY"
+    SIGN_KIND=identity
+else
+    SIGN_ID="-"
+    SIGN_KIND=adhoc
+    hint "no signing identity — falling back to ad-hoc, which re-keys every TCC
+      grant on every rebuild. Fix it once with:
+        scripts/dev-signing-identity.sh"
+fi
+
+if [[ "$SIGN_KIND" == identity ]]; then
+    [[ -f "$ROOT/$ENTITLEMENTS" ]] || die "$ENTITLEMENTS missing — can't sign with the hardened runtime"
+fi
 
 # --------------------------------------------------------------------------
 # version — [workspace.package] version in the workspace Cargo.toml, else 0.1.0
@@ -299,13 +359,53 @@ fi
 ditto "$APP" "$DEST"
 ok "$DEST"
 
-# Ad-hoc (`-s -`) — no Developer ID here. It won't satisfy Gatekeeper for
-# anything downloaded, but it gives the bundle a stable cdhash, which is what
-# TCC keys the microphone grant to. Without it every rebuild can re-prompt.
-log "Ad-hoc signing"
-codesign --force --deep -s - "$DEST" 2>&1 | sed 's/^/  /' || die "codesign failed"
-codesign --verify --deep "$DEST" 2>/dev/null && ok "signature verifies" \
-    || hint "codesign --verify was unhappy; the app still runs, but TCC may re-prompt"
+# Signing, inside out. Order is not a style choice: the bundle's signature seals
+# a *record* of the nested binary — its cdhash and its designated requirement —
+# so syrinx-app has to be final before the bundle is signed around it.
+if [[ "$SIGN_KIND" == identity ]]; then
+    log "Signing as \"$SIGN_ID\""
+
+    # The app binary. This is the one that matters: the launcher execs it, so
+    # this signature — not the bundle's — is the code identity every TCC lookup
+    # and every entitlement check runs against.
+    #
+    # -i pins the identifier to the bundle ID rather than letting codesign
+    # derive "syrinx-app" from the filename. Both would be stable; this one
+    # makes the binary's DR and the bundle's DR say the same thing, and makes
+    # `tccutil reset … sh.syrinx.app` name the thing it is actually resetting.
+    #
+    # No --deep anywhere. --deep re-signs whatever it finds with whatever flags
+    # it was given, which is exactly wrong once different pieces need different
+    # entitlements — Apple has called it unsuitable for shipping for years.
+    codesign --force --options runtime \
+        --entitlements "$ROOT/$ENTITLEMENTS" \
+        -i "$BUNDLE_ID" -s "$SIGN_ID" \
+        "$DEST/Contents/MacOS/$APP_BIN" 2>&1 | sed 's/^/  /' \
+        || die "codesign failed on Contents/MacOS/$APP_BIN"
+    ok "Contents/MacOS/$APP_BIN (hardened runtime + $ENTITLEMENTS)"
+
+    # The bundle. No --options runtime here: CFBundleExecutable is the shell
+    # launcher, and the hardened runtime is a Mach-O load-command flag that a
+    # script cannot carry. The script is not left unsigned by that — it is the
+    # main executable, so it is hashed straight into the CodeDirectory (edit it
+    # in place and the bundle stops verifying), while syrinx-app is sealed
+    # alongside as nested code with its own cdhash and requirement.
+    codesign --force -s "$SIGN_ID" "$DEST" 2>&1 | sed 's/^/  /' \
+        || die "codesign failed on the bundle"
+    ok "$APP_NAME.app"
+
+    codesign --verify --strict --deep "$DEST" 2>/dev/null && ok "signature verifies (--strict --deep)" \
+        || hint "codesign --verify was unhappy; the app still runs, but TCC may re-prompt"
+else
+    # Ad-hoc (`-s -`) — the fallback, kept exactly as it was rather than
+    # half-modernised. --deep and no hardened runtime: with no certificate to
+    # anchor to there is nothing to gain from per-binary signing, and the DR is
+    # a cdhash either way. Runs fine; re-prompts after every rebuild.
+    log "Ad-hoc signing (no identity)"
+    codesign --force --deep -s "$SIGN_ID" "$DEST" 2>&1 | sed 's/^/  /' || die "codesign failed"
+    codesign --verify --deep "$DEST" 2>/dev/null && ok "signature verifies" \
+        || hint "codesign --verify was unhappy; the app still runs, but TCC may re-prompt"
+fi
 
 # Nudge LaunchServices so Spotlight/Launchpad see a fresh install immediately
 # instead of whenever the volume is next scanned.
@@ -314,16 +414,52 @@ LSREGISTER=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 
 # --------------------------------------------------------------------------
 # summary
+#
+# The TCC paragraphs differ by signing kind, and the difference is the whole
+# phase: with a certificate the grants are answered once; ad-hoc, they are
+# answered again after every rebuild.
 
-cat <<EOF
+# A function rather than a variable holding a here-doc: bash re-lexes a here-doc
+# body that sits inside $( ), and prose full of apostrophes does not survive it.
+grants() {
+if [[ "$SIGN_KIND" == identity ]]; then
+    cat <<EOF
+Three permissions get asked for, once each:
 
-${BOLD}$APP_NAME.app is installed.${RESET}
+  ${BOLD}Microphone${RESET}      on first launch. The prompt names Syrinx rather than your
+                  terminal — that is what the bundle buys.
+  ${BOLD}System Audio${RESET}    on the first system-audio recording. A separate grant, under
+                  Privacy & Security > Screen & System Audio Recording; it is
+                  what the native Core Audio tap needs, and no loopback driver
+                  is involved.
+  ${BOLD}Accessibility${RESET}   on the first dictation chord (${BOLD}⌃⌥D${RESET}) — it is what lets Syrinx
+                  type the transcript into whatever app you are in. Until it is
+                  granted the chord records nothing and the ⚙ DICTATION card
+                  says why.
 
-  Location        $DEST
-  Launch          Spotlight/Launchpad ("Syrinx"), or: open -a Syrinx
-  Engine          $ENGINE_CMD
-  Engine logs     ~/Library/Application Support/syrinx/engine.log
+${GREEN}Answer them once and you are done.${RESET} This build is signed with a certificate, so
+each grant keys to
 
+  identifier "$BUNDLE_ID" and certificate leaf = H"…"
+
+instead of to a build hash. Rebuild and reinstall as often as you like — the
+designated requirement is byte-identical every time and the grants hold.
+
+${YELLOW}One-time migration:${RESET} grants made against an earlier ${BOLD}ad-hoc${RESET} build keyed to a
+cdhash this build no longer has. Those rows are dead — they don't re-prompt,
+and toggling the checkbox just rewrites the same stale entry. Clear them once:
+
+  tccutil reset Microphone $BUNDLE_ID
+  tccutil reset AudioCapture $BUNDLE_ID
+  tccutil reset ScreenCapture $BUNDLE_ID
+  tccutil reset Accessibility $BUNDLE_ID
+  tccutil reset PostEvent $BUNDLE_ID
+
+If Syrinx still appears under Privacy & Security > Accessibility afterwards,
+remove it with − and re-add it. Then let each prompt come back one last time.
+EOF
+else
+    cat <<EOF
 First launch will ask for ${BOLD}microphone${RESET} access — that prompt now names Syrinx
 rather than your terminal, which is the point of the bundle. The first
 ${BOLD}system-audio${RESET} recording asks separately, for "System Audio Recording"
@@ -338,11 +474,36 @@ but it does key to the signature, so a reinstall can require re-adding
 Syrinx under Privacy & Security > Accessibility. Until it is granted the
 app records nothing on that chord and the ⚙ DICTATION card says why.
 
+${YELLOW}All of that re-prompting is avoidable${RESET} — it is what an ad-hoc signature costs.
+Run ${BOLD}scripts/dev-signing-identity.sh${RESET} once and reinstall, and the grants stop
+keying to the build hash.
+EOF
+fi
+}
+
+if [[ "$SIGN_KIND" == identity ]]; then
+    SIGNED_AS="$SIGN_ID (hardened runtime)"
+else
+    SIGNED_AS="ad-hoc (no identity)"
+fi
+
+cat <<EOF
+
+${BOLD}$APP_NAME.app is installed.${RESET}
+
+  Location        $DEST
+  Signed          $SIGNED_AS
+  Launch          Spotlight/Launchpad ("Syrinx"), or: open -a Syrinx
+  Engine          $ENGINE_CMD
+  Engine logs     ~/Library/Application Support/syrinx/engine.log
+
+$(grants)
+
 If this checkout lives under ~/Documents, ~/Desktop or ~/Downloads, the very
 first launch also asks for ${BOLD}files-in-Documents${RESET} access — and the app
 sits blank until that dialog is answered (the engine's first file read blocks
 inside the TCC gate, it does not fail). One time only; the grant keys to the
-bundle's signature and survives reinstalls.
+bundle's signature like the rest.
 
 ${YELLOW}Dev bundle caveat:${RESET} the engine runs from this checkout
   $ROOT

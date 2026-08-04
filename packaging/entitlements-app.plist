@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+	Entitlements for Contents/MacOS/syrinx-app — the Rust binary the bundle's
+	launcher execs, and the process every TCC decision is actually made about.
+	Applied by scripts/install-macos-dev.sh together with codesign's
+	`options runtime` flag; the two only mean anything together, because an
+	entitlement here is a *permission to keep* a capability the hardened
+	runtime otherwise revokes, not a permission to gain one.
+
+	Mind the prose: a double hyphen is illegal inside an XML comment, and
+	while plutil lints such a file happily, the parser codesign hands it to
+	(AMFIUnserializeXML) rejects it outright with a bare "syntax error near
+	line N". Write flag names without their leading dashes, as above.
+
+	NOT sandboxed, deliberately. The app spawns the engine out of a venv (dev)
+	or an embedded interpreter (later), reads audio the user points it at
+	anywhere on disk, and posts synthetic keystrokes into other apps. Every one
+	of those is outside a sandbox by construction, and Syrinx is not headed for
+	the Mac App Store.
+
+	This list is short on purpose. An entitlement the binary does not need is a
+	hole in the runtime it is signed with, and unlike an Info.plist key a wrong
+	one here fails silently and late.
+-->
+<plist version="1.0">
+<dict>
+	<!--
+		The one entitlement this binary genuinely needs, and it covers two
+		distinct things:
+
+		1. The microphone. The hardened runtime denies a process any Core Audio
+		   *input* stream unless it holds this, and the denial lands before TCC
+		   is ever consulted — no prompt, no dialog, just a dead device. That is
+		   a separate gate from NSMicrophoneUsageDescription in Info.plist,
+		   which only supplies the prompt's text once TCC does get asked.
+
+		2. The system-audio tap (capture_mac.rs). A CATapDescription tap is
+		   wrapped in a private aggregate device, and reading it means running
+		   an IOProc over that device's *input* streams — the same HAL gate as
+		   the microphone, checked the same way. The tap's own permission
+		   (kTCCServiceAudioCapture, prompted for by
+		   NSAudioCaptureUsageDescription) sits on top of that, not instead of
+		   it: fail the runtime check and the TCC prompt never even fires.
+
+		Note the spelling. `com.apple.security.device.microphone` is the App
+		Sandbox key and does nothing under the hardened runtime; this is the
+		one codesign's runtime honours.
+	-->
+	<key>com.apple.security.device.audio-input</key>
+	<true/>
+
+	<!--
+		Nothing else, and the omissions are researched rather than accidental:
+
+		* CGEventPost / CGEventCreateKeyboardEvent (dictation_mac.rs) — the
+		  hardened runtime does not gate synthetic event posting at all. It is
+		  gated by TCC alone (kTCCServicePostEvent, granted through the
+		  Accessibility pane), and no com.apple.security.* key exists to ask
+		  for it. Denial there is a TCC denial, never a runtime one.
+
+		* Carbon RegisterEventHotKey (the ⌃⌥D chord) — an ordinary Carbon
+		  Event Manager registration. No entitlement, and not even a TCC gate:
+		  it is a global hotkey, not an event tap.
+
+		* The engine child process. Hardened runtime is per-process and does
+		  not propagate across posix_spawn, so the venv's Python inherits none
+		  of this — but it *does* inherit TCC responsibility, which is why the
+		  mic recording the engine performs is attributed to Syrinx.app and
+		  answered by Syrinx's grant.
+
+		* com.apple.security.cs.disable-library-validation,
+		  .allow-unsigned-executable-memory, .allow-jit,
+		  .allow-dyld-environment-variables — pure Rust needs none of them, and
+		  each one weakens the runtime it is attached to. They belong to the
+		  *embedded CPython* of the self-contained bundle phase, on the python
+		  binary's own signature: an interpreter signed with the hardened
+		  runtime cannot dlopen pip-wheel .so files signed by nobody without
+		  disable-library-validation. Put them in a second entitlements file
+		  then; do not put them here to save one.
+	-->
+</dict>
+</plist>
